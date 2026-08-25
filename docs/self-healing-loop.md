@@ -225,3 +225,38 @@ plausible for animals. That is the confound showing through, so the exponent is 
 upper bound on the scale benefit, not evidence of increasing returns. The honest
 summary is that growth is not saturating; the exact size of the scale benefit is
 not identified from observational history.
+
+## The isolation bug that kept recurring
+
+Four bugs in this system had the same shape, and it is worth naming because three of
+them were introduced while building the safety machinery itself:
+
+**Code that believes it is isolated while reaching a module-level real path.**
+
+| where | what it touched | consequence |
+|---|---|---|
+| `test_author.py` budget checks | `spend_today()` reads the real pass log | assertions silently tested the wrong branch, then failed once the agent had really run |
+| `test_vcs.py` final assertion | required no `author/` branch in the real repo | would fail on every genuine authoring pass, and the pre-existing-failure attribution would then stand the agent down permanently |
+| `test_contract_watch.py` | `journal.ALERTS` points at the real `state/alerts.ndjson` | 34 fictional "feed_animals now requires batch_id" breaking alerts reached live operations; the 60s supervisor escalated each with `needs_llm: true` |
+| `canary.revert()` | did git work on the real repo despite a `project` argument | the author suite rewrote live `main` and reverted a real production commit, with all checks green |
+
+The last one is the instructive one. `canary.revert()` accepted `project` so it could
+flip a symlink inside a temp directory, and the git side effect quietly ignored it.
+Worse, `vcs.revert_commit()` moves `main` through a temp worktree and `update-ref`,
+which never touches the working tree -- and `deploy/release.sh` builds from the
+working tree. So the deployment kept running correct code while `main` had silently
+lost it. Nothing failed. That is precisely why it survived: the only symptom was that
+the next release cut after any checkout would ship something different.
+
+Three defences came out of it:
+
+* a function whose job is to flip a symlink flips a symlink; the consequential side
+  effect moved to `canary.record_inverse_commit()`, called from the one place that
+  has actually decided to take it, and only when `project` is the real root
+* `release.sh` warns when the working tree and `main` disagree, because a release is
+  built from the working tree and `main` should describe what is running
+* each of the four has a regression assertion now, and two of them assert about the
+  *real* paths staying untouched rather than about the sandbox behaving
+
+All four were found by running the system, not by reading it. The gate matrix was
+green for every one of them.
