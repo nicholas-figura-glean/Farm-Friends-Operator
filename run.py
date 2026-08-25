@@ -349,10 +349,20 @@ def do_canary_status() -> int:
         baseline = verdict.get("baseline_rate")
         observed = verdict.get("observed_rate")
         print("  runs observed: %s" % verdict.get("runs_observed"))
-        print("  produce/min: baseline=%s observed=%s floor=%s"
+        # Absolute rate is context only. The floor belongs on the per-animal line
+        # because that is the figure the verdict is actually measured against;
+        # printing a per-animal threshold beside absolute rates read as "floor=0.3".
+        print("  produce/min: baseline=%s observed=%s"
               % ("%.1f" % baseline if baseline else "n/a",
-                 "%.1f" % observed if observed else "n/a",
-                 "%.1f" % verdict["threshold"] if verdict.get("threshold") else "n/a"))
+                 "%.1f" % observed if observed else "n/a"))
+        if verdict.get("observed_per_animal") is not None:
+            print("  per animal:  baseline=%.4f observed=%.4f floor=%s  <- decides"
+                  % (verdict.get("baseline_per_animal") or 0.0,
+                     verdict.get("observed_per_animal") or 0.0,
+                     "%.4f" % verdict["threshold"] if verdict.get("threshold") else "n/a"))
+        if verdict.get("excluded_runs"):
+            print("  excluded %s (%s): outside loss, not the release's doing"
+                  % (verdict["excluded_runs"], verdict.get("excluded_reason")))
         print("  verdict: %s (%s)" % (verdict.get("status"), verdict.get("reason")))
     if info.get("resolution"):
         print("  resolved %s: %s" % (info.get("resolved_ts"), info["resolution"]))
