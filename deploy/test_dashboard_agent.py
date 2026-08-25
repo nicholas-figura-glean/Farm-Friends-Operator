@@ -333,8 +333,74 @@ section("readouts are judged on served cost, not agent startup")
 # cost was 674ms -- measuring the agent's own imports and calling it a defect in the page.
 agent_src = (PROJECT / "experiments" / "dashboard_agent.py").read_text(encoding="utf-8")
 check("the probe measures twice", "_probe_once" in agent_src)
-check("the slow check uses the warm number", 'ms warm to build' in agent_src)
 check("the cold number is still reported", "cold_ms" in agent_src)
+
+# The deeper version of the same mistake. This agent runs under ProcessType=Background
+# and LowPriorityIO, which cost a measured 4.4x on this workload: 675ms at normal
+# priority against 2,932ms throttled, on identical code and data. So no absolute
+# threshold set from a normal-priority measurement can be applied here, and the first
+# attempt at a relative check then compared a throttled pass against a median built from
+# hand-run unthrottled ones and cried regression.
+sys.path.insert(0, str(PROJECT / "experiments"))
+import dashboard_agent  # noqa: E402
+
+check("throttling is detected rather than assumed",
+      isinstance(dashboard_agent._throttled(), bool))
+check("a hand-run check is not throttled", dashboard_agent._throttled() is False)
+check("readouts are judged relative to their own history",
+      "REGRESSION_MULTIPLE" in agent_src)
+check("an absolute ceiling still catches total breakage",
+      dashboard_agent.ABSOLUTE_CEILING_MS >= 10000)
+check("a floor stops multiples of tiny numbers being treated as signal",
+      dashboard_agent.REGRESSION_FLOOR_MS >= 500)
+
+with tempfile.TemporaryDirectory() as tmp:
+    ledger = Path(tmp) / "health.ndjson"
+    original = dashboard_agent.LEDGER
+    dashboard_agent.LEDGER = ledger
+    try:
+        def _write(throttled, ms, passes=6):
+            with ledger.open("a", encoding="utf-8") as handle:
+                for _ in range(passes):
+                    handle.write(json.dumps({
+                        "ts": "2026-08-25T00:00:00Z", "throttled": throttled,
+                        "checks": [{"source": "evidence.report", "ms": ms, "ok": True}],
+                    }) + "\n")
+
+        _write(False, 700)
+        _write(True, 3100)
+        fast = dashboard_agent._baselines(False)
+        slow = dashboard_agent._baselines(True)
+        check("an unthrottled baseline uses only unthrottled passes",
+              abs(fast.get("evidence.report", 0) - 700) < 1, str(fast))
+        check("a throttled baseline uses only throttled passes",
+              abs(slow.get("evidence.report", 0) - 3100) < 1, str(slow))
+        # The bug: had these populations been pooled, the median would sit between them
+        # and both environments would look wrong.
+        check("the two baselines are kept apart",
+              slow.get("evidence.report", 0) > fast.get("evidence.report", 0) * 3)
+
+        # A pass predating the throttled field cannot be attributed, so it must be
+        # excluded rather than assumed to belong to either population.
+        with ledger.open("a", encoding="utf-8") as handle:
+            for _ in range(20):
+                handle.write(json.dumps({
+                    "ts": "2026-08-25T00:00:00Z",
+                    "checks": [{"source": "evidence.report", "ms": 99999, "ok": True}],
+                }) + "\n")
+        after = dashboard_agent._baselines(False)
+        check("unlabelled passes do not pollute a baseline",
+              abs(after.get("evidence.report", 0) - 700) < 1, str(after))
+
+        # Too few samples must yield no baseline at all rather than a confident one.
+        ledger.write_text(json.dumps({
+            "ts": "2026-08-25T00:00:00Z", "throttled": False,
+            "checks": [{"source": "evidence.report", "ms": 700, "ok": True}],
+        }) + "\n", encoding="utf-8")
+        check("a single sample is not treated as a baseline",
+              "evidence.report" not in dashboard_agent._baselines(False))
+    finally:
+        dashboard_agent.LEDGER = original
 
 
 # --------------------------------------------------------------------------

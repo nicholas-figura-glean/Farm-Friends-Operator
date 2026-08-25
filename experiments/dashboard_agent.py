@@ -69,6 +69,90 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# A readout's absolute build time cannot be judged from inside this agent, and the
+# attempt to do so was wrong twice.
+#
+# First it timed a cold process and called 4,066ms a defect when the served cost was
+# 674ms. Then, with warm timing, it still read ~3,200ms -- because this agent runs under
+# `ProcessType=Background` and `LowPriorityIO`, which macOS throttles hard. Measured
+# side by side on the same code and data: 675ms at normal priority, 2,932ms with darwin
+# background priority applied. A 4.4x penalty that the dashboard, served by a
+# normal-priority process, never pays.
+#
+# So the comparison is against this agent's own recorded history for the same readout,
+# which is the only apples-to-apples baseline available: same throttling, same machine,
+# same data shape. A regression shows up as a multiple of its own median. The absolute
+# ceiling is kept only to catch something being catastrophically broken rather than
+# merely slow.
+REGRESSION_MULTIPLE = 3.0
+REGRESSION_FLOOR_MS = 1500      # below this, multiples are noise, not signal
+ABSOLUTE_CEILING_MS = 30000     # something is broken, not slow
+BASELINE_MIN_SAMPLES = 4
+
+
+def _throttled() -> bool:
+    """Is this process running under darwin background priority?
+
+    `ProcessType=Background` and `LowPriorityIO` in the plist cost a measured 4.4x on
+    this workload, so a timing taken under them is not comparable with one taken at
+    normal priority. Both populations were landing in the same ledger, which made the
+    median meaningless and produced a false "slowed sharply" the moment a hand-run pass
+    and a scheduled pass were compared with each other.
+
+    PRIO_DARWIN_PROCESS is 4; a return of PRIO_DARWIN_BG (0x1000) means throttled.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.getpriority.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        value = libc.getpriority(4, 0)
+        if ctypes.get_errno():
+            return False
+        return bool(value & 0x1000)
+    except Exception:  # noqa: BLE001
+        # If it cannot be determined, say "not throttled": the effect of guessing wrong
+        # is a comparison against the wrong baseline, and the unthrottled population is
+        # the one a hand-run check produces while debugging.
+        return False
+
+
+def _baselines(throttled: bool, limit: int = 60) -> Dict[str, float]:
+    """Median warm build time per readout, from passes run under the same conditions."""
+    samples: Dict[str, List[float]] = {}
+    if not LEDGER.exists():
+        return {}
+    try:
+        with LEDGER.open("r", encoding="utf-8", errors="replace") as handle:
+            rows = [line for line in handle if line.strip()]
+    except OSError:
+        return {}
+    for line in rows[-limit:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        # Rows written before throttling was recorded cannot be attributed to either
+        # population, so they are skipped rather than assumed.
+        if "throttled" not in row or bool(row.get("throttled")) != throttled:
+            continue
+        for entry in row.get("checks") or []:
+            ms = entry.get("ms")
+            source = entry.get("source")
+            if isinstance(ms, int) and source and entry.get("ok"):
+                samples.setdefault(str(source), []).append(float(ms))
+    out: Dict[str, float] = {}
+    for source, values in samples.items():
+        if len(values) < BASELINE_MIN_SAMPLES:
+            continue
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        out[source] = (ordered[mid] if len(ordered) % 2
+                       else (ordered[mid - 1] + ordered[mid]) / 2.0)
+    return out
+
+
 def _probe(source: str) -> Dict[str, Any]:
     """Exercise one data source the way the dashboard does.
 
@@ -171,11 +255,16 @@ def _staleness() -> Dict[str, Any]:
 def main() -> int:
     problems: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
+    throttled = _throttled()
+    baselines = _baselines(throttled)
 
     for check in CHECKS:
         probe = _probe(check["source"])
         row = dict(check)
         row.update(probe)
+        baseline = baselines.get(check["source"])
+        if baseline:
+            row["baseline_ms"] = int(baseline)
         results.append(row)
         if not probe.get("ok"):
             problems.append({
@@ -184,11 +273,25 @@ def main() -> int:
                 "why": probe.get("error") or "probe returned not-ok",
                 "source": check["source"],
             })
-        elif probe.get("ms", 0) > 4000:
+            continue
+        ms = int(probe.get("ms") or 0)
+        if ms > ABSOLUTE_CEILING_MS:
             problems.append({
                 "severity": "degraded",
-                "what": "dashboard readout '%s' is too slow" % check["tab"],
-                "why": "%dms warm to build; the page polls every 2s" % probe["ms"],
+                "what": "dashboard readout '%s' is pathologically slow" % check["tab"],
+                "why": "%dms to build, past the %dms ceiling" % (ms, ABSOLUTE_CEILING_MS),
+                "source": check["source"],
+            })
+        elif (baseline and ms > REGRESSION_FLOOR_MS
+              and ms > baseline * REGRESSION_MULTIPLE):
+            # Relative to this agent's own history, so the comparison is unaffected by
+            # the background throttling that makes absolute numbers meaningless here.
+            problems.append({
+                "severity": "degraded",
+                "what": "dashboard readout '%s' slowed sharply" % check["tab"],
+                "why": "%dms against its own median of %dms over recent passes%s"
+                       % (ms, int(baseline),
+                          " (background priority)" if throttled else ""),
                 "source": check["source"],
             })
 
@@ -220,6 +323,7 @@ def main() -> int:
 
     row = {
         "ts": _now(),
+        "throttled": throttled,
         "checks": [{k: v for k, v in r.items() if k != "trace"} for r in results],
         "problems": problems,
         "staleness": stale,
@@ -263,13 +367,14 @@ def main() -> int:
             print("could not file order for %s: %s" % (problem["source"], exc))
 
     ok = sum(1 for r in results if r.get("ok"))
-    print("DASHBOARD %d/%d readouts ok" % (ok, len(results)))
+    print("DASHBOARD %d/%d readouts ok%s"
+          % (ok, len(results), " (background priority)" if throttled else ""))
     for r in results:
         mark = "ok  " if r.get("ok") else "FAIL"
         print("  %s %-26s %-24s %5sms %s"
               % (mark, r["tab"][:26], r["source"],
                  r.get("ms", "?"),
-                 ("cold %sms  " % r.get("cold_ms") if r.get("cold_ms") else "")
+                 ("median %sms  " % r.get("baseline_ms") if r.get("baseline_ms") else "")
                  + (r.get("detail") or r.get("error") or "")))
     if arch_result.get("recorded"):
         print("  architecture v%s recorded (%s)"
