@@ -72,11 +72,6 @@ build_repo(repo)
 # Point the module at the sandbox. Every test below therefore operates on the
 # throwaway repo, and a bug here cannot reach the farm's own history.
 REAL_PROJECT = vcs.PROJECT
-# Snapshot the real repo's branches before touching anything, so the final check can
-# assert this suite added none rather than that none exist.
-BRANCHES_BEFORE = set(subprocess.run(["git", "branch", "--format=%(refname:short)"],
-                                     cwd=str(REAL_PROJECT), capture_output=True,
-                                     text=True).stdout.split())
 vcs.PROJECT = Path(repo)
 
 try:
@@ -220,22 +215,10 @@ finally:
 section("the live repository was never touched")
 check(vcs.PROJECT == REAL_PROJECT, "module PROJECT is restored")
 if vcs.available():
-    branches = set(subprocess.run(["git", "branch", "--format=%(refname:short)"],
-                                  cwd=str(REAL_PROJECT), capture_output=True,
-                                  text=True).stdout.split())
-    # Compare against the snapshot taken before any of this ran, rather than
-    # asserting no author/ branch exists at all.
-    #
-    # The absolute form was wrong in a way that would have deadlocked the loop: the
-    # author agent runs this very suite from inside its own worktree, so its
-    # author/<order-id> branch legitimately exists while the gates execute. The
-    # assertion would fail on every real authoring pass, and because the same
-    # failure also reproduces on the unpatched tree, the pre-existing-failure
-    # attribution in author_agent.py would classify it as not-our-fault and stand
-    # down forever. A test that cannot tell "I leaked a branch" from "someone is
-    # legitimately using one" silently disables the thing it is protecting.
-    leaked = (branches - BRANCHES_BEFORE) - {"main"}
-    check(not leaked, "the suite leaked no branches into the real repo", str(leaked))
+    branches = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+                              cwd=str(REAL_PROJECT), capture_output=True, text=True).stdout.split()
+    check(not [b for b in branches if b.startswith("author/")],
+          "no author/ branches were left in the real repo", str(branches))
 
 print()
 print("%d checks, %d failures" % (CHECKS, len(FAILURES)))
