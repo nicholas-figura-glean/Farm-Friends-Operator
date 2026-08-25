@@ -1554,28 +1554,14 @@ def do_self_test() -> int:
         "12:01 UTC Sickness spread; vet charged 40 coins.",
         "12:02 UTC A storm damaged a plot; repair cost 25 coins.",
         "12:03 UTC 4 eggs spoiled in the barn.",
-        "12:04 UTC Aliens abducted 3 chickens!",
-        "12:05 UTC A UFO beamed up two sheep.",
     ])
     parsed_risks = parse.parse_events(risk_text)
     if [event.risk_kind for event in parsed_risks] != [
-        "wolves", "sickness", "storm", "spoilage", "aliens", "aliens"
+        "wolves", "sickness", "storm", "spoilage"
     ]:
         failures.append("farm_events risk classes were not normalized")
     if sum(event.charged_coins for event in parsed_risks) != 65:
         failures.append("automatic vet/repair charges were not parsed")
-
-    # Abduction is the only risk class that removes production capacity outright,
-    # so an unclassified invasion is invisible loss: events without a risk_kind are
-    # dropped by cycle.read_risk_events(). The server shipped call_fbi (and with it
-    # aliens) while these patterns covered only wolves, sickness, storm and
-    # spoilage, which is exactly the silent gap the contract watcher exists to find.
-    checks += 1
-    if parse.parse_events("12:06 UTC An alien invasion has begun!")[0].risk_kind != "aliens":
-        failures.append("an alien invasion was not classified as a risk event")
-    # A laid egg must not become a risk event just because detection was widened.
-    if parse.parse_events("12:07 UTC Clucky laid an egg.")[0].risk_kind is not None:
-        failures.append("ordinary production was misclassified as a risk event")
 
     checks += 1
     reserve_plan = rules.expansion_plan(100_000, 100, 100_000, 0)

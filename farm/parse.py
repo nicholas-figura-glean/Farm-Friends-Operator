@@ -39,20 +39,6 @@ EVENT_RE = re.compile(r"^(?P<time>\d{2}:\d{2}) UTC\s+(?P<text>.*)$")
 PRODUCE_EVENT_RE = re.compile(r"laid|produced|made honey|found a truffle|gave milk|grew wool")
 TWO_RE = re.compile(r"\bTWO\b")
 RISK_EVENT_PATTERNS = (
-    # Aliens abduct animals outright, so this is the only risk kind that removes
-    # production capacity permanently rather than charging coins for it. It is
-    # listed first because `risk_kind` returns the first pattern that matches and
-    # an abduction report can also mention repair or vet costs.
-    #
-    # Detection only. The server exposes `call_fbi` to end an active invasion, but
-    # it costs 80% of current gold -- roughly 81M coins at the time of writing --
-    # and we have no measurement of the abduction rate, so there is no way yet to
-    # know whether paying beats absorbing the loss. POSTMORTEM-run291 and run377 are
-    # both about plausible interventions that cost more than they saved; spending
-    # four fifths of the treasury on an unmeasured threat would be a third. The
-    # abduction counts this makes visible are what a later evidence-gated decision
-    # will be built from.
-    ("aliens", re.compile(r"\b(?:alien|aliens|abduct(?:ed|ing|ion)?|ufo|flying saucer|invasion|tractor beam|beamed up)\b", re.IGNORECASE)),
     ("wolves", re.compile(r"\b(?:wolf|wolves)\b", re.IGNORECASE)),
     ("sickness", re.compile(r"\b(?:sick|sickness|disease|illness|vet)\b", re.IGNORECASE)),
     ("storm", re.compile(r"\b(?:storm|stormy|repair|damaged?)\b", re.IGNORECASE)),
