@@ -344,9 +344,13 @@ check("the cold number is still reported", "cold_ms" in agent_src)
 sys.path.insert(0, str(PROJECT / "experiments"))
 import dashboard_agent  # noqa: E402
 
-check("throttling is detected rather than assumed",
-      isinstance(dashboard_agent._throttled(), bool))
-check("a hand-run check is not throttled", dashboard_agent._throttled() is False)
+check("how the pass was started is detected, not inferred",
+      isinstance(dashboard_agent._scheduled(), bool))
+# A hand run must classify as a hand run, or this very suite compares itself against
+# the scheduled population.
+check("a hand-run check is not a scheduled pass", dashboard_agent._scheduled() is False)
+check("detection reads how the process was started",
+      "XPC_SERVICE_NAME" in agent_src)
 check("readouts are judged relative to their own history",
       "REGRESSION_MULTIPLE" in agent_src)
 check("an absolute ceiling still catches total breakage",
@@ -363,7 +367,7 @@ with tempfile.TemporaryDirectory() as tmp:
             with ledger.open("a", encoding="utf-8") as handle:
                 for _ in range(passes):
                     handle.write(json.dumps({
-                        "ts": "2026-08-25T00:00:00Z", "throttled": throttled,
+                        "ts": "2026-08-25T00:00:00Z", "scheduled": throttled,
                         "checks": [{"source": "evidence.report", "ms": ms, "ok": True}],
                     }) + "\n")
 
@@ -371,9 +375,9 @@ with tempfile.TemporaryDirectory() as tmp:
         _write(True, 3100)
         fast = dashboard_agent._baselines(False)
         slow = dashboard_agent._baselines(True)
-        check("an unthrottled baseline uses only unthrottled passes",
+        check("a hand-run baseline uses only hand-run passes",
               abs(fast.get("evidence.report", 0) - 700) < 1, str(fast))
-        check("a throttled baseline uses only throttled passes",
+        check("a scheduled baseline uses only scheduled passes",
               abs(slow.get("evidence.report", 0) - 3100) < 1, str(slow))
         # The bug: had these populations been pooled, the median would sit between them
         # and both environments would look wrong.
@@ -394,7 +398,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
         # Too few samples must yield no baseline at all rather than a confident one.
         ledger.write_text(json.dumps({
-            "ts": "2026-08-25T00:00:00Z", "throttled": False,
+            "ts": "2026-08-25T00:00:00Z", "scheduled": False,
             "checks": [{"source": "evidence.report", "ms": 700, "ok": True}],
         }) + "\n", encoding="utf-8")
         check("a single sample is not treated as a baseline",

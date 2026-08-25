@@ -90,36 +90,28 @@ ABSOLUTE_CEILING_MS = 30000     # something is broken, not slow
 BASELINE_MIN_SAMPLES = 4
 
 
-def _throttled() -> bool:
-    """Is this process running under darwin background priority?
+def _scheduled() -> bool:
+    """Was this a scheduled launchd pass, or a hand run?
 
-    `ProcessType=Background` and `LowPriorityIO` in the plist cost a measured 4.4x on
-    this workload, so a timing taken under them is not comparable with one taken at
-    normal priority. Both populations were landing in the same ledger, which made the
-    median meaningless and produced a false "slowed sharply" the moment a hand-run pass
-    and a scheduled pass were compared with each other.
+    This is the population that matters, and naming it that way is the fix. The previous
+    attempt tried to detect the *mechanism* -- darwin background priority via
+    getpriority(PRIO_DARWIN_PROCESS) -- and always returned False, because
+    `ProcessType=Background` sets the task's QoS role rather than PRIO_DARWIN_BG on the
+    process. So a live throttled pass at 3,225ms was compared against a hand-run median of
+    701ms and reported as a sharp slowdown. A false alarm produced by measuring the wrong
+    property of the environment, which is the same mistake one level down.
 
-    PRIO_DARWIN_PROCESS is 4; a return of PRIO_DARWIN_BG (0x1000) means throttled.
+    launchd sets XPC_SERVICE_NAME to the job label; an interactive shell leaves it as "0".
+    That is a direct observation of how the process was started, rather than an inference
+    about what the scheduler did to it afterwards -- and it stays correct if Apple changes
+    how ProcessType is implemented, or if the plist gains or loses LowPriorityIO.
     """
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.getpriority.restype = ctypes.c_int
-        ctypes.set_errno(0)
-        value = libc.getpriority(4, 0)
-        if ctypes.get_errno():
-            return False
-        return bool(value & 0x1000)
-    except Exception:  # noqa: BLE001
-        # If it cannot be determined, say "not throttled": the effect of guessing wrong
-        # is a comparison against the wrong baseline, and the unthrottled population is
-        # the one a hand-run check produces while debugging.
-        return False
+    name = os.environ.get("XPC_SERVICE_NAME") or ""
+    return bool(name) and name != "0"
 
 
-def _baselines(throttled: bool, limit: int = 60) -> Dict[str, float]:
-    """Median warm build time per readout, from passes run under the same conditions."""
+def _baselines(scheduled: bool, limit: int = 60) -> Dict[str, float]:
+    """Median warm build time per readout, from passes started the same way."""
     samples: Dict[str, List[float]] = {}
     if not LEDGER.exists():
         return {}
@@ -133,9 +125,13 @@ def _baselines(throttled: bool, limit: int = 60) -> Dict[str, float]:
             row = json.loads(line)
         except ValueError:
             continue
-        # Rows written before throttling was recorded cannot be attributed to either
-        # population, so they are skipped rather than assumed.
-        if "throttled" not in row or bool(row.get("throttled")) != throttled:
+        # Rows written before this was recorded cannot be attributed to either
+        # population, so they are skipped rather than assumed. The `throttled` key is
+        # also accepted: it is the earlier, wrongly-derived name for the same field, and
+        # its values were all False, so treating it as "hand run" is accurate for the
+        # hand runs and merely discards the few mislabelled scheduled passes.
+        flag = row.get("scheduled", row.get("throttled"))
+        if flag is None or bool(flag) != scheduled:
             continue
         for entry in row.get("checks") or []:
             ms = entry.get("ms")
@@ -255,7 +251,7 @@ def _staleness() -> Dict[str, Any]:
 def main() -> int:
     problems: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
-    throttled = _throttled()
+    throttled = _scheduled()
     baselines = _baselines(throttled)
 
     for check in CHECKS:
@@ -291,7 +287,7 @@ def main() -> int:
                 "what": "dashboard readout '%s' slowed sharply" % check["tab"],
                 "why": "%dms against its own median of %dms over recent passes%s"
                        % (ms, int(baseline),
-                          " (background priority)" if throttled else ""),
+                          " (scheduled pass)" if throttled else ""),
                 "source": check["source"],
             })
 
@@ -323,7 +319,7 @@ def main() -> int:
 
     row = {
         "ts": _now(),
-        "throttled": throttled,
+        "scheduled": throttled,
         "checks": [{k: v for k, v in r.items() if k != "trace"} for r in results],
         "problems": problems,
         "staleness": stale,
@@ -368,7 +364,7 @@ def main() -> int:
 
     ok = sum(1 for r in results if r.get("ok"))
     print("DASHBOARD %d/%d readouts ok%s"
-          % (ok, len(results), " (background priority)" if throttled else ""))
+          % (ok, len(results), " (scheduled pass)" if throttled else ""))
     for r in results:
         mark = "ok  " if r.get("ok") else "FAIL"
         print("  %s %-26s %-24s %5sms %s"
