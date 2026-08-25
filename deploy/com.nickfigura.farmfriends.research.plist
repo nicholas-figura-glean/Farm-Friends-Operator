@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Research agent. Hourly. Never mutates the farm and never edits code: it looks
+  for reasons the strategy should change and files work orders proposing bounded
+  probes, which the author agent then implements under the usual gates and canary.
+
+  Cheap sources (unused capabilities, counterfactual parameter sensitivity) run
+  every pass at zero token cost. The model hypothesis pass is capped at once per
+  24h inside the agent, so this cadence costs almost nothing.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends.research</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-u</string>
+    <string>__PROJECT__/release/experiments/research_agent.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__/release</string>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/research_agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/research_agent.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

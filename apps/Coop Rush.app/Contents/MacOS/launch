@@ -1,0 +1,14 @@
+#!/bin/bash
+# Opens Coop Rush. Regenerates the standalone file first so the bundle can never
+# serve a stale copy of the game.
+set -uo pipefail
+PROJECT="/Users/nickfigura/.glean/ui/workspaces/Projects/fe6d111f-2ee0-4d91-9991-4d9b84cc4b11"
+GAME="$PROJECT/coop-rush.html"
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$PROJECT/deploy/export_game.py" --out "$GAME" >/dev/null 2>&1 || true
+fi
+if [[ ! -f "$GAME" ]]; then
+  osascript -e 'display alert "Coop Rush" message "coop-rush.html is missing. Run deploy/export_game.py to build it."'
+  exit 1
+fi
+exec open "$GAME"

@@ -1,0 +1,180 @@
+/* Coop Rush styles. Inherits the dashboard's palette variables so the tab looks
+ * native there, and the standalone export ships the same variables. */
+.cr-hud { display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap; align-items:flex-end; }
+.cr-hud-main { display:flex; gap:26px; flex-wrap:wrap; }
+.cr-stat label { display:block; color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.08em; }
+.cr-stat strong { display:block; font-size:24px; font-weight:750; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.cr-stat.big-stat strong { font-size:34px; }
+.cr-stat small { color:var(--muted); font-size:12px; }
+.cr-stat-vs strong { color:var(--yellow); }
+/* Numbers that grow get a single frame of scale. Subtle on purpose: this fires
+ * dozens of times a minute and anything larger becomes noise. */
+.cr-pop { animation:crpop .22s ease-out; }
+@keyframes crpop { 0% { transform:scale(1); } 45% { transform:scale(1.22); } 100% { transform:scale(1); } }
+.cr-hud-buy { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
+.cr-hud-label { color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.08em; }
+#cr-buymode { display:flex; gap:6px; }
+#cr-buymode button { appearance:none; background:var(--panel2); border:1px solid var(--line); color:var(--muted);
+  border-radius:8px; padding:7px 13px; font:700 13px/1 inherit; cursor:pointer; }
+#cr-buymode button:hover { color:var(--text); }
+#cr-buymode button.on { background:var(--green); border-color:var(--green); color:#0d1a12; }
+.cr-hint { color:var(--muted); font-size:11.5px; }
+
+.cr-prods { display:flex; flex-direction:column; gap:9px; }
+.cr-prod { position:relative; display:grid; grid-template-columns:64px 1fr 190px; gap:14px; align-items:stretch;
+  background:#ffffff06; border:1px solid var(--line); border-radius:12px; padding:11px 13px; }
+.cr-prod.locked { opacity:.62; }
+/* A producing card reads as alive without animating anything expensive. */
+.cr-prod.running { background:#ffffff0a; border-color:#3c5b48; }
+/* Effects layer: absolutely positioned, never hit-tested, so floats and sparks
+ * cannot swallow a click on the card underneath. */
+.cr-fx { position:absolute; inset:0; overflow:visible; pointer-events:none; }
+.cr-float { position:absolute; top:34%; font:750 14px/1 inherit; color:var(--green);
+  text-shadow:0 1px 3px #000000aa; white-space:nowrap;
+  animation:crfloat 1.1s ease-out forwards; }
+.cr-float.milestone { color:var(--yellow); font-size:15px; }
+@keyframes crfloat {
+  0% { opacity:0; transform:translateY(4px) scale(.9); }
+  18% { opacity:1; transform:translateY(-2px) scale(1.05); }
+  100% { opacity:0; transform:translateY(-42px) scale(1); }
+}
+.cr-spark { position:absolute; top:44%; font-size:13px; pointer-events:none;
+  animation:crspark .76s ease-out forwards; }
+@keyframes crspark {
+  0% { opacity:1; transform:translate(0,0) scale(.7) rotate(0deg); }
+  100% { opacity:0; transform:translate(var(--dx,20px),var(--dy,-24px)) scale(1) rotate(140deg); }
+}
+.cr-prod-icon { font-size:34px; text-align:center; cursor:pointer; user-select:none; line-height:1;
+  align-self:center; display:flex; align-items:center; justify-content:center;
+  transition:transform .08s ease; border-radius:12px; padding:6px 0; }
+.cr-prod-icon:hover { background:#ffffff0d; }
+.cr-prod-icon:active { transform:scale(.86); }
+.cr-prod-top { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+.cr-prod-top b { font-size:14.5px; }
+.cr-owned { font-variant-numeric:tabular-nums; font-weight:750; color:var(--green); font-size:15px; }
+.cr-track { position:relative; height:16px; background:#ffffff12; border-radius:99px; overflow:hidden; margin:6px 0 5px; }
+.cr-track i { display:block; height:100%; background:linear-gradient(90deg,#3f9d6b,var(--green)); border-radius:99px; transition:width .1s linear; }
+.cr-track i.auto { background:linear-gradient(90deg,#3f9d6b,var(--green),#3f9d6b); background-size:200% 100%; animation:crflow 1.4s linear infinite; }
+@keyframes crflow { to { background-position:-200% 0; } }
+/* The cycle timer sits on top of the fill, so it has to stay legible whether the bar
+ * is nearly empty (dark behind) or nearly full (light green behind). */
+.cr-track span { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-size:10.5px; font-weight:750; color:#f2fbf5; letter-spacing:.02em;
+  text-shadow:0 1px 2px #00000099, 0 0 3px #00000066; }
+.cr-prod-meta { display:flex; justify-content:space-between; align-items:baseline; gap:14px; font-size:12px; color:var(--muted); }
+.cr-prod-meta > span:first-child { flex:0 0 auto; white-space:nowrap; }
+.cr-note { font-style:italic; opacity:.75; min-width:0; text-align:right;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* The milestone label used to be absolutely positioned above the bar, which sat it
+ * directly on top of the flavour text. Bar and label now share one flow row. */
+.cr-milestone { display:flex; align-items:center; gap:9px; margin-top:8px; }
+.cr-mstrack { flex:1 1 auto; height:4px; min-width:0; background:#ffffff10;
+  border-radius:99px; overflow:hidden; }
+.cr-milestone i { display:block; height:100%; background:var(--yellow); border-radius:99px;
+  transition:width .2s ease; }
+.cr-mstext { flex:0 0 auto; font-size:10.5px; color:var(--yellow); line-height:1; }
+/* Stretch so the two buttons line up with the top and bottom of the card body. When
+ * this column was centred, the stack drifted against the title row by a few pixels
+ * on every card, differently depending on content. */
+.cr-prod-buy { display:flex; flex-direction:column; gap:6px; }
+.cr-prod-buy .cr-btn { flex:1 1 auto; }
+.cr-btn { appearance:none; display:flex; justify-content:space-between; align-items:center; gap:10px;
+  background:var(--panel2); border:1px solid var(--line); color:var(--muted); border-radius:9px;
+  padding:9px 12px; font:650 13px/1 inherit; cursor:pointer; text-align:left; }
+.cr-btn.ready { color:var(--text); border-color:#4d7a60; background:#20342a; }
+.cr-btn.ready:hover { border-color:var(--green); }
+/* The advisor's pick. An outline rather than a fill, so it reads as a suggestion
+ * and not as "this is the only enabled button". */
+.cr-btn.best { border-color:var(--green); box-shadow:0 0 0 1px var(--green), 0 0 14px #72e09a3d; }
+.cr-btn.best .cr-btn-label:after { content:" \2605"; color:var(--green); }
+.cr-btn:disabled { cursor:not-allowed; opacity:.55; }
+.cr-btn-cost { font-variant-numeric:tabular-nums; font-weight:750; }
+.cr-btn.mgr { font-size:12px; padding:7px 12px; }
+.cr-legend { color:var(--muted); font-size:12px; margin-top:12px; line-height:1.5; }
+.cr-legend b { color:var(--text); }
+
+.cr-ups { display:flex; flex-direction:column; gap:7px; }
+.cr-ups-wide { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:8px; }
+.cr-up { appearance:none; display:grid; grid-template-columns:30px 1fr auto; gap:12px; align-items:center;
+  background:#ffffff06; border:1px solid var(--line); border-radius:10px; padding:9px 11px;
+  color:var(--text); font:inherit; text-align:left; cursor:pointer; }
+.cr-up-icon { font-size:20px; }
+.cr-up-text b { display:block; font-size:13px; }
+.cr-up-text small { display:block; margin-top:2px; color:var(--muted); font-size:11.5px; line-height:1.35; }
+.cr-up-cost { font-variant-numeric:tabular-nums; font-weight:750; font-size:12.5px; color:var(--muted);
+  white-space:nowrap; }
+.cr-up.ready { border-color:#4d7a60; background:#20342a; }
+.cr-up.ready .cr-up-cost { color:var(--green); }
+.cr-up.ready:hover { border-color:var(--green); }
+.cr-up.owned { opacity:.45; cursor:default; }
+.cr-up:disabled { cursor:default; }
+
+.cr-prestige { text-align:center; }
+.cr-gain strong { display:block; font-size:40px; font-weight:750; color:var(--yellow); letter-spacing:-.03em; }
+.cr-gain span { color:var(--muted); font-size:12px; }
+/* Progress toward the 1M gate. Without it the locked button is the only signal,
+ * and "0 heirlooms" for the first hour reads as a broken mechanic. */
+.cr-prestige-track { height:6px; background:#ffffff12; border-radius:99px; overflow:hidden; margin:11px 0 2px; }
+.cr-prestige-track i { display:block; height:100%; border-radius:99px;
+  background:linear-gradient(90deg,#b9902f,var(--yellow)); transition:width .3s ease; }
+.cr-big-btn { appearance:none; width:100%; margin-top:12px; background:var(--yellow); color:#241c05;
+  border:0; border-radius:10px; padding:12px; font:750 14px/1 inherit; cursor:pointer; }
+.cr-big-btn:disabled { background:var(--panel2); color:var(--muted); cursor:not-allowed; }
+.cr-big-btn:not(:disabled):hover { filter:brightness(1.08); }
+.cr-fine { color:var(--muted); font-size:11.5px; line-height:1.5; margin:11px 0 0; }
+.card h2 small { text-transform:none; letter-spacing:0; color:var(--muted); font-weight:400; }
+
+/* The advisor strip. One sentence, one keystroke: the point is that the player
+ * never has to compare seven exponential cost curves in their head. */
+.cr-advice-card { display:grid; grid-template-columns:34px minmax(0,1fr) minmax(0,1.1fr); gap:14px; align-items:center; }
+.cr-advice-icon { font-size:26px; line-height:1; }
+.cr-advice-label { color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.08em; }
+.cr-advice-text { font-size:15.5px; font-weight:700; margin-top:3px; }
+.cr-advice-note { color:var(--muted); font-size:11.5px; line-height:1.5; }
+
+.cr-achs { display:grid; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); gap:8px; }
+.cr-ach { display:grid; grid-template-columns:26px minmax(0,1fr); gap:10px; align-items:center;
+  background:#ffffff06; border:1px solid var(--line); border-radius:10px; padding:8px 10px;
+  opacity:.5; filter:saturate(.25); }
+.cr-ach.won { opacity:1; filter:none; border-color:#4d7a60; background:#20342a; }
+.cr-ach-icon { font-size:19px; text-align:center; }
+.cr-ach-text { min-width:0; }
+.cr-ach-text b { display:block; font-size:12.5px; }
+.cr-ach-text small { display:block; color:var(--muted); font-size:11px; line-height:1.3; }
+.cr-ach.won .cr-ach-text small { color:#9fd6b3; }
+
+.cr-records div { display:flex; justify-content:space-between; gap:12px; padding:5px 0;
+  border-bottom:1px solid #ffffff0d; font-size:12.5px; }
+.cr-records div:last-child { border-bottom:0; }
+.cr-records span:first-child { color:var(--muted); }
+.cr-records span:last-child { font-weight:700; font-variant-numeric:tabular-nums; }
+
+/* Toasts are a stack, not a slot: an offline catch-up can unlock three
+ * achievements in one frame, and the single-element version showed only the last. */
+.cr-toast { position:fixed; left:50%; bottom:26px; transform:translate(-50%,26px); opacity:0; pointer-events:none;
+  display:flex; flex-direction:column; gap:7px; align-items:center; max-width:min(520px,90vw);
+  transition:opacity .25s ease, transform .25s ease; z-index:50; }
+.cr-toast.show { opacity:1; transform:translate(-50%,0); }
+.cr-toast-item { background:#20342a; border:1px solid var(--green); color:var(--text); border-radius:10px;
+  padding:10px 17px; font-size:13px; font-weight:600; box-shadow:0 10px 30px #0006;
+  animation:crtoast .25s ease-out; }
+.cr-toast-item.ach { border-color:var(--yellow); background:#332a12; }
+.cr-toast-item.ms { border-color:#4d7a60; }
+@keyframes crtoast { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+@media (max-width:900px) {
+  .cr-prod { grid-template-columns:48px 1fr; }
+  .cr-prod-buy { grid-column:1/-1; flex-direction:row; }
+  .cr-prod-buy .cr-btn { flex:1; }
+  .cr-advice-card { grid-template-columns:26px 1fr; }
+  .cr-advice-note { grid-column:1/-1; }
+}
+
+/* Every animation here is decoration over a number that is already on screen, so
+ * honouring the OS preference costs the player nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .cr-track i.auto, .cr-pop, .cr-float, .cr-spark, .cr-toast-item { animation:none; }
+  .cr-float { opacity:.9; }
+  .cr-spark { display:none; }
+  .cr-prod-icon, .cr-track i, .cr-milestone i, .cr-prestige-track i { transition:none; }
+}

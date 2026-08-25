@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends.expand</string>
+
+  <!-- Runs the published release, never the working tree. See deploy/release.sh.
+
+    Why a third agent instead of a bigger adopt step in the cycle: the 150s cycle
+    budget is consumed by two inherently slow calls (collect ~55s, bulk feed
+    ~77s), leaving ~8s and about 14 adoptions per run. The server is not the
+    limit - the cycle issues only ~27 calls in 150s against a ~5/s ceiling - the
+    latency of those two calls is. Adoption is additive and takes no lock, so it
+    parallelises safely alongside the cycle.
+
+    Bounded on purpose: each sprint stops after 150s, and expand.py refuses to
+    spend below the coin floor that keeps the TARGET herd fed. Once the herd
+    reaches --target the sprint exits immediately, so leaving this installed is
+    harmless.
+
+    Rate is set from MEASUREMENT plus a hard lesson about concurrency. In
+    isolation adoption saturates at the server: 4 workers 4.40/s, 8 workers
+    4.89/s, 16 workers 4.88/s, zero failures. But 16 workers at a 5.0/s cap was
+    NOT sustainable alongside the cycle: sprints stalled on slow calls, outlived
+    their deadline, overlapped with the next launchd start, and the combined
+    connection count drove the server to 504 Gateway Timeout. The cycle began
+    failing and herd growth collapsed to +25 animals in 13 minutes.
+
+    Two fixes make this safe: expand.py now takes its own flock (one sprint at a
+    time) and arms a SIGALRM it cannot block past.
+
+    Settled at 8 workers / 3.0/s, the highest setting measured CLEAN. At 10
+    workers the cycle took occasional 504s, intervals stretched to 15-23 minutes
+    and peak hunger began creeping off zero. We are already out-producing the
+    leader on rate, so compounding does the rest; risking a repeat of the
+    starvation that lost first place to buy ~25% more adoption is a bad trade.
+    Measured ladder, all with zero ADOPTION
+    failures - the cost always landed on the CYCLE instead, as 504 Gateway
+    Timeout:
+
+      8 workers  @3.0/s -> ~2.3 adopt/s, cycle clean
+      12 workers @4.0/s -> ~3.6 adopt/s, cycle hit repeated 504s
+      16 workers @5.0/s -> overlapping sprints, sustained 504s, growth collapsed
+
+    Adoption is worth nothing if the cycle cannot feed the herd, so this sits one
+    step below where the cycle starts failing. The cycle is also far cheaper now
+    that collection runs on a cadence (rules.COLLECT_EVERY): a non-collecting run
+    costs ~23s instead of ~216s. Raise only with evidence from state/expand.log
+    AND no new failures in state/launchd.log.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-u</string>
+    <string>__PROJECT__/release/experiments/expand.py</string>
+    <string>--target</string>
+    <string>250000</string>
+    <string>--max-seconds</string>
+    <string>270</string>
+    <string>--rate</string>
+    <string>3.0</string>
+    <string>--workers</string>
+    <string>8</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__/release</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/expand.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/expand.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

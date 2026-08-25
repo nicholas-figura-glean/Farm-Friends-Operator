@@ -1,0 +1,369 @@
+"""Persistent strategy-question registry.
+
+`questions.ndjson` is a current registry: one line per stable question identity,
+atomically rewritten under a file lock. `question_events.ndjson` is the append-only
+audit trail. Repeated alerts bump the existing question instead of creating the
+seven indistinguishable pages that motivated this layer.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+SCHEMA_VERSION = 1
+VALID_STATUSES = {"open", "probing", "answered", "abandoned"}
+
+TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "strategy_stale": {
+        "hypothesis": "A standing growth decision is suppressing a profitable strategy.",
+        "settle": "Replay output and capital outcomes under neighbouring growth thresholds, then run a bounded growth cohort if the replay disagrees.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 5_000, "calls": 500, "wall_seconds": 300},
+    },
+    "idle_capital": {
+        "hypothesis": "Capital is accumulating because a policy gate, not affordability, is blocking the scoring action.",
+        "settle": "Compare the live adoption cap, affordable adoptions, score slope, and feed runway; identify the binding constraint.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 20},
+    },
+    "knob_age": {
+        "hypothesis": "A decision constant has outlived the evidence regime that justified it.",
+        "settle": "Recompute its estimator on a fresh labelled cohort and compare counterfactual neighbouring values.",
+        "priority": "medium",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 30},
+    },
+    "rival_wake": {
+        "hypothesis": "A dormant rival entered a new production or adoption regime.",
+        "settle": "Measure the rival's herd, coins, produce rate, composition if observable, and whether herd growth or feeding explains the wake-up.",
+        "priority": "medium",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 60},
+    },
+    "rank_lost": {
+        "hypothesis": "The current policy no longer maximizes the objective quickly enough to hold first place.",
+        "settle": "Build a win-path bundle from score lead, both growth rates, feed runway, idle capital, and counterfactual policy settings.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 60},
+    },
+    "no_path_to_win": {
+        "hypothesis": "Under current growth and score rates, waiting cannot overtake the leader.",
+        "settle": "Find the minimum safe herd/adoption policy that restores a positive crossover root, or prove the objective infeasible.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 120},
+    },
+    "win_eta": {
+        "hypothesis": "The current policy reaches first place too slowly for the accepted objective horizon.",
+        "settle": "Recompute the forecast under live and neighbouring adoption/feed policies with uncertainty bounds.",
+        "priority": "high",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 120},
+    },
+    "threat": {
+        "hypothesis": "A rival's sustained score gain is now strategically material.",
+        "settle": "Separate herd growth from production recovery and compare their sustainable rate with ours.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 60},
+    },
+    "overtaken": {
+        "hypothesis": "A rival crossed our lifetime-produce score.",
+        "settle": "Establish whether the crossover is transient and whether the promoted policy still has a safe path back.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 90},
+    },
+    "rival_growing": {
+        "hypothesis": "A material rival resumed herd growth, invalidating the frozen-rival forecast.",
+        "settle": "Measure its new animals/min and recompute the win projection with that growth regime.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 60},
+    },
+    "tools_changed": {
+        "hypothesis": "The server capability surface changed and may invalidate parser or policy assumptions.",
+        "settle": "Diff tool names and schemas, then exercise changed read-only capabilities before permitting mutation.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 10, "wall_seconds": 120},
+    },
+    "hunger_wall": {
+        "hypothesis": "Herd size is approaching or exceeding the capacity of the current feed transport path.",
+        "settle": "Fit max hunger and feed completion against herd size on the latest regime and establish a safety-bounded ceiling.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 5, "wall_seconds": 120},
+    },
+    "model_drift": {
+        "hypothesis": "A promoted game-mechanics claim no longer predicts recent observations.",
+        "settle": "Segment the new regime, re-estimate the claim, and falsify either the old or candidate model on a pinned cohort.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 60},
+    },
+    "policy_drift": {
+        "hypothesis": "Runtime rules and the promoted policy snapshot no longer describe the same behavior.",
+        "settle": "Recompile the policy, inspect the parameter and claim diff, run semantic gates, and explicitly promote or revert.",
+        "priority": "critical",
+        "page_on_open": True,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 120},
+    },
+}
+
+_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _state_dir() -> Path:
+    override = os.environ.get("FARM_STATE_DIR")
+    return Path(override).resolve() if override else Path(__file__).resolve().parent.parent / "state"
+
+
+def _paths() -> Tuple[Path, Path, Path]:
+    current = Path(os.environ.get("FARM_QUESTIONS_FILE", str(_state_dir() / "questions.ndjson")))
+    events = Path(os.environ.get("FARM_QUESTION_EVENTS_FILE", str(_state_dir() / "question_events.ndjson")))
+    lock = Path(str(current) + ".lock")
+    return current, events, lock
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read(path: Path) -> List[Dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict) and value.get("id"):
+            rows.append(value)
+    return rows
+
+
+def load_all() -> List[Dict[str, Any]]:
+    current, _, _ = _paths()
+    return sorted(_read(current), key=lambda item: (item.get("opened_run") or 0, item.get("id")))
+
+
+def _write_current(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path("%s.tmp.%d" % (path, os.getpid()))
+    body = "".join(json.dumps(row, sort_keys=True, allow_nan=False, default=str) + "\n" for row in rows)
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _append_event(path: Path, event: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, allow_nan=False, default=str) + "\n")
+
+
+def _subject(alert_class: str, alert: str, explicit: Optional[str] = None) -> str:
+    if explicit:
+        return explicit.strip().lower()
+    patterns = [
+        r"^RIVAL WAKE:\s*([^:]+?)(?:\s+recent|\s+rate|\s+herd|$)",
+        r"^RIVAL GROWING:\s*([^:]+?)(?:\s+herd|$)",
+        r"^THREAT:\s*([^:]+?)(?:\s+gained|$)",
+        r"^([^:]+?)\s+has passed us",
+    ]
+    for pattern in patterns:
+        found = re.search(pattern, alert or "", re.IGNORECASE)
+        if found:
+            return found.group(1).strip().lower()
+    if alert_class in {"knob_age", "model_drift", "policy_drift"}:
+        found = re.search(r"(?:KNOB AGE|MODEL DRIFT|POLICY DRIFT):\s*([^:;,]+)", alert or "", re.I)
+        if found:
+            return found.group(1).strip().lower()
+    return "farm"
+
+
+def identity(alert_class: str, alert: str, subject: Optional[str] = None) -> Tuple[str, str]:
+    target = _subject(alert_class, alert, subject)
+    key = "%s:%s" % (alert_class, target)
+    return "q-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16], key
+
+
+def template(alert_class: str) -> Dict[str, Any]:
+    return dict(TEMPLATES.get(alert_class) or {
+        "hypothesis": "The alert reflects a durable strategic uncertainty rather than an operational fault.",
+        "settle": "Collect the smallest bounded measurement that distinguishes the competing explanations.",
+        "priority": "medium",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 60},
+    })
+
+
+def open_or_update(
+    alert_class: str,
+    alert: str,
+    row: Optional[Dict[str, Any]] = None,
+    item: Optional[Dict[str, Any]] = None,
+    subject: Optional[str] = None,
+    hypothesis: Optional[str] = None,
+    settle_measurement: Optional[str] = None,
+    cost_bound: Optional[Dict[str, Any]] = None,
+    decision_bundle: Optional[Dict[str, Any]] = None,
+    evidence_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    row, item = row or {}, item or {}
+    current_path, events_path, lock_path = _paths()
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    qid, key = identity(alert_class, alert, subject)
+    defaults = template(alert_class)
+    run = item.get("run") if isinstance(item.get("run"), int) else row.get("run")
+    ts = item.get("ts") or row.get("ts") or _utcnow()
+
+    with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        rows = load_all()
+        existing = next((value for value in rows if value.get("id") == qid), None)
+        opened = existing is None
+        reopened = bool(existing and existing.get("status") in {"answered", "abandoned"})
+        if existing is None:
+            record: Dict[str, Any] = {
+                "schema_version": SCHEMA_VERSION,
+                "id": qid,
+                "key": key,
+                "class": alert_class,
+                "subject": key.split(":", 1)[1],
+                "status": "open",
+                "priority": defaults["priority"],
+                "opened_run": run,
+                "opened_ts": ts,
+                "last_seen_run": run,
+                "last_seen_ts": ts,
+                "occurrences": 1,
+                "alert": alert,
+                "hypothesis": hypothesis or defaults["hypothesis"],
+                "settle_measurement": settle_measurement or defaults["settle"],
+                "cost_bound": cost_bound or defaults["budget"],
+                "decision_bundle": decision_bundle or {},
+                "evidence_refs": list(evidence_refs or []),
+                "generation": 1,
+                "answer": None,
+                "closed_run": None,
+                "closed_ts": None,
+            }
+            rows.append(record)
+            event_name = "opened"
+        else:
+            record = existing
+            record["occurrences"] = int(record.get("occurrences") or 0) + 1
+            record["last_seen_run"] = run
+            record["last_seen_ts"] = ts
+            record["alert"] = alert
+            if decision_bundle:
+                record["decision_bundle"] = decision_bundle
+            if evidence_refs:
+                record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
+            candidate_priority = defaults["priority"]
+            if _PRIORITY.get(candidate_priority, 0) > _PRIORITY.get(str(record.get("priority")), 0):
+                record["priority"] = candidate_priority
+            if reopened:
+                record["status"] = "open"
+                record["generation"] = int(record.get("generation") or 1) + 1
+                record["answer"] = None
+                record["closed_run"] = None
+                record["closed_ts"] = None
+                event_name = "reopened"
+            else:
+                event_name = "updated"
+        rows.sort(key=lambda value: (value.get("opened_run") or 0, value.get("id")))
+        _write_current(current_path, rows)
+        _append_event(
+            events_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "event": event_name,
+                "ts": _utcnow(),
+                "question_id": qid,
+                "run": run,
+                "occurrences": record.get("occurrences"),
+                "alert": alert,
+            },
+        )
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return {
+        "question": record,
+        "opened": opened,
+        "reopened": reopened,
+        "page_on_open": bool(defaults.get("page_on_open")) and (opened or reopened),
+    }
+
+
+def set_status(
+    question_id: str,
+    status: str,
+    answer: Optional[str] = None,
+    evidence_refs: Optional[List[str]] = None,
+    run: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    if status not in VALID_STATUSES:
+        raise ValueError("invalid question status: %s" % status)
+    current_path, events_path, lock_path = _paths()
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        rows = load_all()
+        record = next((value for value in rows if value.get("id") == question_id), None)
+        if record is None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return None
+        record["status"] = status
+        if answer is not None:
+            record["answer"] = answer
+        if evidence_refs:
+            record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
+        if status in {"answered", "abandoned"}:
+            record["closed_run"] = run
+            record["closed_ts"] = _utcnow()
+        _write_current(current_path, rows)
+        _append_event(
+            events_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "event": status,
+                "ts": _utcnow(),
+                "question_id": question_id,
+                "run": run,
+                "answer": answer,
+                "evidence_refs": evidence_refs or [],
+            },
+        )
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return record
+
+
+def open_questions() -> List[Dict[str, Any]]:
+    return [row for row in load_all() if row.get("status") in {"open", "probing"}]
+
+
+def summary() -> Dict[str, Any]:
+    rows = load_all()
+    open_rows = [row for row in rows if row.get("status") in {"open", "probing"}]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "total": len(rows),
+        "open": len(open_rows),
+        "critical": sum(1 for row in open_rows if row.get("priority") == "critical"),
+        "questions": rows,
+    }

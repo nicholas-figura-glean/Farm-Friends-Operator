@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Contract watcher. Every 15 minutes it captures the server's full tool surface
+  (schemas plus response shapes) and diffs it against the contract the current
+  code was written for. Confirmed, actionable drift becomes a work order.
+
+  Cadence: 900s. One MCP call per pass (tools/list); response shapes come free
+  from the raw dumps the cycle already writes, so this adds no meaningful server
+  load. Faster polling would buy nothing -- the cycle only refreshes those dumps
+  every 180s.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends.contract</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-u</string>
+    <string>__PROJECT__/release/experiments/contract_watch.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__/release</string>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/contract_watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/contract_watch.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

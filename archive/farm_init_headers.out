@@ -1,0 +1,19 @@
+HTTP/1.1 200 Connection Established
+
+HTTP/2 200 
+access-control-allow-headers: Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Authorization
+access-control-allow-methods: GET, POST, DELETE, OPTIONS
+access-control-allow-origin: *
+age: 1
+cache-control: no-cache
+cache-status: "Netlify Durable"; fwd=bypass
+cache-status: "Netlify Edge"; fwd=method; fwd-status=200
+content-type: application/json
+date: Thu, 20 Aug 2026 19:22:02 GMT
+netlify-vary: query
+server: Netlify
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+vary: Accept-Encoding
+x-content-type-options: nosniff
+x-nf-request-id: 01M0G9Z2V3PDWE9TJP8YVR2D8W
+

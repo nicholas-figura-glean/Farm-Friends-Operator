@@ -1,0 +1,106 @@
+<section class="grid">
+  <div class="card cr-hud full">
+    <div class="cr-hud-main">
+      <div class="cr-stat big-stat">
+        <label>Produce this run</label>
+        <strong id="cr-units">0</strong>
+        <small><span id="cr-ups">0/s</span> &middot; multiplier <span id="cr-mult">x1</span></small>
+      </div>
+      <div class="cr-stat big-stat">
+        <label>Coins</label>
+        <strong id="cr-coins">0</strong>
+        <small>game abstraction: each produce unit converts to 2 coins</small>
+      </div>
+      <div class="cr-stat">
+        <label>Heirloom hens &#128035;</label>
+        <strong id="cr-heirlooms">0</strong>
+        <small><span id="cr-rate">2%</span> produce each &middot; <span id="cr-rebuilds">0</span> rebuilds</small>
+      </div>
+      <div class="cr-stat">
+        <label>All-time produce</label>
+        <strong id="cr-alltime">0</strong>
+        <small>best single run <span id="cr-best">0</span></small>
+      </div>
+      <div class="cr-stat cr-stat-vs">
+        <label>Versus the run-46 proxy</label>
+        <strong id="cr-vs-real">0x</strong>
+        <small>a short collection cohort appeared capped at 1,550/<b>min</b>; later superseded</small>
+      </div>
+    </div>
+    <div class="cr-hud-buy">
+      <span class="cr-hud-label">Buy amount</span>
+      <div id="cr-buymode">
+        <button data-act="mode" data-mode="1" class="on">x1</button>
+        <button data-act="mode" data-mode="10">x10</button>
+        <button data-act="mode" data-mode="100">x100</button>
+        <button data-act="mode" data-mode="max">Max</button>
+      </div>
+      <span class="cr-hint">keys <b>1-4</b> amount &middot; <b>space</b> collect &middot; <b>B</b> best buy &middot; <b>M</b> manager</span>
+    </div>
+  </div>
+
+  <div class="card full cr-advice-card">
+    <span class="cr-advice-icon">&#129504;</span>
+    <div>
+      <div class="cr-advice-label">What to buy next</div>
+      <div class="cr-advice-text" id="cr-advice">&mdash;</div>
+    </div>
+    <div class="cr-advice-note">Ranked by payback time, the same arithmetic the real operator moved out of a
+      prompt and into <code>rules.py</code>. Seven compounding cost curves is not a decision worth making by hand.</div>
+  </div>
+
+  <div class="card wide">
+    <h2>Producers</h2>
+    <div id="cr-producers" class="cr-prods"></div>
+    <div class="cr-legend">Click an animal to collect a cycle by hand. Buy a <b>manager</b> and it runs itself &mdash; that is the whole point of an idle farm. Milestones at 25 / 50 / 100 / 200 / 300 / 400 double produce or halve the cycle. The <b>green outline</b> marks the best-value purchase right now.</div>
+  </div>
+
+  <div class="card side">
+    <h2>Rebuild for heirlooms</h2>
+    <div class="cr-prestige">
+      <div class="cr-gain"><strong id="cr-gain">0</strong><span>heirloom hens on rebuild</span></div>
+      <div class="cr-prestige-track"><i id="cr-prestige-bar" style="width:0%"></i></div>
+      <button class="cr-big-btn" id="cr-rebuild" data-act="rebuild" disabled>Rebuild needs 1M produce</button>
+      <p class="cr-fine">A rebuild wipes producers, coins and one-off upgrades. It keeps every heirloom and everything bought with them, and heirlooms you spend still count toward what you have earned &mdash; so spending them never shrinks a future rebuild.</p>
+    </div>
+    <h2 style="margin-top:18px">Heirloom upgrades <small>permanent</small></h2>
+    <div id="cr-perks" class="cr-ups"></div>
+  </div>
+
+  <div class="card full">
+    <h2>One-off upgrades <small>coins &middot; reset on rebuild</small></h2>
+    <div id="cr-oneoff" class="cr-ups cr-ups-wide"></div>
+  </div>
+
+  <div class="card wide">
+    <h2>Achievements <small>each one is worth +1% produce, forever</small></h2>
+    <div id="cr-achievements" class="cr-achs"></div>
+  </div>
+
+  <div class="card side">
+    <h2>Records</h2>
+    <div class="cr-records">
+      <div><span>achievements</span><span id="cr-ach-count">0 / 18</span></div>
+      <div><span>achievement bonus</span><span id="cr-ach-bonus">x1.00</span></div>
+      <div><span>hand collects</span><span id="cr-clicks">0</span></div>
+      <div><span>collected by hand</span><span id="cr-hand">0</span></div>
+      <div><span>peak rate</span><span id="cr-peak">0/s</span></div>
+      <div><span>banked offline</span><span id="cr-banked">0</span></div>
+      <div><span>time played</span><span id="cr-playtime">0s</span></div>
+    </div>
+    <p class="cr-fine">Records and achievements survive a rebuild. They are the only numbers here that
+      describe the player rather than the run.</p>
+  </div>
+
+  <div class="card full">
+    <h2>Why this game is an epistemic time capsule</h2>
+    <ul class="rules">
+      <li><b>This game is designed to keep scaling.</b> For the real farm, the current leaderboard evidence supports output increasing with herd size over the observed range; it does not prove unlimited scaling. That evidence superseded a short run-46 collection cohort that appeared capped and froze growth for 246 runs.</li>
+      <li><b>Wheat grows here.</b> Real wheat, corn and pumpkin stayed at <code>0% grown</code> for 27 minutes in one historical server regime. That negative result is scoped and overdue for revalidation.</li>
+      <li><b>Ceiling Lift I and II</b> are named after the run-46 collection cap we mistakenly promoted from a hypothesis into permanent policy.</li>
+      <li><b>The economy is deliberately abstract.</b> Each game produce unit converts to 2 coins and managers cost 20x a producer's base. Those values are inspired by selected real-farm prices, not a model of its full economy.</li>
+      <li><b>The achievements preserve the wrong turns.</b> <i>Wool, At Last</i> and <i>Milk, At Last</i> remember species that were negligible in the run-50 collection cohort without claiming they can never score.</li>
+    </ul>
+  </div>
+  <div id="cr-toast" class="cr-toast"></div>
+</section>

@@ -1,0 +1,762 @@
+#!/usr/bin/env python3
+"""Author agent: turns work orders into published code, or into nothing at all.
+
+This is the only component permitted to modify the farm's source. It is a
+one-shot launchd job so a crash is a no-op rather than a stuck daemon.
+
+The pipeline, and why each stage exists:
+
+    1. budget      an authoring pass costs money and risk; both are rationed
+    2. claim       one order at a time, worst severity first
+    3. stage       an isolated copy of the tree; the live tree is never edited
+                   speculatively, because launchd may fire mid-edit
+    4. patch       mechanical repair if the change is deterministic, otherwise
+                   the model
+    5. gate        the full release matrix, run inside the staging copy
+    6. publish     copy back, deploy/release.sh (which re-runs the gates), flip
+    7. canary      the flip is provisional and self-reverting
+
+Two backends, and when each is right
+------------------------------------
+Most contract drift is mechanical: an argument gets renamed, a tool gets renamed.
+Those repairs are exactly derivable from the diff, so they are done in Python with
+no model, no cost and no variance. The model is reserved for changes that need
+judgement -- a response format that has to be reparsed, a capability that has
+disappeared and needs a fallback.
+
+The model cannot weaken its own supervision
+-------------------------------------------
+`PROTECTED` files are refused as edit targets. An agent that can rewrite the gate
+matrix, the canary, the work queue, or its own prompt is not a supervised agent;
+the first regression it introduces could also delete the thing that would have
+caught it. If a work order genuinely requires touching protected code, the order
+is escalated for a human instead of attempted.
+
+Exit codes: 0 nothing to do or dormant, 3 an order failed and needs attention,
+4 the agent itself broke.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+PROJECT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT))
+
+from farm import canary, ledger, llm, policy, rules, tokens, workorders  # noqa: E402
+
+STATE = PROJECT / "state"
+LOCK = STATE / ".author.lock"
+STORE = STATE / "author.json"
+LOG = STATE / "author.ndjson"
+
+# Only these may ever be edited. An allowlist, not a denylist: a new top-level
+# file must be deliberately permitted rather than accidentally writable.
+EDITABLE_PREFIXES = ("farm/", "experiments/")
+EDITABLE_FILES = ("run.py",)
+
+# The supervision machinery is off limits. See the module docstring.
+PROTECTED = (
+    "farm/canary.py",
+    "farm/workorders.py",
+    "farm/llm.py",
+    "farm/rules.py",          # every budget and threshold lives here
+    "experiments/author_agent.py",
+    "experiments/contract_watch.py",
+    "deploy/release.sh",
+)
+
+# Files copied into a staging tree. Mirrors deploy/release.sh's manifest.
+STAGE_DIRS = ("farm", "experiments", "fixtures", "dashboard", "game", "deploy")
+STAGE_FILES = ("run.py", "monitor.py")
+
+MAX_PATCH_BYTES = 40_000
+MAX_FILE_BYTES = 220_000     # a file too big to send is a file too big to rewrite blind
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp.%d" % os.getpid())
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def log(row: Dict[str, Any]) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(row, ts=utcnow()), sort_keys=True, default=str) + "\n")
+
+
+# -- budget ------------------------------------------------------------------
+
+
+def spend_today() -> Tuple[int, float]:
+    """Authoring passes and dollars spent in the last 24h, from the token ledger."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    passes, cost = 0, 0.0
+    for row in tokens.tail(600):
+        if row.get("kind") != "author":
+            continue
+        try:
+            when = datetime.strptime(str(row.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when >= cutoff:
+            passes += 1
+            cost += float(row.get("cost_usd") or 0.0)
+    return passes, round(cost, 4)
+
+
+def budget_check(stored: Dict[str, Any]) -> Optional[str]:
+    """Reason to stand down this pass, or None to proceed."""
+    passes, cost = spend_today()
+    if passes >= rules.AUTHOR_MAX_ORDERS_PER_DAY:
+        return "daily pass budget spent (%d/%d)" % (passes, rules.AUTHOR_MAX_ORDERS_PER_DAY)
+    if cost >= rules.AUTHOR_MAX_COST_USD_PER_DAY:
+        return "daily cost ceiling reached ($%.2f/$%.2f)" % (cost, rules.AUTHOR_MAX_COST_USD_PER_DAY)
+
+    # Never author while a previous release is still on probation: two unproven
+    # changes at once make an unhealthy canary impossible to attribute.
+    if canary.active():
+        return "a canary is still watching the previous release"
+
+    last_run = stored.get("last_authored_run")
+    current = canary.latest_run()
+    if isinstance(last_run, int) and isinstance(current, int):
+        if current - last_run < rules.AUTHOR_MIN_INTERVAL_RUNS:
+            return "only %d run(s) since the last authored change (need %d)" % (
+                current - last_run, rules.AUTHOR_MIN_INTERVAL_RUNS,
+            )
+    return None
+
+
+# -- staging -----------------------------------------------------------------
+
+
+def stage_tree() -> str:
+    """An isolated copy of the code, with state/ shared by symlink.
+
+    The live tree is never edited speculatively: launchd fires every 180s and
+    would happily execute a half-applied change, which is incident #1 in
+    deploy/release.sh's history.
+    """
+    root = tempfile.mkdtemp(prefix="author-stage-")
+    for name in STAGE_DIRS:
+        source = PROJECT / name
+        if source.is_dir():
+            shutil.copytree(str(source), os.path.join(root, name),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+    for name in STAGE_FILES:
+        source = PROJECT / name
+        if source.is_file():
+            shutil.copy2(str(source), os.path.join(root, name))
+    # Gates read state; they must not get their own empty one and call it clean.
+    os.symlink(str(STATE), os.path.join(root, "state"))
+    journal = PROJECT / "farm-strategy-journal.md"
+    if journal.exists():
+        os.symlink(str(journal), os.path.join(root, "farm-strategy-journal.md"))
+    return root
+
+
+def editable(rel: str) -> Optional[str]:
+    """Why `rel` may not be edited, or None if it may."""
+    rel = rel.strip().lstrip("./")
+    if not rel.endswith(".py"):
+        return "only Python files may be edited"
+    if ".." in rel or rel.startswith("/"):
+        return "path escapes the project"
+    if rel in PROTECTED:
+        return "%s is supervision machinery and is protected" % rel
+    if rel in EDITABLE_FILES:
+        return None
+    if any(rel.startswith(prefix) for prefix in EDITABLE_PREFIXES):
+        return None
+    return "%s is outside the editable set" % rel
+
+
+# -- mechanical backend ------------------------------------------------------
+
+
+def mechanical_patch(order: Dict[str, Any], root: str) -> Optional[Dict[str, Any]]:
+    """Deterministic repair for changes that need no judgement.
+
+    Currently: argument renames. The diff already identified the old and new
+    names, and the fix is a keyword swap at known call sites. Doing this in Python
+    keeps the common case free, instant and reproducible.
+    """
+    if order.get("kind") != "arg_removed":
+        return None
+    detail = order.get("detail") or {}
+    old = str(detail.get("arg") or "")
+    new = str(detail.get("rename_candidate") or "")
+    tool = str(order.get("tool") or "")
+    if not old or not new or not tool:
+        return None
+
+    changed: Dict[str, str] = {}
+    # Rewrite `<something>.call("tool", ..., old=X, ...)` -> `new=X`, only inside
+    # the argument list of a call to this specific tool. A blind global rename
+    # would corrupt unrelated code that happens to share the keyword.
+    pattern = re.compile(
+        r"(\.(?:call|_call|call_tool)\(\s*[\"']%s[\"'][^()]*?)\b%s\s*=" % (re.escape(tool), re.escape(old)),
+        re.DOTALL,
+    )
+    for rel in candidate_files(order, root):
+        path = os.path.join(root, rel)
+        try:
+            before = open(path, "r", encoding="utf-8").read()
+        except OSError:
+            continue
+        after, count = pattern.subn(lambda m: m.group(1) + new + "=", before)
+        if count:
+            changed[rel] = after
+    if not changed:
+        return None
+    return {
+        "backend": "mechanical",
+        "files": changed,
+        "summary": "renamed %s= to %s= at %d call site file(s) for %s"
+                   % (old, new, len(changed), tool),
+    }
+
+
+def candidate_files(order: Dict[str, Any], root: str) -> List[str]:
+    """Files this order may touch, filtered through the edit policy."""
+    out: List[str] = []
+    for rel in list(order.get("files") or []):
+        rel = rel.strip().lstrip("./")
+        if editable(rel) is None and os.path.isfile(os.path.join(root, rel)):
+            out.append(rel)
+    return out[: rules.AUTHOR_MAX_FILES_PER_ORDER]
+
+
+# -- model backend -----------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+You maintain a headless Python program that plays an automated farming game via an
+MCP server. It runs unattended every 180 seconds and is currently in first place.
+Your edits ship without human review, so correctness matters more than elegance.
+
+Rules you must follow:
+
+* Reply ONLY with edit blocks in the exact format below. No prose, no explanation,
+  no markdown fences around the blocks.
+* SEARCH text must be copied byte-for-byte from the file shown to you, and must
+  appear exactly once in that file. Include enough surrounding lines to be unique.
+* Make the smallest change that satisfies the acceptance criteria.
+* Preserve existing behaviour that the order does not ask you to change.
+* Never remove or weaken an existing safety check, budget, timeout or rate limit.
+* Never add a third-party dependency; the standard library only.
+* Keep new constants in farm/rules.py style (module-level, named, commented) but
+  only if you were given that file to edit.
+* Explain any non-obvious reasoning in a code comment, not in your reply.
+
+Edit block format, repeated once per change:
+
+--- FILE: path/to/file.py
+<<<<<<< SEARCH
+exact existing text
+=======
+replacement text
+>>>>>>> REPLACE
+"""
+
+
+def build_prompt(order: Dict[str, Any], root: str) -> Tuple[str, List[str]]:
+    """The user half of the prompt: the order, plus the files it may touch."""
+    files = candidate_files(order, root)
+    parts = [
+        "# Work order %s (%s, %s)" % (order.get("id"), order.get("severity"), order.get("kind")),
+        "",
+        "## What changed on the server",
+        str(order.get("summary") or ""),
+        "",
+        "## What you must achieve",
+        str(order.get("intent") or ""),
+        "",
+        "## Acceptance criteria",
+    ]
+    parts += ["- %s" % c for c in (order.get("acceptance") or [])] or ["- (none stated)"]
+    if order.get("sites"):
+        parts += ["", "## Known call sites", ""] + ["- %s" % s for s in order["sites"][:20]]
+    if order.get("detail"):
+        parts += ["", "## Machine detail", "```json",
+                  json.dumps(order["detail"], indent=2, sort_keys=True)[:2000], "```"]
+
+    parts += ["", "## Files you may edit", ""]
+    if not files:
+        parts.append("(none were resolved; reply with no edit blocks)")
+    for rel in files:
+        try:
+            body = open(os.path.join(root, rel), "r", encoding="utf-8").read()
+        except OSError:
+            continue
+        if len(body) > MAX_FILE_BYTES:
+            body = body[:MAX_FILE_BYTES] + "\n# ... truncated ...\n"
+        parts += ["", "--- FILE: %s" % rel, "```python", body, "```"]
+    return "\n".join(parts), files
+
+
+EDIT_BLOCK = re.compile(
+    r"---\s*FILE:\s*(?P<path>\S+)\s*\n"
+    r"<<<<<<<\s*SEARCH\s*\n(?P<search>.*?)\n"
+    r"=======\s*\n(?P<replace>.*?)\n"
+    r">>>>>>>\s*REPLACE",
+    re.DOTALL,
+)
+
+
+def parse_edits(text: str) -> List[Dict[str, str]]:
+    out = []
+    for match in EDIT_BLOCK.finditer(text or ""):
+        out.append({
+            "path": match.group("path").strip().lstrip("./"),
+            "search": match.group("search"),
+            "replace": match.group("replace"),
+        })
+    return out
+
+
+def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
+    """Apply edit blocks to the staging tree, refusing anything ambiguous.
+
+    A SEARCH string that matches zero or many times is rejected rather than
+    guessed at: applying an edit to the wrong occurrence is how a working farm
+    quietly becomes a broken one.
+    """
+    files: Dict[str, str] = {}
+    problems: List[str] = []
+    for edit in edits:
+        rel = edit["path"]
+        refusal = editable(rel)
+        if refusal:
+            problems.append("refused %s: %s" % (rel, refusal))
+            continue
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            problems.append("refused %s: no such file" % rel)
+            continue
+        body = files.get(rel)
+        if body is None:
+            try:
+                body = open(path, "r", encoding="utf-8").read()
+            except OSError as exc:
+                problems.append("unreadable %s: %s" % (rel, exc.__class__.__name__))
+                continue
+        occurrences = body.count(edit["search"])
+        if occurrences == 0:
+            problems.append("SEARCH text not found in %s" % rel)
+            continue
+        if occurrences > 1:
+            problems.append("SEARCH text appears %d times in %s; ambiguous" % (occurrences, rel))
+            continue
+        files[rel] = body.replace(edit["search"], edit["replace"], 1)
+
+    if len(files) > rules.AUTHOR_MAX_FILES_PER_ORDER:
+        problems.append("touches %d files, over the %d limit"
+                        % (len(files), rules.AUTHOR_MAX_FILES_PER_ORDER))
+        files = {}
+    return {"files": files, "problems": problems}
+
+
+def model_patch(order: Dict[str, Any], root: str, feedback: str = "") -> Dict[str, Any]:
+    """Ask the gateway for edit blocks and apply them to the staging tree."""
+    user, offered = build_prompt(order, root)
+    if not offered:
+        return {"backend": "model", "files": {}, "problems": ["no editable file resolved for this order"]}
+    if feedback:
+        user += (
+            "\n\n## A previous attempt failed\n"
+            "Your last patch was rejected. Fix the underlying problem; do not simply "
+            "reformat.\n\n```\n" + feedback[:4000] + "\n```\n"
+        )
+
+    result = llm.complete(
+        SYSTEM_PROMPT, user,
+        max_output_tokens=32_000,
+        run=canary.latest_run(),
+        note="order=%s %s" % (order.get("id"), order.get("kind")),
+    )
+    if result["truncated"]:
+        return {"backend": "model", "files": {}, "usage": result,
+                "problems": ["model output was truncated (%s); patch discarded"
+                             % result.get("incomplete_reason")]}
+
+    edits = parse_edits(result["text"])
+    if not edits:
+        return {"backend": "model", "files": {}, "usage": result,
+                "problems": ["model returned no usable edit blocks"]}
+
+    applied = apply_edits(edits, root)
+    size = sum(len(v) for v in applied["files"].values())
+    if size > MAX_PATCH_BYTES:
+        applied["problems"].append("patch of %d bytes exceeds the %d byte limit" % (size, MAX_PATCH_BYTES))
+        applied["files"] = {}
+    return {
+        "backend": "model",
+        "files": applied["files"],
+        "problems": applied["problems"],
+        "usage": result,
+        "summary": "model edited %d file(s) via %d block(s)" % (len(applied["files"]), len(edits)),
+    }
+
+
+# -- gates -------------------------------------------------------------------
+
+GATES = (
+    ("self-test", ["/usr/bin/python3", "run.py", "--self-test"]),
+    ("knowledge", ["/usr/bin/python3", "deploy/test_knowledge.py"]),
+    ("evidence", ["/usr/bin/python3", "deploy/test_evidence.py"]),
+    ("tool-trace", ["/usr/bin/python3", "deploy/test_tool_trace.py"]),
+    ("topology", ["/usr/bin/python3", "deploy/test_topology.py"]),
+    ("dashboard", ["/usr/bin/python3", "deploy/test_dashboard.py"]),
+    ("recovery-watch", ["/usr/bin/python3", "deploy/test_recovery_watch.py"]),
+    ("contract", ["/usr/bin/python3", "deploy/test_contract.py"]),
+    ("contract-watch", ["/usr/bin/python3", "deploy/test_contract_watch.py"]),
+)
+
+
+def run_gates(root: str) -> Dict[str, Any]:
+    """The release matrix, executed inside the staging copy.
+
+    Running these before publishing (rather than relying on release.sh alone)
+    means a bad patch never reaches the live tree at all.
+    """
+    results = []
+    for name, command in GATES:
+        script = command[1] if command[1].endswith(".py") else None
+        if script and not os.path.isfile(os.path.join(root, script)):
+            continue
+        try:
+            proc = subprocess.run(command, cwd=root, capture_output=True, text=True,
+                                  timeout=600, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results.append({"gate": name, "ok": False, "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200])})
+            continue
+        ok = proc.returncode == 0
+        detail = ""
+        if not ok:
+            tail = (proc.stdout or "") + (proc.stderr or "")
+            detail = tail[-1500:]
+        results.append({"gate": name, "ok": ok, "detail": detail})
+    failed = [r for r in results if not r["ok"]]
+    return {"passed": not failed, "results": results, "failed": failed}
+
+
+def gates_already_failing(root: str, gate_names: List[str]) -> List[str]:
+    """Which of `gate_names` fail on the PRISTINE tree, with no patch applied.
+
+    Attribution matters more than it looks. The gate matrix includes suites that
+    assert things about live game data -- for example that the herd/output fit stays
+    strong -- and those can go red on their own as the farm grows, with no code
+    change involved. An author agent that cannot tell "my patch broke this" from
+    "this was already broken" will blame itself, exhaust its retries, and abandon
+    perfectly good work orders. Worse, it would keep paying a model to re-fix a
+    problem that was never its patch.
+
+    So a gate failure is only charged to the patch if that same gate passes without
+    it. This runs only on failure, never on the happy path, so it costs nothing in
+    the normal case.
+    """
+    pristine: List[str] = []
+    for name, command in GATES:
+        if name not in gate_names:
+            continue
+        script = command[1] if command[1].endswith(".py") else None
+        source = str(PROJECT / script) if script else None
+        if source and not os.path.isfile(source):
+            continue
+        try:
+            # Run the live tree's copy of the suite against the live tree, which is
+            # by definition unpatched.
+            proc = subprocess.run(command, cwd=str(PROJECT), capture_output=True,
+                                  text=True, timeout=600, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            pristine.append(name)
+    return pristine
+
+
+def compile_check(files: Dict[str, str], root: str) -> Optional[str]:
+    """Syntax-check every edited file before spending minutes on the suites."""
+    for rel in files:
+        path = os.path.join(root, rel)
+        proc = subprocess.run(["/usr/bin/python3", "-m", "py_compile", path],
+                              capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            return "%s does not compile: %s" % (rel, (proc.stderr or "")[-600:])
+    return None
+
+
+# -- publish -----------------------------------------------------------------
+
+
+def current_revision() -> str:
+    try:
+        return os.path.basename(os.path.realpath(str(PROJECT / "release")))
+    except OSError:
+        return ""
+
+
+def publish(files: Dict[str, str], order: Dict[str, Any], summary: str) -> Dict[str, Any]:
+    """Copy the verified patch into the live tree and release it under a canary."""
+    previous = current_revision()
+
+    backups: Dict[str, str] = {}
+    for rel, body in files.items():
+        live = PROJECT / rel
+        try:
+            backups[rel] = live.read_text(encoding="utf-8")
+        except OSError:
+            backups[rel] = ""
+        live.write_text(body, encoding="utf-8")
+
+    proc = subprocess.run(["/bin/bash", "deploy/release.sh"], cwd=str(PROJECT),
+                          capture_output=True, text=True, timeout=1800, check=False)
+    if proc.returncode != 0:
+        # release.sh re-runs the gates against the live tree. If it refuses, put
+        # the tree back exactly as it was: a rejected patch must leave no trace.
+        for rel, body in backups.items():
+            (PROJECT / rel).write_text(body, encoding="utf-8")
+        return {"published": False,
+                "error": "release.sh refused: %s" % ((proc.stdout + proc.stderr)[-1200:])}
+
+    revision = current_revision()
+    if not revision or revision == previous:
+        return {"published": False, "error": "release pointer did not advance"}
+
+    armed = canary.arm(revision, previous, reason=summary, order_id=str(order.get("id") or ""),
+                       store=str(PROJECT / canary.STORE), history=str(PROJECT / canary.HISTORY),
+                       run_history=str(PROJECT / canary.RUN_HISTORY))
+    return {"published": True, "revision": revision, "previous": previous, "canary": armed}
+
+
+# -- main --------------------------------------------------------------------
+
+
+def main() -> int:
+    STATE.mkdir(parents=True, exist_ok=True)
+    handle = LOCK.open("w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("AUTHOR skipped: a previous pass is still running")
+        return 0
+
+    stored = read_json(STORE)
+    queue = str(PROJECT / workorders.QUEUE)
+
+    # Reclaim work abandoned by a killed pass before deciding there is nothing to do.
+    for released in workorders.release_stale(3600, queue):
+        log({"event": "claim_released", "order": released.get("id"), "status": released.get("status")})
+
+    standdown = budget_check(stored)
+    if standdown:
+        print("AUTHOR standing down: %s" % standdown)
+        return 0
+
+    order = workorders.next_order(queue)
+    if not order:
+        print("AUTHOR idle: no open work orders")
+        return 0
+
+    blocked = [f for f in (order.get("files") or []) if editable(str(f).strip().lstrip("./"))]
+    if blocked and not candidate_files(order, str(PROJECT)):
+        workorders.resolve(order["id"], workorders.ABANDONED,
+                           note="requires protected or non-editable files: %s" % ", ".join(blocked[:4]),
+                           path=queue)
+        print("AUTHOR escalated %s: needs %s, which is not self-editable" % (order["id"], blocked[:2]))
+        log({"event": "escalated", "order": order["id"], "blocked": blocked})
+        return 3
+
+    runtime = policy.runtime_context()
+    ledger.set_context(actor="author_agent", run=canary.latest_run(),
+                       policy_id=runtime.get("policy_id"),
+                       claim_registry_version=runtime.get("claim_registry_version"),
+                       step="author_change")
+
+    workorders.claim(order["id"], "author_agent", run=canary.latest_run(), path=queue)
+    print("AUTHOR claimed %s (%s %s): %s"
+          % (order["id"], order["severity"], order["kind"], (order.get("summary") or "")[:90]))
+
+    root = stage_tree()
+    try:
+        return author_pass(order, root, queue, stored)
+    except Exception as exc:  # noqa: BLE001 - a bug here must not wedge the queue
+        workorders.resolve(order["id"], workorders.FAILED,
+                           note="author agent raised %s: %s" % (type(exc).__name__, str(exc)[:300]),
+                           path=queue)
+        log({"event": "crashed", "order": order["id"], "error": "%s: %s" % (type(exc).__name__, str(exc)[:400])})
+        print("AUTHOR failed on %s: %s: %s" % (order["id"], type(exc).__name__, str(exc)[:200]))
+        return 4
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, Any]) -> int:
+    """Patch, gate and publish one order inside the staging tree."""
+    attempt_notes: List[str] = []
+    patch: Optional[Dict[str, Any]] = None
+
+    # Mechanical first: free, deterministic, and correct for the common rename.
+    mechanical = mechanical_patch(order, root)
+    if mechanical:
+        patch = mechanical
+        print("  mechanical repair: %s" % mechanical["summary"])
+    else:
+        availability = llm.availability()
+        if not availability.get("available"):
+            # Dormancy is a normal state. Leave the order open, say why, and do not
+            # charge an attempt for work that never started.
+            workorders.resolve(order["id"], workorders.OPEN,
+                               note="model dormant: %s" % availability.get("reason", ""),
+                               path=queue, attempts=int(order.get("attempts") or 0))
+            print("  no mechanical fix and the model is dormant: %s" % availability.get("reason"))
+            log({"event": "dormant", "order": order["id"], "reason": availability.get("reason")})
+            return 0
+
+    feedback = ""
+    for attempt in range(1, rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER + 1):
+        if patch is None:
+            try:
+                patch = model_patch(order, root, feedback)
+            except llm.Dormant as exc:
+                workorders.resolve(order["id"], workorders.OPEN,
+                                   note="model became dormant: %s" % exc, path=queue,
+                                   attempts=int(order.get("attempts") or 0))
+                print("  model went dormant mid-pass: %s" % exc)
+                return 0
+            except llm.GatewayError as exc:
+                workorders.resolve(order["id"], workorders.FAILED,
+                                   note="gateway error: %s" % exc, path=queue)
+                print("  gateway error: %s" % exc)
+                return 3
+
+        if patch.get("problems") or not patch.get("files"):
+            note = "; ".join(patch.get("problems") or ["no files changed"])
+            attempt_notes.append("attempt %d: %s" % (attempt, note))
+            print("  attempt %d rejected: %s" % (attempt, note[:200]))
+            feedback = note
+            patch = None
+            continue
+
+        files = patch["files"]
+        for rel, body in files.items():
+            with open(os.path.join(root, rel), "w", encoding="utf-8") as target:
+                target.write(body)
+
+        broken = compile_check(files, root)
+        if broken:
+            attempt_notes.append("attempt %d: %s" % (attempt, broken))
+            print("  attempt %d does not compile" % attempt)
+            feedback = broken
+            restore(order, root, files)
+            patch = None
+            continue
+
+        print("  gating %d file(s): %s" % (len(files), ", ".join(sorted(files))))
+        gates = run_gates(root)
+        if not gates["passed"]:
+            failed_names = [g["gate"] for g in gates["failed"]]
+            # Do not charge a pre-existing failure to this patch.
+            pre_existing = gates_already_failing(root, failed_names)
+            genuinely_ours = [n for n in failed_names if n not in pre_existing]
+            if pre_existing and not genuinely_ours:
+                workorders.resolve(
+                    order["id"], workorders.OPEN,
+                    note="blocked: %s already failing before this patch; "
+                         "not attributable to the change" % ", ".join(pre_existing),
+                    path=queue,
+                    # Give the attempt back. Claiming incremented the counter, but
+                    # nothing about this order was actually tried, and three such
+                    # passes would otherwise abandon a perfectly good order for a
+                    # failure that was never its fault.
+                    attempts=int(order.get("attempts") or 0),
+                )
+                print("  standing down: %s already red on the unpatched tree"
+                      % ", ".join(pre_existing))
+                print("  the order stays open; no attempt charged")
+                log({"event": "blocked_pre_existing", "order": order["id"],
+                     "gates": pre_existing})
+                ledger.record("author.blocked", {"order": order["id"],
+                                                "pre_existing_gates": pre_existing})
+                return 3
+            detail = "; ".join("%s failed" % name for name in genuinely_ours)
+            evidence = "\n\n".join(
+                "%s:\n%s" % (g["gate"], g["detail"])
+                for g in gates["failed"] if g["gate"] in genuinely_ours
+            )[:6000]
+            attempt_notes.append("attempt %d: %s" % (attempt, detail))
+            print("  attempt %d failed gates: %s" % (attempt, detail))
+            feedback = detail + "\n\n" + evidence
+            restore(order, root, files)
+            patch = None
+            continue
+
+        # Verified in isolation. Now publish for real.
+        summary = patch.get("summary") or "work order %s" % order["id"]
+        result = publish(files, order, summary)
+        if not result.get("published"):
+            workorders.resolve(order["id"], workorders.FAILED,
+                               note=str(result.get("error"))[:400], path=queue)
+            print("  publish refused: %s" % str(result.get("error"))[:300])
+            log({"event": "publish_refused", "order": order["id"], "error": result.get("error")})
+            return 3
+
+        workorders.resolve(order["id"], workorders.PUBLISHED,
+                           note=summary, release=result["revision"], path=queue,
+                           backend=patch.get("backend"))
+        write_json(STORE, dict(stored, last_authored_run=canary.latest_run(),
+                               last_order=order["id"], last_revision=result["revision"],
+                               last_ts=utcnow()))
+        log({"event": "published", "order": order["id"], "revision": result["revision"],
+             "previous": result["previous"], "backend": patch.get("backend"),
+             "files": sorted(files), "summary": summary})
+        ledger.record("author.published", {"order": order["id"], "revision": result["revision"],
+                                          "backend": patch.get("backend"), "files": sorted(files)})
+        print("AUTHOR published %s as %s (canary armed, previous %s)"
+              % (order["id"], result["revision"], result["previous"]))
+        return 0
+
+    workorders.resolve(order["id"], workorders.FAILED,
+                       note=" | ".join(attempt_notes)[:500], path=queue)
+    log({"event": "exhausted", "order": order["id"], "notes": attempt_notes})
+    print("AUTHOR gave up on %s after %d attempt(s)" % (order["id"], rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER))
+    return 3
+
+
+def restore(order: Dict[str, Any], root: str, files: Dict[str, str]) -> None:
+    """Undo a rejected patch in the staging tree so the next attempt starts clean."""
+    for rel in files:
+        source = PROJECT / rel
+        try:
+            shutil.copy2(str(source), os.path.join(root, rel))
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

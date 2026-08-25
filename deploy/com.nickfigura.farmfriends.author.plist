@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Author agent. Every 10 minutes it takes at most one open work order, patches a
+  staging copy of the tree (mechanically where the fix is deterministic, via the
+  Glean llm_proxy gateway where it needs judgement), runs the full release gate
+  matrix, and publishes under a self-reverting canary.
+
+  IMPORTANT: it runs from the PROJECT tree, not from __PROJECT__/release like the
+  other agents. It has to edit the working tree and then invoke deploy/release.sh
+  to publish it; running from inside an immutable release would mean editing the
+  very tree it was launched from.
+
+  Cadence is only an upper bound on attention. The real rate limit is in
+  farm/rules.py (AUTHOR_MIN_INTERVAL_RUNS, AUTHOR_MAX_ORDERS_PER_DAY,
+  AUTHOR_MAX_COST_USD_PER_DAY) plus the rule that no new pass may start while a
+  canary is still watching the last one. Most invocations exit immediately.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends.author</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-u</string>
+    <string>__PROJECT__/experiments/author_agent.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__</string>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/author.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/author.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

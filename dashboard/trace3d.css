@@ -1,0 +1,77 @@
+/* ---- the trace web -----------------------------------------------------
+ * A 3D panel inside a page that is otherwise flat SVG and CSS bars, so the
+ * styling job is to stop it looking like a widget bolted on: same panel border,
+ * same muted type scale, and every control reachable from the keyboard.
+ * The canvas itself is sized in CSS pixels and backed at devicePixelRatio.
+ */
+.trace { grid-column:1/-1; }
+.trace .head { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+.trace .head h2 { margin:0; }
+.trace-sub { color:var(--muted); font-size:12px; margin-top:4px; max-width:62ch; }
+.trace-stage { position:relative; margin-top:12px; border:1px solid var(--line); border-radius:12px;
+  overflow:hidden; background:#080d0b; }
+.trace-stage canvas { display:block; width:100%; height:520px; touch-action:none; cursor:grab; }
+.trace-stage canvas.dragging { cursor:grabbing; }
+.trace-stage.flat canvas { display:none; }
+
+/* Overlays: legend, readout and inspector float over the scene so the canvas
+ * gets the whole panel width. All three are plain DOM, so they are selectable,
+ * screen-reader visible and cost nothing per frame. */
+.trace-overlay { position:absolute; pointer-events:none; font-size:11.5px; line-height:1.5; }
+.trace-legend { top:10px; left:12px; display:flex; flex-direction:column; gap:5px;
+  background:#0b100dcc; border:1px solid var(--line); border-radius:9px; padding:9px 11px; backdrop-filter:blur(3px); }
+.trace-legend b { font-size:10px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); font-weight:700; }
+.trace-legend .row { display:flex; align-items:center; gap:7px; color:var(--muted); white-space:nowrap; }
+.trace-legend .swatch { width:9px; height:9px; border-radius:50%; box-shadow:0 0 9px currentColor; background:currentColor; flex:0 0 9px; }
+.trace-legend .row span.n { color:var(--text); font-variant-numeric:tabular-nums; margin-left:auto; padding-left:10px; }
+.trace-legend .kindrow { color:var(--muted); }
+.trace-legend .kindrow i { font-style:normal; color:var(--text); }
+
+.trace-readout { top:10px; right:12px; text-align:right; background:#0b100dcc; border:1px solid var(--line);
+  border-radius:9px; padding:9px 11px; backdrop-filter:blur(3px); min-width:170px; }
+.trace-readout b { display:block; font-size:19px; font-weight:750; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }
+.trace-readout small { display:block; color:var(--muted); }
+.trace-readout .fps { color:var(--muted); font-size:10.5px; margin-top:5px; font-variant-numeric:tabular-nums; }
+
+.trace-hint { bottom:10px; left:12px; color:var(--muted); background:#0b100dcc; border:1px solid var(--line);
+  border-radius:9px; padding:6px 10px; }
+.trace-hint kbd { background:#ffffff14; border:1px solid var(--line); border-radius:4px; padding:0 4px;
+  font:inherit; font-size:10.5px; color:var(--text); }
+
+/* The inspector is the reason this is a tool and not a screensaver: click any
+ * node and it names the file, the line, the size and the steps that reach it. */
+.trace-inspect { position:absolute; bottom:10px; right:12px; width:296px; max-width:calc(100% - 24px);
+  background:#0b100de6; border:1px solid var(--line); border-radius:11px; padding:11px 13px;
+  backdrop-filter:blur(4px); pointer-events:auto; }
+.trace-inspect h3 { margin:0 0 2px; font-size:13px; letter-spacing:-.01em; word-break:break-word; }
+.trace-inspect .qual { color:var(--muted); font:11.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+  word-break:break-all; margin-bottom:7px; }
+.trace-inspect .doc { color:var(--muted); font-size:11.5px; margin-bottom:8px; }
+.trace-inspect .kv { grid-template-columns:1fr; gap:2px 0; }
+.trace-inspect .kv div { padding:3px 0; font-size:11.5px; }
+.trace-inspect .tagrow { margin-top:8px; }
+.trace-inspect .close { position:absolute; top:7px; right:9px; appearance:none; background:none; border:0;
+  color:var(--muted); font:700 15px/1 inherit; cursor:pointer; padding:3px 5px; }
+.trace-inspect .close:hover { color:var(--text); }
+.trace-empty { padding:34px 16px; text-align:center; color:var(--muted); }
+
+.trace-controls { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.trace-controls .chip[aria-pressed="true"] { background:var(--green); border-color:var(--green); color:#0d1a12; }
+
+/* Fallback table: no 2D context, reduced-motion users who opt out, or a browser
+ * where canvas is disabled. Same facts, no pixels. */
+table.trace-fallback { margin-top:4px; }
+table.trace-fallback caption { text-align:left; color:var(--muted); font-size:12px; padding:10px 0; }
+.trace-flatnote { color:var(--muted); font-size:12px; margin-top:10px; }
+
+@media (max-width:900px) {
+  .trace-stage canvas { height:380px; }
+  .trace-inspect { position:static; width:auto; margin-top:10px; backdrop-filter:none; }
+  .trace-legend, .trace-readout { position:static; display:inline-flex; margin:8px 8px 0 0; }
+  .trace-overlay { position:static; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The layout still settles and the run still grows the web on poll; what stops
+   * is the idle camera drift and the packet stream. */
+  .trace-stage canvas { cursor:default; }
+}

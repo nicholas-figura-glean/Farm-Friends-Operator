@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends</string>
+
+  <!-- Runs the published release, never the working tree. See deploy/release.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <!-- -u so the log reflects progress in real time, not only at exit -->
+    <string>-u</string>
+    <string>__PROJECT__/release/run.py</string>
+    <string>--cycle</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__/release</string>
+
+  <!-- Production is per-animal, not a global tick, so there is nothing to align
+       to: what matters is collecting and reinvesting often. Uncollected produce
+       accumulates safely, and flock skips a run if the previous one is active. -->
+  <!-- Cadence raised 180s -> 300s. At ~17,000 animals collect_produce takes ~75s
+       and feed_animals("all") ~83s, so one honest cycle cannot fit in 180s and
+       runs were dying on the hard timeout - each death costing a feeding. Both
+       calls scale with herd size. See CYCLE_BUDGET_SECONDS in farm/rules.py. -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- RunAtLoad was false, which cost us on every wake and every reinstall: the
+       herd sat unfed for up to a full interval before the first cycle. It is
+       cheap to run one cycle at load (the flock lock makes a double-launch a
+       no-op), and after a sleep gap the first cycle is exactly what restores
+       feed. See the run 291 post-mortem in farm/rules.py. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/launchd.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

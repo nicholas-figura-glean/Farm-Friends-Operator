@@ -1,0 +1,8 @@
+#!/bin/bash
+# Opens the read-only dashboard. The port check lives in open_monitor.py because
+# "does something answer on 8765" is the wrong question: an unrelated local app
+# was already answering there, so identity is checked against /api/state instead.
+set -uo pipefail
+PROJECT="/Users/nickfigura/.glean/ui/workspaces/Projects/fe6d111f-2ee0-4d91-9991-4d9b84cc4b11"
+cd "$PROJECT" || exit 1
+exec /usr/bin/env python3 deploy/open_monitor.py --port 8765

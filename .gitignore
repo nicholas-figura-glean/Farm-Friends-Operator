@@ -1,0 +1,32 @@
+# Runtime state is deliberately not versioned.
+#
+# It is 322MB and growing every 180s: state/raw alone is 161MB of MCP response
+# dumps and state/tool_calls.ndjson is 144MB of append-only call trace. Committing
+# it would make every author-agent commit enormous, and the launchd agents write to
+# it continuously, so the index would never be clean. The ledgers are already
+# append-only and immutable on disk, which is the property we actually wanted from
+# version control here.
+state/
+
+# Immutable release trees and the live pointer. These are *outputs* of a commit,
+# published by deploy/release.sh. Versioning them would store every file twice and
+# let a stale release tree be resurrected by a checkout, which is precisely the
+# confusion the release/ symlink exists to prevent.
+releases/
+release
+
+# Build and editor noise.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+*.swp
+*.tmp
+*.tmp.[0-9]*
+
+# Generated preview, rebuilt on demand.
+game-preview.html
+
+# Local scratch that must never reach a commit.
+.author-stage-*/
+*.local.json
