@@ -7,7 +7,7 @@
 
   Cadence: 900s. One MCP call per pass (tools/list); response shapes come free
   from the raw dumps the cycle already writes, so this adds no meaningful server
-  load. Faster polling would buy nothing -- the cycle only refreshes those dumps
+  load. Faster polling would buy nothing, since the cycle only refreshes those dumps
   every 180s.
 -->
 <plist version="1.0">

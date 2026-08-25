@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Dashboard agent. Every 15 minutes. Read-only with respect to the farm: it never
+  plays, never edits code, and never touches game state.
+
+  It does two things the dashboard cannot do for itself. It records a new
+  architecture version whenever the system's shape changes, which means parsing
+  every module and shelling out to git, far too slow for an HTTP handler. And it
+  exercises each tab's data source the way the page does, so a readout that has
+  quietly started raising is reported as a defect instead of showing an empty
+  panel that looks like a quiet farm.
+
+  That second job exists because the failure already happened: five of the seven
+  agents were unmonitored while the page showed green, and a canary came within
+  2.7 percent of reverting a good release with no sign of it anywhere on the
+  dashboard.
+
+  Cadence is 15 minutes because nothing here is urgent. A broken readout files a
+  work order, and the author agent picks it up on its own 10-minute cycle.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nickfigura.farmfriends.dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-u</string>
+    <string>__PROJECT__/release/experiments/dashboard_agent.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__/release</string>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/state/dashboard_agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/state/dashboard_agent.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

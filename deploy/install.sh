@@ -20,6 +20,7 @@ RECOVERY="$LABEL.recovery"
 CONTRACT="$LABEL.contract"
 AUTHOR="$LABEL.author"
 RESEARCH="$LABEL.research"
+DASHBOARD="$LABEL.dashboard"
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 PLIST="$AGENT_DIR/$LABEL.plist"
@@ -29,6 +30,7 @@ RECOVERY_PLIST="$AGENT_DIR/$RECOVERY.plist"
 CONTRACT_PLIST="$AGENT_DIR/$CONTRACT.plist"
 AUTHOR_PLIST="$AGENT_DIR/$AUTHOR.plist"
 RESEARCH_PLIST="$AGENT_DIR/$RESEARCH.plist"
+DASHBOARD_PLIST="$AGENT_DIR/$DASHBOARD.plist"
 DOMAIN="gui/$(id -u)"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -54,7 +56,7 @@ fi
 "$PROJECT/deploy/release.sh"
 
 mkdir -p "$AGENT_DIR" "$PROJECT/state"
-for label in "$LABEL" "$SUPERVISOR" "$EXPAND" "$RECOVERY" "$CONTRACT" "$AUTHOR" "$RESEARCH"; do
+for label in "$LABEL" "$SUPERVISOR" "$EXPAND" "$RECOVERY" "$CONTRACT" "$AUTHOR" "$RESEARCH" "$DASHBOARD"; do
   sed "s|__PROJECT__|$PROJECT|g" "$PROJECT/deploy/$label.plist" > "$AGENT_DIR/$label.plist"
   plutil -lint "$AGENT_DIR/$label.plist"
   launchctl bootout "$DOMAIN/$label" 2>/dev/null || true

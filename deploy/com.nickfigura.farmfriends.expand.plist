@@ -16,7 +16,7 @@
 
     Bounded on purpose: each sprint stops after 150s, and expand.py refuses to
     spend below the coin floor that keeps the TARGET herd fed. Once the herd
-    reaches --target the sprint exits immediately, so leaving this installed is
+    reaches the target herd size the sprint exits immediately, so leaving this installed is
     harmless.
 
     Rate is set from MEASUREMENT plus a hard lesson about concurrency. In

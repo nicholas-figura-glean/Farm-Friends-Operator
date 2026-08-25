@@ -76,6 +76,7 @@ fi
 /usr/bin/python3 deploy/test_contract_watch.py
 /usr/bin/python3 deploy/test_vcs.py
 /usr/bin/python3 deploy/test_author.py
+/usr/bin/python3 deploy/test_dashboard_agent.py
 # The switchboard's honesty rules (measured flight time, no invented spans, no
 # packet without a recorded call) live in JavaScript, so its JavaScriptCore suite
 # is a release gate too rather than something only test_dashboard.sh runs.
@@ -83,6 +84,12 @@ wire_suite="$(/usr/bin/osascript -l JavaScript dashboard/test_mcp_wire.js 2>&1)"
 echo "$wire_suite" | /usr/bin/tail -n 2
 if ! echo "$wire_suite" | /usr/bin/grep -q '^PASS$'; then
   echo "release rejected: MCP switchboard suite failed" >&2
+  exit 3
+fi
+arch_suite="$(/usr/bin/osascript -l JavaScript dashboard/test_architecture.js 2>&1)"
+echo "$arch_suite" | /usr/bin/tail -n 2
+if ! echo "$arch_suite" | /usr/bin/grep -q '^PASS$'; then
+  echo "release rejected: architecture tab suite failed" >&2
   exit 3
 fi
 /bin/bash deploy/test_game.sh

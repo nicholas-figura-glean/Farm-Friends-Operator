@@ -1,0 +1,407 @@
+"""One read-only view of the self-healing machinery, for the dashboard.
+
+Every subsystem built for autonomous operation -- the contract watcher, the author
+agent, the research agent, work orders, canary probation, version control, the model
+budget -- kept its own state and its own CLI flag. None of it reached the dashboard.
+For a while the operator could see the farm in detail while the machinery *changing*
+the farm was entirely invisible: a canary came within 2.7% of reverting a good
+release, and the only place that was visible was `run.py --canary-status`.
+
+Two rules this module follows, because a dashboard aggregator that breaks the
+dashboard is worse than no aggregator:
+
+* every section is independently guarded. A subsystem that raises, or whose state
+  file is missing or half-written, degrades to an `error` string in its own section
+  and cannot take the page down.
+* it is strictly read-only. Nothing here arms, claims, resolves, commits or reverts
+  anything. The dashboard is allowed to be wrong about the farm; it is not allowed to
+  change it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+PROJECT = Path(__file__).resolve().parent.parent
+
+# Every agent that must be alive for the loop to be fully autonomous, with what its
+# absence actually costs. The dashboard used to watch two of these seven, so five
+# could have been dead behind a green page -- including the author agent, whose
+# silence looks exactly like "no repairs were needed".
+AGENTS: List[Dict[str, str]] = [
+    {"key": "cycle", "label": "com.nickfigura.farmfriends",
+     "role": "plays the farm", "lost": "the farm stops playing entirely"},
+    {"key": "supervisor", "label": "com.nickfigura.farmfriends.supervisor",
+     "role": "watches the loop", "lost": "failures stop being escalated"},
+    {"key": "expand", "label": "com.nickfigura.farmfriends.expand",
+     "role": "buys capacity", "lost": "the herd stops growing"},
+    {"key": "recovery", "label": "com.nickfigura.farmfriends.recovery",
+     "role": "restarts a wedged loop", "lost": "a wedged loop stays wedged"},
+    {"key": "contract", "label": "com.nickfigura.farmfriends.contract",
+     "role": "detects endpoint drift", "lost": "schema changes go unnoticed"},
+    {"key": "author", "label": "com.nickfigura.farmfriends.author",
+     "role": "writes the repairs", "lost": "drift is detected but never fixed"},
+    {"key": "research", "label": "com.nickfigura.farmfriends.research",
+     "role": "finds unused strategy", "lost": "no new strategy is explored"},
+    # Listed last but watched like the rest. An agent that reports on the health of
+    # every readout is worthless if its own silence goes unnoticed, and its silence is
+    # especially quiet: nothing else writes the architecture ledger or notices a
+    # broken tab, so losing it means the operator view degrades invisibly.
+    {"key": "dashboard", "label": "com.nickfigura.farmfriends.dashboard",
+     "role": "verifies the operator view",
+     "lost": "broken dashboard readouts stop being reported"},
+]
+
+
+def _guard(fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    """Run a section, converting any failure into a reportable value.
+
+    Bare `except Exception` is deliberate. The whole point is that an unanticipated
+    failure in one subsystem's state must not blank the operator's only view of the
+    other six.
+    """
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+
+
+def _age_seconds(ts: Optional[str]) -> Optional[int]:
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
+def _tail(path: Path, limit: int) -> List[Dict[str, Any]]:
+    """Last `limit` valid JSON objects from an append-only log.
+
+    A partially written final line is normal: these files are appended to by other
+    processes while the dashboard reads them. Bad lines are skipped rather than
+    raising, because one torn write should not blank a panel.
+    """
+    if not path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows[-limit:]
+
+
+def agents() -> Dict[str, Any]:
+    """Liveness of all seven agents, not just the two the page used to know about."""
+    from farm import scheduler
+
+    out: List[Dict[str, Any]] = []
+    down: List[str] = []
+    for spec in AGENTS:
+        row = dict(spec)
+        try:
+            st = scheduler.status(spec["label"])
+            row.update({
+                "loaded": bool(st.get("loaded")),
+                "state": st.get("state") or "unknown",
+                "runs": st.get("runs"),
+                "last_exit": st.get("last_exit"),
+            })
+            # A nonzero last exit is worth surfacing but is not itself an outage:
+            # these are periodic agents that exit between runs, and several use a
+            # nonzero code to mean "nothing to do".
+            if not row["loaded"]:
+                down.append(spec["key"])
+        except Exception as exc:  # noqa: BLE001
+            row.update({"loaded": False, "state": "error", "detail": str(exc)[:120]})
+            down.append(spec["key"])
+        out.append(row)
+    return {"agents": out, "down": down, "expected": len(AGENTS), "live": len(AGENTS) - len(down)}
+
+
+def canary_state() -> Dict[str, Any]:
+    """Probation status of the current provisional release."""
+    from farm import canary
+
+    st = canary.status()
+    verdict = st.get("verdict") or {}
+    info = st.get("canary") or {}
+    return {
+        "status": verdict.get("status") or st.get("status") or "inactive",
+        "revision": info.get("revision"),
+        "previous": info.get("previous"),
+        "order_id": info.get("order_id"),
+        "reason": verdict.get("reason"),
+        "runs_observed": verdict.get("runs_observed"),
+        # The per-animal figures are the ones that decide a revert; absolute rate is
+        # kept only because it is what an operator recognises at a glance.
+        "baseline_per_animal": verdict.get("baseline_per_animal"),
+        "observed_per_animal": verdict.get("observed_per_animal"),
+        "threshold": verdict.get("threshold"),
+        "excluded_runs": verdict.get("excluded_runs") or [],
+        "excluded_reason": verdict.get("excluded_reason"),
+        "armed_age_seconds": _age_seconds(info.get("armed_ts")),
+        "resolution": info.get("resolution"),
+    }
+
+
+def orders_state(limit: int = 12) -> Dict[str, Any]:
+    """Work-order queue: what the machinery has been asked to fix."""
+    from farm import workorders
+
+    summary = workorders.summary()
+    rows = []
+    for order in workorders.current().values():
+        rows.append({
+            "id": order.get("id"),
+            "status": order.get("status"),
+            "kind": order.get("kind"),
+            "severity": order.get("severity"),
+            "summary": (order.get("summary") or "")[:180],
+            "attempts": order.get("attempts") or 0,
+            "claimed_by": order.get("claimed_by"),
+            "age_seconds": _age_seconds(order.get("ts")),
+        })
+    # Open and blocked work first: a finished order is history, an unclaimed one is a
+    # question about whether the loop is keeping up.
+    rank = {"open": 0, "claimed": 1, "failed": 2, "published": 3, "rejected": 4}
+    rows.sort(key=lambda r: (rank.get(str(r.get("status")), 9), -(r.get("age_seconds") or 0)))
+    return {"summary": summary, "orders": rows[:limit], "total": len(rows)}
+
+
+def contract_state(limit: int = 8) -> Dict[str, Any]:
+    """Endpoint drift: what the last scans saw at the MCP boundary.
+
+    Note the shape of a scan row: `changes` is a *count* and `detail` holds the list.
+    Reading `changes` as the list yields "'int' object is not subscriptable", which is
+    how this was first written.
+    """
+    from farm import contract
+
+    rows = contract.history(limit=limit)
+    latest = rows[-1] if rows else {}
+    detail = latest.get("detail")
+    detail = detail if isinstance(detail, list) else []
+    return {
+        "last_scan_age_seconds": _age_seconds(latest.get("ts")),
+        "tools_seen": latest.get("tools"),
+        "fingerprint": (latest.get("fingerprint") or "")[:12],
+        "changes": [
+            {"kind": c.get("kind"), "tool": c.get("tool"),
+             "detail": (c.get("detail") or c.get("summary") or "")[:160],
+             "severity": c.get("severity")}
+            for c in detail[:6] if isinstance(c, dict)
+        ],
+        "change_count": int(latest.get("changes") or 0),
+        "actionable": int(latest.get("actionable") or 0),
+        "absorbed": int(latest.get("absorbed") or 0),
+        "orders_filed": int(latest.get("orders_filed") or 0),
+        "history": [
+            {"ts": r.get("ts"), "tools": r.get("tools"),
+             "changes": int(r.get("changes") or 0),
+             "actionable": int(r.get("actionable") or 0)}
+            for r in rows
+        ],
+    }
+
+
+def vcs_state() -> Dict[str, Any]:
+    """Branch, head and release tags -- the record of what is actually running."""
+    from farm import vcs
+
+    if not vcs.available():
+        return {"available": False}
+    recent = vcs.recent(limit=10)
+    dirty = vcs.dirty_paths()
+
+    def _git(args: List[str]) -> str:
+        # vcs exposes no "what branch am I on" helper -- `branch_name(order_id)` builds
+        # an author branch name, which is a different question entirely.
+        try:
+            return vcs._run(args).stdout.strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    tags = [t.strip() for t in
+            _git(["tag", "--list", "release/*", "--sort=-creatordate"]).splitlines()
+            if t.strip()][:8]
+    return {
+        "available": True,
+        "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
+        "head": vcs.short(vcs.head() or ""),
+        "clean": not dirty,
+        "dirty_paths": dirty[:8],
+        "subject": recent[0]["subject"] if recent else None,
+        "recent": recent,
+        "release_tags": tags,
+        "commits": int(_git(["rev-list", "--count", "HEAD"]) or 0) or None,
+        "stale_worktrees": vcs.stale_worktrees(),
+    }
+
+
+def research_state(limit: int = 6) -> Dict[str, Any]:
+    """Findings ledger, including the errors the loop found in itself."""
+    rows = _tail(PROJECT / "state" / "research_findings.ndjson", 200)
+    errors: List[Dict[str, Any]] = []
+    for row in rows:
+        for err in row.get("errors_found") or []:
+            if isinstance(err, dict):
+                errors.append({
+                    "id": err.get("id"),
+                    "severity": err.get("severity"),
+                    "detail": (err.get("detail") or "")[:400],
+                    "ts": row.get("ts"),
+                })
+    recent = [
+        {"ts": r.get("ts"), "event": r.get("event"), "subject": r.get("subject"),
+         "outcome": (r.get("outcome") or "")[:160],
+         "errors": len(r.get("errors_found") or [])}
+        for r in rows[-limit:]
+    ]
+    return {
+        "rows": len(rows),
+        "errors_total": len(errors),
+        "errors": errors[-limit:],
+        "recent": list(reversed(recent)),
+        "last_age_seconds": _age_seconds(rows[-1].get("ts")) if rows else None,
+    }
+
+
+def llm_state() -> Dict[str, Any]:
+    """Model budget and reachability.
+
+    Reachability is read from the cached credential, never by making a call: a
+    dashboard poll every 2s must not spend money or wake a dormant gateway.
+    """
+    from farm import llm, rules
+
+    avail = llm.availability()
+    passes = cost = None
+    try:
+        # Spend accounting lives with the agent that does the spending.
+        sys_path_added = str(PROJECT) not in os.sys.path
+        if sys_path_added:
+            os.sys.path.insert(0, str(PROJECT))
+        from experiments import author_agent
+
+        passes, cost = author_agent.spend_today()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "available": bool(avail.get("available")),
+        "dormant": bool(avail.get("dormant")),
+        "reason": avail.get("reason"),
+        "expires_ts": avail.get("expires_ts"),
+        "remaining_seconds": avail.get("remaining_seconds"),
+        "passes_today": passes,
+        "spend_today": cost,
+        "budget": getattr(rules, "AUTHOR_MAX_COST_USD_PER_DAY", None),
+    }
+
+
+def report() -> Dict[str, Any]:
+    """The whole autonomy view. Each section independently guarded."""
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "agents": _guard(agents),
+        "canary": _guard(canary_state),
+        "orders": _guard(orders_state),
+        "contract": _guard(contract_state),
+        "vcs": _guard(vcs_state),
+        "research": _guard(research_state),
+        "llm": _guard(llm_state),
+    }
+
+
+# Building the full view costs ~185ms, nearly all of it spawning `launchctl` seven
+# times and `git` several more. That is fine on the Autonomy endpoint, which is fetched
+# when an operator opens a tab, and unacceptable on the 2s dashboard poll: it would be
+# 1,800 rounds of subprocess churn an hour to answer a question whose answer changes on
+# the scale of minutes.
+_CACHE: Dict[str, Any] = {"at": 0.0, "view": None}
+CACHE_TTL_SECONDS = 30.0
+
+
+def cached_report(max_age_seconds: float = CACHE_TTL_SECONDS) -> Dict[str, Any]:
+    """`report()` with a short TTL, for callers on a hot path.
+
+    30s is chosen against what the freshness is *for*: noticing that an agent died.
+    The fastest agent runs every 60s, so a 30s window cannot hide a missed run, and an
+    operator watching the page sees an outage within half a minute either way.
+    """
+    now = time.monotonic()
+    view = _CACHE.get("view")
+    if view is not None and (now - float(_CACHE.get("at") or 0.0)) < max_age_seconds:
+        return view
+    view = report()
+    _CACHE["view"] = view
+    _CACHE["at"] = now
+    return view
+
+
+def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Autonomy problems worth interrupting the operator for.
+
+    Kept separate from `report()` so the overview tab can show these beside the farm's
+    own blockers. Only conditions that actually stop self-healing are listed; a
+    watching canary or an open research order is normal operation, not a blocker.
+    """
+    view = view if view is not None else cached_report()
+    out: List[Dict[str, Any]] = []
+
+    ag = view.get("agents") or {}
+    for key in ag.get("down") or []:
+        spec = next((a for a in AGENTS if a["key"] == key), {})
+        out.append({
+            "severity": "critical" if key in ("cycle", "author") else "warn",
+            "what": "agent %s is not loaded" % spec.get("label", key),
+            "why": spec.get("lost", "unknown effect"),
+        })
+
+    can = view.get("canary") or {}
+    if can.get("status") == "regressed":
+        out.append({"severity": "critical",
+                    "what": "canary judged release %s regressed" % can.get("revision"),
+                    "why": can.get("reason") or "awaiting rollback"})
+
+    orders = (view.get("orders") or {}).get("summary") or {}
+    failed = int(orders.get("failed") or 0)
+    if failed:
+        out.append({"severity": "warn",
+                    "what": "%d work order(s) exhausted their attempts" % failed,
+                    "why": "these need a human or a different approach"})
+
+    con = view.get("contract") or {}
+    age = con.get("last_scan_age_seconds")
+    if isinstance(age, int) and age > 3600:
+        out.append({"severity": "warn",
+                    "what": "no endpoint scan for %d minutes" % (age // 60),
+                    "why": "schema drift would go undetected"})
+
+    llm_view = view.get("llm") or {}
+    if llm_view.get("available") is False:
+        out.append({"severity": "warn",
+                    "what": "model gateway unavailable",
+                    "why": "mechanical repairs still work; reasoned patches do not"})
+
+    for section in ("agents", "canary", "orders", "contract", "vcs", "research", "llm"):
+        err = (view.get(section) or {}).get("error")
+        if err:
+            out.append({"severity": "warn",
+                        "what": "autonomy view '%s' failed to read" % section,
+                        "why": err})
+    return out

@@ -421,7 +421,8 @@ def do_supervise(cadence: int = 180) -> int:
         notes.extend(expand.get("actions") or [])
         # The self-healing pair. A dead contract watcher means server changes go
         # unnoticed; a dead author means they go unrepaired.
-        for label in (scheduler.CONTRACT_LABEL, scheduler.AUTHOR_LABEL, scheduler.RESEARCH_LABEL):
+        for label in (scheduler.CONTRACT_LABEL, scheduler.AUTHOR_LABEL,
+                      scheduler.RESEARCH_LABEL, scheduler.DASHBOARD_LABEL):
             try:
                 agent = scheduler.ensure(label)
                 notes.extend(agent.get("actions") or [])

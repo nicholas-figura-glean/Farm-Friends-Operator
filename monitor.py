@@ -87,13 +87,34 @@ def _age_seconds(value: Optional[str]) -> Optional[int]:
 
 
 def _launchd() -> Dict[str, Any]:
-    """Status of both agents, via the operator's own scheduler module."""
+    """Status of every agent, via the operator's own scheduler module.
+
+    This used to report the cycle and the supervisor only. That was fine when they
+    were the only two agents, and quietly wrong once five more existed: the contract
+    watcher, author, research, expand and recovery agents could all have been unloaded
+    behind a fully green page. The author agent is the worst of those to lose silently,
+    because "no repairs happened" and "nothing could repair anything" look identical
+    from the outside.
+
+    The cycle and supervisor keep their original position in the payload so existing
+    panels and tests continue to read them unchanged; `all` carries the full set.
+    """
     try:
         cycle_agent = scheduler.status(scheduler.CYCLE_LABEL)
         supervisor = scheduler.status(scheduler.SUPERVISOR_LABEL)
     except Exception as exc:  # noqa: BLE001
         return {"loaded": False, "state": "unknown", "detail": str(exc)[:120], "supervisor": {}}
     cycle_agent["supervisor"] = supervisor
+    try:
+        from farm import autonomy
+
+        view = autonomy.agents()
+        cycle_agent["all"] = view.get("agents") or []
+        cycle_agent["live"] = view.get("live")
+        cycle_agent["expected"] = view.get("expected")
+        cycle_agent["down"] = view.get("down") or []
+    except Exception as exc:  # noqa: BLE001
+        cycle_agent["all_error"] = str(exc)[:120]
     return cycle_agent
 
 
@@ -188,6 +209,24 @@ def _blockers(
         blockers.append(
             {"level": "error", "text": "supervisor agent is not loaded - no self-healing"}
         )
+
+    # Autonomy problems belong on the overview, not only on their own tab. An operator
+    # glancing at the page should not have to go looking for "the author agent is down"
+    # or "the canary wants to roll back"; those stop the loop healing itself, which is
+    # at least as serious as anything about feed.
+    try:
+        from farm import autonomy
+
+        for item in autonomy.blockers():
+            blockers.append({
+                "level": "error" if item.get("severity") == "critical" else "warn",
+                "text": "%s - %s" % (item.get("what"), item.get("why")),
+            })
+    except Exception as exc:  # noqa: BLE001
+        # The autonomy view failing is itself worth showing, since it is the thing
+        # that reports on everything else.
+        blockers.append({"level": "warn",
+                         "text": "autonomy view unavailable: %s" % str(exc)[:120]})
 
     if not blockers:
         blockers.append({"level": "ok", "text": "No active blockers"})
@@ -811,6 +850,11 @@ TRACE_JS = _dashboard_asset("trace_explorer.js")
 # in one cannot take the other's tab down.
 WIRE_CSS = _dashboard_asset("mcp_wire.css")
 WIRE_JS = _dashboard_asset("mcp_wire.js")
+# The architecture tab is a separate asset pair for the same reason: its layout and
+# diff rendering are logic worth testing in JavaScriptCore, and a throw while drawing
+# the diagram must not take the rest of the page down.
+ARCH_CSS = _dashboard_asset("architecture.css")
+ARCH_JS = _dashboard_asset("architecture.js")
 
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -1109,6 +1153,7 @@ kbd { background:#ffffff12; border:1px solid var(--line); border-bottom-width:2p
 @media (max-width:900px) { .status,.blockers,.release,.wide,.side,.cost,.healing { grid-column:1/-1; } header { display:block; } .refresh { text-align:left; margin-top:10px; } .history-controls { align-items:flex-start; margin-top:12px; } .history-controls .chips { justify-content:flex-start; } .costcurve { height:240px; } .gp-chart { height:250px; } .gp-controls { gap:7px; } }
 __TRACE_CSS__
 __WIRE_CSS__
+__ARCH_CSS__
 __GAME_CSS__
 </style>
 </head>
@@ -1122,6 +1167,7 @@ __GAME_CSS__
   <button role="tab" data-tab="findings" aria-selected="false">🔬 Findings</button>
   <button role="tab" data-tab="game" aria-selected="false">🥚 Coop Rush</button>
   <button role="tab" data-tab="wire" aria-selected="false">🛰️ MCP Switchboard</button>
+  <button role="tab" data-tab="architecture" aria-selected="false">🏗️ Architecture</button>
 </nav>
 <div class="tab" id="tab-overview">
 <section class="grid">
@@ -1218,6 +1264,10 @@ __GAME_CSS__
 __GAME_MARKUP__
 </div>
 <!--GAME_MARKUP_END-->
+<!-- Populated entirely by renderArchitecture from /api/architecture, so the panel is
+     empty in the served document. Everything in it is derived at request time; there
+     is no hand-written architecture markup to fall out of date. -->
+<div class="tab" id="tab-architecture" hidden></div>
 <div class="tab" id="tab-wire" hidden>
 <section class="grid">
   <div class="card wire">
@@ -1896,7 +1946,7 @@ async function load() {
   }
 }
 function activateTab(name, writeHash) {
-  const allowed=["overview","pipeline","cost","history","findings","game","wire"];
+  const allowed=["overview","pipeline","cost","history","findings","game","wire","architecture"];
   if (!allowed.includes(name)) name="overview";
   document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===name)));
   document.querySelectorAll(".tab").forEach(panel=>{panel.hidden=panel.id!==`tab-${name}`;});
@@ -1910,6 +1960,11 @@ function activateTab(name, writeHash) {
   // The switchboard's packets are CSS animations, and a hidden panel gets no
   // layout: rebuild the replay on entry so it starts from the top of the loop.
   if (window.MCPWirePanel && name==="wire") window.MCPWirePanel.rebuild();
+  // Refetched on every entry rather than cached like the topology graph. The
+  // architecture is cheap to re-render but its liveness overlay goes stale the
+  // moment an agent dies, and a diagram that shows a dead agent as healthy is worse
+  // than one that admits it does not know.
+  if (name==="architecture") { if (ARCH) safe(name,()=>renderArchitecture(ARCH,AUTONOMY)); loadArchitecture(true); }
 }
 document.querySelectorAll("nav.tabs button").forEach(button=>button.addEventListener("click",()=>activateTab(button.dataset.tab,true)));
 if (typeof document.addEventListener==="function") document.addEventListener("click",event=>{
@@ -1956,6 +2011,7 @@ __TRACE_JS__
 try {
 /*WIRE_JS_START*/
 __WIRE_JS__
+__ARCH_JS__
 /*WIRE_JS_END*/
   if (window.MCPWirePanel) window.MCPWirePanel.mount({rootId:"mcp-wire"});
 } catch (error) {
@@ -1989,10 +2045,12 @@ __GAME_JS__
 HTML = (
     HTML_TEMPLATE.replace("__TRACE_CSS__", TRACE_CSS)
     .replace("__WIRE_CSS__", WIRE_CSS)
+    .replace("__ARCH_CSS__", ARCH_CSS)
     .replace("__GAME_CSS__", GAME_CSS)
     .replace("__GAME_MARKUP__", GAME_MARKUP)
     .replace("__TRACE_JS__", TRACE_JS)
     .replace("__WIRE_JS__", WIRE_JS)
+    .replace("__ARCH_JS__", ARCH_JS)
     .replace("__GAME_JS__", GAME_JS)
 )
 
@@ -2025,6 +2083,36 @@ class Handler(BaseHTTPRequestHandler):
             # findings 1,800 times an hour.
             try:
                 body: Dict[str, Any] = evidence.report()
+            except Exception as exc:  # noqa: BLE001
+                body = {"error": str(exc)[:200]}
+            payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+        elif path == "/api/autonomy":
+            # Separate from /api/state for the same reason as /api/evidence: ~13KB of
+            # self-healing state that changes on agent cadences (60s to 60min), not on
+            # the 2s poll. It also shells out to launchctl and git, which must not run
+            # 1,800 times an hour.
+            try:
+                from farm import autonomy
+
+                body = autonomy.report()
+                body["blockers"] = autonomy.blockers(body)
+            except Exception as exc:  # noqa: BLE001
+                body = {"error": str(exc)[:200]}
+            payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+        elif path == "/api/architecture":
+            # Parses every module and shells out to git several times, so it is fetched
+            # on tab activation rather than on the poll. The signature lets the client
+            # tell whether the shape moved since it last looked.
+            try:
+                from farm import architecture
+
+                body = architecture.report()
             except Exception as exc:  # noqa: BLE001
                 body = {"error": str(exc)[:200]}
             payload = json.dumps(body, separators=(",", ":")).encode("utf-8")

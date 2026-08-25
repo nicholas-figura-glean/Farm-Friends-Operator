@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Tests for the operator-view machinery: autonomy, architecture, dashboard agent.
+
+These three exist to answer "is the loop actually healing itself, and is this page
+telling me the truth". A silent failure here is particularly bad because it does not
+look like a failure -- it looks like a calm dashboard. Several checks below encode
+specific ways that already happened:
+
+* five of seven agents were unmonitored while the page showed green
+* two LaunchAgent plists were unreadable by Python, so they vanished from the
+  architecture view without any error being raised
+* git reported commit times in local time, sorting releases hours away from the
+  findings they caused
+* the autonomy view cost 175ms of subprocess work on a 2s poll
+
+Usage: python3 deploy/test_dashboard_agent.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import plistlib
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PROJECT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT))
+os.chdir(PROJECT)
+
+from farm import architecture, autonomy  # noqa: E402
+
+CHECKS = 0
+FAILURES = 0
+
+
+def section(title: str) -> None:
+    print("== %s" % title)
+
+
+def check(label: str, condition: bool, detail: str = "") -> None:
+    global CHECKS, FAILURES
+    CHECKS += 1
+    if condition:
+        print("  ok   %s" % label)
+    else:
+        FAILURES += 1
+        print("  FAIL %s%s" % (label, ("  [%s]" % detail) if detail else ""))
+
+
+# --------------------------------------------------------------------------
+section("every agent is accounted for")
+
+view = autonomy.agents()
+check("all eight agents are described", view.get("expected") == 8,
+      str(view.get("expected")))
+labels = {a["label"] for a in view.get("agents") or []}
+for expected in ("com.nickfigura.farmfriends",
+                 "com.nickfigura.farmfriends.supervisor",
+                 "com.nickfigura.farmfriends.expand",
+                 "com.nickfigura.farmfriends.recovery",
+                 "com.nickfigura.farmfriends.contract",
+                 "com.nickfigura.farmfriends.author",
+                 "com.nickfigura.farmfriends.research",
+                 "com.nickfigura.farmfriends.dashboard"):
+    check("watches %s" % expected.split("farmfriends")[-1] or "cycle",
+          expected in labels)
+check("every agent explains what its absence costs",
+      all(a.get("lost") for a in autonomy.AGENTS))
+# The cycle and the author agent are the two whose loss is unrecoverable without a
+# human, so they must escalate harder than the rest.
+critical = {a["key"] for a in autonomy.AGENTS} & {"cycle", "author"}
+check("cycle and author are both known keys", critical == {"cycle", "author"})
+
+
+# --------------------------------------------------------------------------
+section("the plists the architecture reads are actually parseable")
+
+# This is the regression guard for a real defect: two plists contained "--" inside an
+# XML comment, which `plutil` tolerates and Python's expat rejects. Both agents
+# silently disappeared from the architecture view with no error anywhere.
+plists = sorted((PROJECT / "deploy").glob("com.nickfigura.farmfriends*.plist"))
+check("eight plists on disk", len(plists) == 8, str(len(plists)))
+for path in plists:
+    try:
+        with path.open("rb") as handle:
+            plistlib.load(handle)
+        parsed = True
+        detail = ""
+    except Exception as exc:  # noqa: BLE001
+        parsed = False
+        detail = str(exc)[:80]
+    check("python can parse %s" % path.name.replace("com.nickfigura.farmfriends", ""),
+          parsed, detail)
+for path in plists:
+    result = subprocess.run(["plutil", "-lint", str(path)],
+                            capture_output=True, text=True)
+    check("plutil accepts %s" % path.name.replace("com.nickfigura.farmfriends", ""),
+          result.returncode == 0, result.stdout.strip()[:80])
+
+
+# --------------------------------------------------------------------------
+section("the autonomy view degrades instead of collapsing")
+
+report = autonomy.report()
+for key in ("agents", "canary", "orders", "contract", "vcs", "research", "llm"):
+    check("section %s is present" % key, key in report)
+    check("section %s has no error" % key,
+          not (report.get(key) or {}).get("error"),
+          str((report.get(key) or {}).get("error"))[:90])
+
+# A subsystem that raises must become a reported value, never an exception, because
+# this view is the only place several of those subsystems are visible at all.
+def _boom():
+    raise RuntimeError("synthetic failure")
+
+
+guarded = autonomy._guard(_boom)
+check("a failing section becomes an error string", "error" in guarded)
+check("the error names the exception type", "RuntimeError" in guarded["error"])
+check("a failed section is surfaced as a blocker",
+      any("failed to read" in b["what"]
+          for b in autonomy.blockers({"vcs": {"error": "synthetic"}})))
+
+
+# --------------------------------------------------------------------------
+section("the hot path does not pay for subprocesses")
+
+# The uncached view spawns launchctl seven times plus git. On the 2s dashboard poll
+# that was 1,800 rounds of subprocess churn an hour, so `_blockers` uses the cache.
+autonomy._CACHE["view"] = None
+autonomy._CACHE["at"] = 0.0
+started = time.time()
+autonomy.cached_report()
+cold_ms = (time.time() - started) * 1000
+started = time.time()
+for _ in range(20):
+    autonomy.cached_report()
+warm_ms = (time.time() - started) * 1000 / 20
+check("a warm read is far cheaper than a cold one", warm_ms < cold_ms / 10,
+      "cold %.0fms, warm %.2fms" % (cold_ms, warm_ms))
+check("twenty warm reads cost under 10ms total", warm_ms * 20 < 10,
+      "%.2fms" % (warm_ms * 20))
+check("the cache expires", autonomy.CACHE_TTL_SECONDS <= 60,
+      str(autonomy.CACHE_TTL_SECONDS))
+# The TTL must be shorter than the fastest agent's period, or a missed run could hide.
+check("the TTL is shorter than the fastest agent's cadence",
+      autonomy.CACHE_TTL_SECONDS < 60)
+
+
+# --------------------------------------------------------------------------
+section("architecture is derived from what is on disk")
+
+snap = architecture.snapshot()
+check("a signature is produced", len(snap.get("signature") or "") == 64)
+check("all eight LaunchAgents are found", snap["stats"]["launch_agents"] == 8,
+      str(snap["stats"]["launch_agents"]))
+check("modules were discovered", snap["stats"]["modules"] > 20,
+      str(snap["stats"]["modules"]))
+check("import edges were discovered", snap["stats"]["edges"] > 10,
+      str(snap["stats"]["edges"]))
+check("every module is assigned a known layer",
+      all(n["layer"] in {l["id"] for l in snap["layers"]} for n in snap["nodes"]))
+# An unclassified module lands in a default layer, which is a quiet way for the
+# diagram to start lying. It is reported so it can be classified.
+check("no module is silently unclassified", snap["unmapped"] == [],
+      ", ".join(snap["unmapped"]))
+
+protected = {n["path"] for n in snap["nodes"] if n.get("protected")}
+for path in ("farm/canary.py", "farm/workorders.py", "farm/llm.py", "farm/rules.py",
+             "farm/vcs.py", "experiments/author_agent.py"):
+    check("%s is marked unwritable" % path, path in protected)
+check("cycle is not marked unwritable",
+      "farm/cycle.py" not in protected)
+
+# The signature must ignore cosmetic edits, or the version history fills with noise
+# and stops being readable.
+nodes = list(snap["nodes"])
+base_sig = architecture.signature(nodes, snap["edges"], snap["agents"])
+cosmetic = [dict(n, loc=(n.get("loc") or 0) + 500, doc="rewritten comment") for n in nodes]
+check("editing comments does not mint a version",
+      architecture.signature(cosmetic, snap["edges"], snap["agents"]) == base_sig)
+# ...but a real structural change must move it.
+added = nodes + [{"id": "newthing", "kind": "module", "layer": "play", "protected": False}]
+check("adding a module does mint a version",
+      architecture.signature(added, snap["edges"], snap["agents"]) != base_sig)
+check("adding a dependency mints a version",
+      architecture.signature(nodes, list(snap["edges"]) + [{"source": "cycle", "target": "vcs"}],
+                             snap["agents"]) != base_sig)
+check("installing an agent mints a version",
+      architecture.signature(nodes, snap["edges"],
+                             list(snap["agents"]) + [{"label": "new", "interval_seconds": 60}])
+      != base_sig)
+check("locking a file mints a version",
+      architecture.signature([dict(n, protected=True) for n in nodes],
+                             snap["edges"], snap["agents"]) != base_sig)
+
+
+# --------------------------------------------------------------------------
+section("the version ledger only records real change")
+
+with tempfile.TemporaryDirectory() as tmp:
+    ledger = os.path.join(tmp, "architecture.ndjson")
+    first = architecture.record(trigger="test one", ledger=ledger)
+    check("the first scan records version 1",
+          first.get("recorded") and first.get("version") == 1, str(first.get("version")))
+    second = architecture.record(trigger="test two", ledger=ledger)
+    check("an unchanged scan records nothing", second.get("recorded") is False,
+          str(second))
+    check("the skip explains itself", "unchanged" in str(second.get("reason")))
+    rows = architecture.history(ledger=ledger)
+    check("exactly one row on disk", len(rows) == 1, str(len(rows)))
+    check("the row carries the full node set for later rendering",
+          len(rows[0].get("nodes") or []) == len(snap["nodes"]))
+    check("the row carries the commit", bool(rows[0].get("commit")))
+
+    # A synthetic previous version proves the diff is computed, not assumed.
+    forged = dict(rows[0])
+    forged["signature"] = "forged"
+    forged["nodes"] = [n for n in rows[0]["nodes"] if n["id"] != "canary"]
+    with open(ledger, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(forged, sort_keys=True) + "\n")
+    third = architecture.record(trigger="test three", ledger=ledger)
+    check("a changed shape records a new version", third.get("recorded") is True)
+    check("the new version increments", third.get("version") == 2, str(third.get("version")))
+    check("the diff reports the restored module",
+          "canary" in ((third.get("diff") or {}).get("added") or []),
+          str((third.get("diff") or {}).get("added")))
+
+    check("a missing ledger reads as empty history",
+          architecture.history(ledger=os.path.join(tmp, "nope.ndjson")) == [])
+    # A torn final line is normal in an append-only file being written by another
+    # process, and must not blank the whole history.
+    with open(ledger, "a", encoding="utf-8") as handle:
+        handle.write('{"version": 3, "partial"')
+    check("a half-written line is skipped, not fatal",
+          len(architecture.history(ledger=ledger)) >= 1)
+
+
+# --------------------------------------------------------------------------
+section("the event stream is honestly ordered")
+
+events = architecture.events(limit=80)
+check("events were collected", len(events) > 0, str(len(events)))
+check("every event carries a timestamp", all(e.get("ts") for e in events))
+timestamps = [str(e["ts"]) for e in events]
+check("events are newest-first", timestamps == sorted(timestamps, reverse=True))
+check("all timestamps are UTC-marked", all(t.endswith("Z") for t in timestamps),
+      next((t for t in timestamps if not t.endswith("Z")), ""))
+
+# The specific bug this guards: git's default %cd is local time, so a release cut at
+# 21:32Z was recorded as 15:32 and sorted in hours before findings it followed. The
+# release tag name embeds its own UTC timestamp, so the two must agree.
+for event in events:
+    if event.get("kind") != "release":
+        continue
+    name = str(event.get("title") or "").split()[-1]
+    if len(name) < 15 or not name.endswith("Z"):
+        continue
+    tag_hour = name[9:11]
+    ts_hour = str(event.get("ts"))[11:13]
+    check("release %s is timestamped in UTC" % name,
+          tag_hour == ts_hour, "tag says %s, event says %s" % (tag_hour, ts_hour))
+    break
+
+kinds = {e.get("kind") for e in events}
+check("the stream merges several sources", len(kinds) >= 3, str(sorted(kinds)))
+check("only version events claim to be structural",
+      all(e.get("kind") == "version" for e in events if e.get("structural")))
+
+
+# --------------------------------------------------------------------------
+section("the report the tab consumes")
+
+full = architecture.report()
+check("the report carries the current architecture", bool(full.get("current")))
+check("the report carries the event stream", bool(full.get("events")))
+check("the report states whether live matches the ledger",
+      isinstance(full.get("live_matches_recorded"), bool))
+check("the payload stays under 64KB", len(json.dumps(full)) < 65536,
+      "%dB" % len(json.dumps(full)))
+# The timeline must not carry the full node set for every version, or the payload grows
+# without bound as the system evolves.
+check("timeline entries are summaries, not full snapshots",
+      all("nodes" not in entry for entry in full.get("timeline") or []))
+
+
+# --------------------------------------------------------------------------
+section("the dashboard agent checks every tab")
+
+agent_path = PROJECT / "experiments" / "dashboard_agent.py"
+check("the agent exists", agent_path.exists())
+source = agent_path.read_text(encoding="utf-8")
+for source_name in ("monitor.snapshot", "evidence.report", "topology.cached_graph",
+                    "autonomy.report", "architecture.report"):
+    check("probes %s" % source_name, source_name in source)
+
+result = subprocess.run([sys.executable, str(agent_path)],
+                        capture_output=True, text=True, timeout=300)
+check("the agent runs cleanly", result.returncode == 0,
+      "exit %d: %s" % (result.returncode, result.stderr[-200:]))
+check("it reports on every readout", "readouts ok" in result.stdout,
+      result.stdout[-160:])
+check("no readout is failing", "FAIL" not in result.stdout,
+      "\n".join(l for l in result.stdout.splitlines() if "FAIL" in l))
+
+ledger = PROJECT / "state" / "dashboard_health.ndjson"
+check("it writes a health ledger", ledger.exists())
+if ledger.exists():
+    last = json.loads(ledger.read_text(encoding="utf-8").strip().splitlines()[-1])
+    check("the ledger records each check", len(last.get("checks") or []) >= 5,
+          str(len(last.get("checks") or [])))
+    check("the ledger records a verdict", isinstance(last.get("ok"), bool))
+    check("every check is timed",
+          all(isinstance(c.get("ms"), int) for c in last.get("checks") or []))
+    # A readout slower than the poll interval is a defect even when it is correct.
+    slow = [c["source"] for c in last.get("checks") or [] if int(c.get("ms") or 0) > 4000]
+    check("no readout is slower than the poll interval", not slow, str(slow))
+
+
+# --------------------------------------------------------------------------
+section("the served page wires the tab up")
+
+import monitor  # noqa: E402
+
+html = monitor.HTML
+for token in ("__ARCH_CSS__", "__ARCH_JS__"):
+    check("%s was substituted" % token, token not in html)
+check("the tab button exists", 'data-tab="architecture"' in html)
+check("the tab panel exists", 'id="tab-architecture"' in html)
+check("the renderer is bundled", "function renderArchitecture" in html)
+check("the loader is bundled", "loadArchitecture" in html)
+check("architecture is an allowed tab", '"architecture"]' in html)
+check("the asset loaded rather than stubbing out",
+      "missing dashboard asset" not in monitor.ARCH_JS)
+check("the stylesheet loaded", "missing dashboard asset" not in monitor.ARCH_CSS)
+
+state = monitor.snapshot()
+check("snapshot reports all eight agents",
+      len((state.get("launchd") or {}).get("all") or []) == 8,
+      str(len((state.get("launchd") or {}).get("all") or [])))
+check("snapshot keeps the original cycle fields",
+      "loaded" in (state.get("launchd") or {}))
+check("snapshot keeps the supervisor sub-object",
+      isinstance((state.get("launchd") or {}).get("supervisor"), dict))
+
+
+print()
+print("%d checks, %d failures" % (CHECKS, FAILURES))
+if FAILURES:
+    print("dashboard agent suite FAILED")
+    sys.exit(1)
+print("dashboard agent suite passed")

@@ -1,0 +1,79 @@
+/* ---- architecture tab -------------------------------------------------- */
+/* Layered map of the system, live health overlay, and version history.
+   Kept in dashboard/ rather than in a Python string so the layout maths and the
+   diff rendering can be unit-tested in JavaScriptCore like the other panels. */
+
+.arch-head { display:flex; flex-wrap:wrap; gap:18px; align-items:baseline; margin-bottom:4px; }
+.arch-sig { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--blue); font-size:13px; }
+.arch-note { color:var(--muted); font-size:12.5px; max-width:76ch; line-height:1.5; }
+
+.arch-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:14px; align-items:start; }
+@media (max-width:1100px) { .arch-layout { grid-template-columns:minmax(0,1fr); } }
+
+/* Layers stack outermost-first: the game at the top, the machinery that keeps the
+   loop correct below it. The order is the argument the diagram is making. */
+.arch-layer { border:1px solid var(--line); border-radius:12px; padding:11px 12px 12px; margin-bottom:9px; background:rgba(20,30,25,.55); }
+.arch-layer > header { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:9px; }
+.arch-layer h3 { margin:0; font-size:12px; text-transform:uppercase; letter-spacing:.1em; color:var(--text); }
+.arch-layer .lnote { color:var(--muted); font-size:11.5px; text-align:right; }
+.arch-layer[data-layer="world"] { border-style:dashed; border-color:#4a6a58; background:rgba(20,30,25,.3); }
+.arch-layer[data-layer="guard"] { border-color:#5d7a4a; }
+.arch-layer[data-layer="decide"] { border-color:#7a6a4a; }
+
+.arch-nodes { display:flex; flex-wrap:wrap; gap:7px; }
+.arch-node { appearance:none; text-align:left; cursor:pointer; background:var(--panel2); color:var(--text);
+  border:1px solid var(--line); border-radius:9px; padding:7px 9px; font:600 12px/1.2 inherit;
+  display:flex; flex-direction:column; gap:3px; min-width:104px; transition:border-color .12s,transform .12s; }
+.arch-node:hover { border-color:var(--green); transform:translateY(-1px); }
+.arch-node[aria-pressed="true"] { border-color:var(--green); box-shadow:0 0 0 1px var(--green) inset; }
+.arch-node .nloc { color:var(--muted); font-weight:500; font-size:10.5px; font-variant-numeric:tabular-nums; }
+/* Protected files get a visible mark. In a system that rewrites its own source,
+   "which parts may the machine not touch" is the first thing to be able to see. */
+.arch-node.protected { border-left:3px solid var(--yellow); }
+.arch-node.protected .nloc:after { content:" · locked"; color:var(--yellow); }
+.arch-node.agent { background:#22332a; }
+.arch-node.down { border-color:var(--red); }
+.arch-node.down .nloc:after { content:" · DOWN"; color:var(--red); }
+.arch-node.tool { min-width:0; font-weight:500; background:transparent; border-style:dashed; }
+
+.arch-side { position:sticky; top:14px; display:flex; flex-direction:column; gap:12px; }
+.arch-detail { min-height:120px; }
+.arch-detail h4 { margin:0 0 4px; font-size:15px; }
+.arch-detail .dpath { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:var(--blue); word-break:break-all; }
+.arch-detail .ddoc { color:var(--muted); font-size:12px; margin:8px 0 0; line-height:1.5; }
+.arch-detail dl { display:grid; grid-template-columns:auto 1fr; gap:4px 10px; margin:10px 0 0; font-size:12px; }
+.arch-detail dt { color:var(--muted); } .arch-detail dd { margin:0; }
+.arch-dep { display:inline-block; background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+  padding:1px 6px; margin:2px 3px 0 0; font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+
+/* Version history. Structural changes are the spine; releases, canary verdicts,
+   orders and findings are the annotations that explain them. */
+.arch-timeline { max-height:520px; overflow-y:auto; }
+.arch-ev { display:grid; grid-template-columns:52px 1fr; gap:9px; padding:7px 0; border-bottom:1px solid #ffffff0a; }
+.arch-ev:last-child { border-bottom:0; }
+.arch-ev .when { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; padding-top:1px; }
+.arch-ev .what { min-width:0; }
+.arch-ev .title { font-weight:650; font-size:12.5px; }
+.arch-ev .detail { color:var(--muted); font-size:11.5px; line-height:1.45; margin-top:2px; overflow-wrap:anywhere; }
+.arch-ev .kind { display:inline-block; border-radius:5px; padding:0 5px; font-size:10px; font-weight:750;
+  text-transform:uppercase; letter-spacing:.06em; margin-right:6px; vertical-align:1px; }
+.arch-ev[data-kind="version"] .kind { background:#2c4a36; color:var(--green); }
+.arch-ev[data-kind="release"] .kind { background:#2b3f55; color:var(--blue); }
+.arch-ev[data-kind="canary"]  .kind { background:#4a412b; color:var(--yellow); }
+.arch-ev[data-kind="order"]   .kind { background:#3a2f4a; color:#c9a6ff; }
+.arch-ev[data-kind="finding"] .kind { background:#243a34; color:#8fd8c0; }
+.arch-ev[data-kind="version"] { background:linear-gradient(90deg,#2c4a3622,transparent 60%); }
+.arch-ev .chg { margin-top:3px; font-size:11px; }
+.arch-ev .chg b { color:var(--green); font-weight:650; } .arch-ev .chg i { color:var(--red); font-style:normal; }
+
+.arch-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(74px,1fr)); gap:9px; }
+.arch-stat { background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:8px 9px; }
+.arch-stat b { display:block; font-size:19px; font-weight:750; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.arch-stat span { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; }
+
+.arch-warn { border:1px solid var(--yellow); border-radius:9px; padding:9px 11px; color:var(--yellow); font-size:12px; margin-bottom:10px; }
+.arch-filter { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+.arch-filter button { appearance:none; cursor:pointer; background:var(--panel2); color:var(--muted);
+  border:1px solid var(--line); border-radius:99px; padding:4px 11px; font:650 11px/1 inherit;
+  text-transform:uppercase; letter-spacing:.05em; }
+.arch-filter button[aria-pressed="true"] { color:var(--green); border-color:var(--green); }

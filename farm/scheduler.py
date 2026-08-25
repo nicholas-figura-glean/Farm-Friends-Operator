@@ -35,6 +35,7 @@ EXPAND_LABEL = "com.nickfigura.farmfriends.expand"
 CONTRACT_LABEL = "com.nickfigura.farmfriends.contract"
 AUTHOR_LABEL = "com.nickfigura.farmfriends.author"
 RESEARCH_LABEL = "com.nickfigura.farmfriends.research"
+DASHBOARD_LABEL = "com.nickfigura.farmfriends.dashboard"
 AGENT_DIR = os.path.expanduser("~/Library/LaunchAgents")
 TIMEOUT = 5
 
