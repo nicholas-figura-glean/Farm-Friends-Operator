@@ -982,6 +982,36 @@ def do_self_test() -> int:
     checks += 1
     if rules.sell_plan({"feed": 500, "egg": 3}) != [("egg", 3)]:
         failures.append("sell_plan would sell feed")
+
+    # Oversell recovery. The inventory read is stale by the time the sell lands --
+    # produce spoils, trades ship goods out, and the expand agent runs concurrently --
+    # so the sell is occasionally a few dozen units high. Ten such rejections crashed
+    # the whole cycle before this was handled, discarding runs that had already fed the
+    # herd and collected produce. The server names the true count; that is what to use.
+    checks += 1
+    _oversold = cycle.Cycle._oversold_actual
+    if _oversold("\U0001f6ab You only have 549033 eggs, not 549088.", "egg") != 549033:
+        failures.append("oversell rejection does not yield the true quantity")
+    checks += 1
+    if _oversold("You only have 1,234 eggs, not 2000.", "egg") != 1234:
+        failures.append("a thousands-separated quantity is not parsed")
+    checks += 1
+    # Singular/plural must not matter: the plan says "egg", the server says "eggs".
+    if _oversold("You only have 500 eggs, not 600.", "egg") != 500:
+        failures.append("plural mismatch defeats oversell recovery")
+    checks += 1
+    # A different item means our own accounting is wrong in a way retrying cannot fix.
+    if _oversold("You only have 500 milk, not 600.", "egg") is not None:
+        failures.append("a mismatched item is treated as a quantity drift")
+    checks += 1
+    # Any other failure must not be retried as though it were a quantity mismatch.
+    for _msg in ("sell returned isError: server exploded", "", "You only have many eggs, not 6."):
+        if _oversold(_msg, "egg") is not None:
+            failures.append("unrelated sell error treated as oversell: %r" % _msg)
+    checks += 1
+    # Zero is a real answer, and the caller is what decides to skip rather than sell 0.
+    if _oversold("You only have 0 eggs, not 10.", "egg") != 0:
+        failures.append("an emptied inventory is not reported as zero")
     # Property: adoption now happens BEFORE the feed top-up, and can stop early
     # on the wall-clock budget. Adopting must never make the feed reserve worse
     # than it already was -- a pre-existing deficit (too poor to reach target) is

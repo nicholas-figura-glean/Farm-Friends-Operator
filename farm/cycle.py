@@ -14,6 +14,7 @@ Design notes worth keeping:
 import contextlib
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -371,10 +372,82 @@ class Cycle(object):
         self.meta["last_feed_run"] = run_no
         return self.read_state("postfeed")
 
+    # "You only have 549033 eggs, not 549088." The server names the true count when it
+    # rejects an oversell, which is the only reliable number available: our own figure
+    # came from a read that is already stale by the time the sell lands.
+    _SHORTFALL = re.compile(r"only have\s+([0-9][0-9,]*)\s+(\w+)", re.IGNORECASE)
+
+    @classmethod
+    def _oversold_actual(cls, message: str, item: str) -> Optional[int]:
+        """The real quantity from an oversell rejection, if that is what this was.
+
+        Returns None for any other error, so an unrelated failure is never silently
+        retried as though it were a quantity mismatch.
+        """
+        match = cls._SHORTFALL.search(str(message))
+        if not match:
+            return None
+        if match.group(2).lower().rstrip("s") != str(item).lower().rstrip("s"):
+            return None
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+
     def sell_all(self, inventory: Dict[str, int]) -> None:
+        """Sell the plan, tolerating the inventory moving underneath us.
+
+        Two failures are fixed here, and the second is the serious one.
+
+        The quantity sold comes from a `list_farm` read taken earlier in the cycle, and
+        the farm keeps changing after it: produce spoils, trades ship goods out, and the
+        expand agent runs concurrently on its own schedule. So the sell is occasionally a
+        few dozen units above what is actually there -- ten times so far, always by
+        between 18 and 71 units out of hundreds of thousands.
+
+        The stale read is not really avoidable; re-reading immediately before the sell
+        narrows the window rather than closing it, at the cost of another call. But an
+        oversell rejection names the true quantity, so the honest response is to sell
+        that instead.
+
+        The serious failure: this raised out of the cycle and aborted the entire run.
+        Twenty-two crashes are recorded, ten of them this. A run that has already fed the
+        herd, collected produce and handled trades must not discard all of it because the
+        last few dozen eggs of a 549,000-egg sale were not there. Anything still
+        unsellable is now noted and skipped.
+        """
         for item, qty in rules.sell_plan(inventory):
             _intent("sell", item=item, qty=qty)
-            text = self.c.call("sell", item=item, qty=qty)
+            try:
+                text = self.c.call("sell", item=item, qty=qty)
+            except ToolError as exc:
+                actual = self._oversold_actual(str(exc), item)
+                if actual is None:
+                    # Not a quantity problem. Record it and move on to the next item
+                    # rather than losing the whole cycle over one sale.
+                    self.notes.append("sell %s failed: %s" % (item, str(exc)[:110]))
+                    _intent("sell_failed", item=item, qty=qty, reason=str(exc)[:110])
+                    continue
+                if actual <= 0:
+                    self.notes_soft.append(
+                        "sell %s skipped: inventory emptied between read and sell" % item)
+                    continue
+                self.notes_soft.append(
+                    "sell %s adjusted %d -> %d: inventory moved between read and sell"
+                    % (item, qty, actual))
+                _intent("sell_retry", item=item, qty=actual, requested=qty)
+                try:
+                    text = self.c.call("sell", item=item, qty=actual)
+                except ToolError as retry_exc:
+                    # Two rejections in a row means something other than drift, so stop
+                    # guessing at quantities and leave the item for the next cycle.
+                    self.notes.append(
+                        "sell %s failed after adjustment: %s"
+                        % (item, str(retry_exc)[:100]))
+                    _intent("sell_failed", item=item, qty=actual,
+                            reason=str(retry_exc)[:100])
+                    continue
+                qty = actual
             _raw("sell_" + item, text)
             result = parse.parse_sell(text)
             _intent("sell_done", item=item, qty=qty, revenue=result["revenue"])
