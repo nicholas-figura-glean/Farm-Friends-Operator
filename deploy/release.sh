@@ -129,12 +129,41 @@ echo "$REV" > "$TARGET/RELEASED"
 # points at them. This catches an incomplete UI manifest as well as Python drift.
 ( cd "$TARGET" && /usr/bin/python3 run.py --self-test >/dev/null )
 ( cd "$TARGET" && /usr/bin/python3 - <<'PY'
+import re
+
 import monitor
-expected = {'overview', 'pipeline', 'cost', 'history', 'findings', 'game', 'wire'}
-missing = [tab for tab in sorted(expected) if ('data-tab="%s"' % tab) not in monitor.HTML]
+
+# Derived from the document rather than hardcoded. The previous version of this gate
+# asserted a hardcoded set of seven tabs and printed "7 tabs packaged", so adding an
+# eighth tab left the gate reporting success for a set that no longer described the
+# page. A gate that cannot notice new work is not much of a gate.
+buttons = set(re.findall(r'role="tab" data-tab="([a-z_]+)"', monitor.HTML))
+panels = set(re.findall(r'class="tab" id="tab-([a-z_]+)"', monitor.HTML))
+required = {'overview', 'pipeline', 'cost', 'history', 'findings', 'game', 'wire',
+            'architecture'}
+
+missing = sorted(required - buttons)
 if missing:
     raise SystemExit("staged dashboard missing tabs: " + ", ".join(missing))
-print("dashboard gate: 7 tabs packaged")
+
+# A button with no panel, or a panel with no button, is a tab that renders as a blank
+# page or as dead markup. Both have happened while wiring a tab up by hand.
+orphan_buttons = sorted(buttons - panels)
+orphan_panels = sorted(panels - buttons)
+if orphan_buttons:
+    raise SystemExit("tab buttons with no panel: " + ", ".join(orphan_buttons))
+if orphan_panels:
+    raise SystemExit("tab panels with no button: " + ", ".join(orphan_panels))
+
+# Every asset placeholder must have been substituted. An unsubstituted token ships a
+# page whose scripts are the literal string "__ARCH_JS__", which fails silently.
+leftover = sorted(set(re.findall(r'__[A-Z_]+__', monitor.HTML)))
+if leftover:
+    raise SystemExit("unsubstituted asset placeholders: " + ", ".join(leftover))
+if "missing dashboard asset" in monitor.HTML:
+    raise SystemExit("a dashboard asset failed to load into the staged page")
+
+print("dashboard gate: %d tabs packaged, all wired" % len(buttons))
 PY
 )
 
