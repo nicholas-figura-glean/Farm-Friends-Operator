@@ -211,19 +211,30 @@ def main() -> int:
     with LEDGER.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
 
-    # One order per distinct broken readout. The id is derived from the source so a
-    # readout that stays broken updates its existing order instead of filing a new one
-    # every 15 minutes.
+    # One order per distinct broken readout. The change id is derived from the source
+    # so a readout that stays broken updates its existing order instead of filing a new
+    # one every 15 minutes -- `submit` is idempotent by that id.
     filed = 0
     for problem in problems:
-        order_id = "dashboard-%s" % str(problem["source"]).replace(".", "-")
+        change = {
+            "id": "dashboard-%s" % str(problem["source"]).replace(".", "-"),
+            "kind": "dashboard_readout",
+            "severity": problem["severity"],
+            "summary": "%s: %s" % (problem["what"], problem["why"]),
+            "tool": problem["source"],
+            "detail": problem["why"],
+        }
         try:
             submitted = workorders.submit(
-                order_id=order_id,
-                kind="dashboard",
-                severity=problem["severity"],
-                summary="%s: %s" % (problem["what"], problem["why"]),
-                evidence={"source": problem["source"], "detail": problem["why"]},
+                change,
+                source="dashboard_agent",
+                intent="restore the %s readout so the operator view is trustworthy"
+                       % problem["source"],
+                acceptance=[
+                    "python3 deploy/test_dashboard_agent.py reports no failing readout",
+                    "the readout builds in under 4000ms",
+                ],
+                files=["farm/autonomy.py", "farm/architecture.py", "monitor.py"],
             )
             if submitted:
                 filed += 1

@@ -322,6 +322,83 @@ if ledger.exists():
 
 
 # --------------------------------------------------------------------------
+section("filing an order actually works")
+
+# Regression guard for a bug this agent found in itself on its first live run: it
+# called workorders.submit(order_id=..., kind=..., evidence=...), which is not the
+# signature. submit() takes a change dict positionally. The agent caught its own
+# defect, reported it, and could not file it -- so the one order it most needed to
+# raise was the one it could not.
+import inspect  # noqa: E402
+
+from farm import workorders  # noqa: E402
+
+params = list(inspect.signature(workorders.submit).parameters)
+check("submit takes a change dict first", params[0] == "change", str(params[:3]))
+check("submit has no order_id parameter", "order_id" not in params, str(params))
+
+agent_source = (PROJECT / "experiments" / "dashboard_agent.py").read_text(encoding="utf-8")
+check("the agent does not pass order_id", "order_id=" not in agent_source)
+check("the agent passes a change dict", "workorders.submit(\n                change," in agent_source
+      or "submit(\n                change," in agent_source)
+
+with tempfile.TemporaryDirectory() as tmp:
+    queue = os.path.join(tmp, "orders.ndjson")
+    change = {"id": "dashboard-test-probe", "kind": "dashboard_readout",
+              "severity": "degraded", "summary": "synthetic", "tool": "test.probe"}
+    first = workorders.submit(change, source="dashboard_agent", intent="restore it",
+                              acceptance=["it works"], files=["monitor.py"], path=queue)
+    check("an order can be filed with the real signature", bool(first), str(first)[:90])
+    # Idempotent by id, so a readout that stays broken must not file a new order on
+    # every 15-minute pass.
+    second = workorders.submit(change, source="dashboard_agent", intent="restore it",
+                               acceptance=["it works"], files=["monitor.py"], path=queue)
+    check("re-filing the same broken readout is a no-op", second is None, str(second)[:90])
+
+
+# --------------------------------------------------------------------------
+section("timestamp parsing is memoised without changing answers")
+
+# The Findings readout took 4,066ms on the agent's first run, over its 4s budget. Most
+# of it was strptime: one report parsed 37,392 timestamps across ~6,280 distinct rows,
+# because the counterfactual sweep walks history once per parameter value. Caching is
+# safe because timestamps are immutable strings, but only if it changes no answer.
+from datetime import datetime, timezone  # noqa: E402
+
+from farm import analysis  # noqa: E402
+
+cases = [
+    ("2026-08-25T21:32:40Z", datetime(2026, 8, 25, 21, 32, 40, tzinfo=timezone.utc)),
+    ("2026-08-25T21:32:40.123456Z",
+     datetime(2026, 8, 25, 21, 32, 40, 123456, tzinfo=timezone.utc)),
+    ("", None), ("garbage", None), (None, None), (12345, None),
+]
+for value, expected in cases:
+    got = analysis.parse_ts(value)
+    check("parse_ts(%r) is unchanged" % (value,), got == expected, "%s != %s" % (got, expected))
+# Called twice, a memoised function must still agree with itself.
+check("repeated parses agree",
+      analysis.parse_ts("2026-08-25T21:32:40Z") == analysis.parse_ts("2026-08-25T21:32:40Z"))
+check("the cache is actually being used",
+      analysis._parse_ts_cached.cache_info().hits > 0,
+      str(analysis._parse_ts_cached.cache_info()))
+# An unhashable input must not reach the cache and raise TypeError.
+threw = None
+try:
+    analysis.parse_ts({"not": "hashable"})
+except Exception as exc:  # noqa: BLE001
+    threw = str(exc)[:80]
+check("an unhashable value does not raise", threw is None, threw or "")
+
+started = time.time()
+from farm import evidence  # noqa: E402
+evidence.report()
+report_ms = (time.time() - started) * 1000
+check("the Findings readout builds inside its budget", report_ms < 4000,
+      "%.0fms" % report_ms)
+
+
+# --------------------------------------------------------------------------
 section("the served page wires the tab up")
 
 import monitor  # noqa: E402
