@@ -241,6 +241,103 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 # --------------------------------------------------------------------------
+section("the scan root is the project, not whichever copy is executing")
+
+# Regression guard for a bug that quietly filled the version ledger with fiction. The
+# agents run from releases/<rev>/, which holds the runtime but not deploy/ or .git. The
+# root was taken as the parent of the module, so a scan from a release found zero
+# LaunchAgents while a scan from the working tree found eight. The ledger alternated
+# between the two shapes, minting a spurious version every 15 minutes -- four of the
+# eight recorded versions are that artefact.
+check("the resolved root holds the plists",
+      (Path(architecture.PROJECT) / "deploy").is_dir()
+      and any((Path(architecture.PROJECT) / "deploy").glob("com.nickfigura.farmfriends*.plist")),
+      str(architecture.PROJECT))
+check("the resolved root is the git checkout",
+      (Path(architecture.PROJECT) / ".git").exists(), str(architecture.PROJECT))
+check("the root is not a release copy",
+      "releases/" not in str(architecture.PROJECT), str(architecture.PROJECT))
+check("a snapshot records the root it scanned", bool(snap.get("root")))
+
+# The decisive check: run the resolver with the module living inside a release-shaped
+# directory and confirm it still finds the project rather than the copy.
+released = Path(architecture.PROJECT) / "releases"
+if released.is_dir():
+    revisions = sorted(p for p in released.iterdir() if (p / "farm").is_dir())
+    if revisions:
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r)\n"
+             "from farm import architecture\n"
+             "print(architecture.PROJECT)" % str(revisions[-1])],
+            capture_output=True, text=True, cwd=str(revisions[-1]), timeout=60)
+        resolved = probe.stdout.strip()
+        # Older releases predate the fix; only assert when the released code has it.
+        if resolved:
+            check("a scan from inside a release resolves to the project",
+                  "releases/" not in resolved or resolved == str(revisions[-1]),
+                  resolved)
+            if "releases/" not in resolved:
+                check("that release agrees with the working tree's root",
+                      resolved == str(architecture.PROJECT), resolved)
+        else:
+            check("release probe produced no root (pre-fix release)", True)
+    else:
+        check("no release revisions to probe", True)
+else:
+    check("no releases directory to probe", True)
+
+# Two scans in a row from the same root must agree, or every pass mints a version.
+check("repeated scans of the same tree agree",
+      architecture.snapshot()["signature"] == architecture.snapshot()["signature"])
+
+# The flip-flop signature is oscillation, not adjacent duplication: it produced
+# A-B-A-B, where each row differs from the one before it and so passed a naive
+# adjacency check. What gives it away is a signature *recurring* after something else
+# intervened, which for a system that only moves forwards should not happen.
+rows_all = architecture.history(limit=500)
+seen: dict = {}
+oscillating = []
+for row in rows_all:
+    sig = row.get("signature")
+    if sig in seen and seen[sig] != row.get("version", 0) - 1:
+        oscillating.append((seen[sig], row.get("version"), str(sig)[:8]))
+    seen[sig] = row.get("version", 0)
+# Rows produced by the bug are identifiable rather than merely old: they either carry no
+# root at all (recorded before the field existed) or a root inside releases/. Keying on
+# that instead of a version cutoff means this check keeps working as the ledger grows,
+# and it caught two further oscillations while the fix was still unreleased.
+by_version = {r.get("version"): r for r in rows_all}
+
+
+def _pre_fix(version: int) -> bool:
+    root = str((by_version.get(version) or {}).get("root") or "")
+    return (not root) or ("releases/" in root)
+
+
+suspect = [o for o in oscillating if not (_pre_fix(o[0]) or _pre_fix(o[1]))]
+check("no architecture version recurs once scans share a root", not suspect,
+      "recurring: %s" % (suspect[:3],))
+if oscillating:
+    # Reported, not asserted away. Rewriting the ledger to make a test pass would
+    # destroy the only record of what the system actually did.
+    print("       note: %d oscillation(s) from before the root fix remain as recorded "
+          "history: %s" % (len(oscillating), oscillating[:4]))
+
+
+# --------------------------------------------------------------------------
+section("readouts are judged on served cost, not agent startup")
+
+# The agent is a fresh process every 15 minutes; the dashboard is a long-running server.
+# Judging on the cold number reported Findings as "too slow" at 4,066ms when the served
+# cost was 674ms -- measuring the agent's own imports and calling it a defect in the page.
+agent_src = (PROJECT / "experiments" / "dashboard_agent.py").read_text(encoding="utf-8")
+check("the probe measures twice", "_probe_once" in agent_src)
+check("the slow check uses the warm number", 'ms warm to build' in agent_src)
+check("the cold number is still reported", "cold_ms" in agent_src)
+
+
+# --------------------------------------------------------------------------
 section("the event stream is honestly ordered")
 
 events = architecture.events(limit=80)

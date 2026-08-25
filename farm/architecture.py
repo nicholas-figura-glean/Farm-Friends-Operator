@@ -30,7 +30,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-PROJECT = Path(__file__).resolve().parent.parent
+def _project_root() -> Path:
+    """The real project root, even when running from an immutable release copy.
+
+    The agents execute from `releases/<rev>/`, which contains the runtime but not
+    `deploy/` or `.git`. Taking the parent of this module therefore gave a different
+    answer depending on who was scanning, and the ledger flip-flopped between "8
+    LaunchAgents" from the working tree and "0 LaunchAgents" from the release, minting a
+    spurious architecture version every 15 minutes.
+
+    The architecture being described is that of the system, not of whichever copy of the
+    code happens to be executing, so the root is resolved by looking for the markers that
+    identify the project: a `deploy/` directory holding LaunchAgent plists. `state/` is
+    already symlinked back here for the same reason.
+    """
+    here = Path(__file__).resolve().parent.parent
+    for candidate in (here, *here.parents):
+        if (candidate / "deploy").is_dir() and any(
+                (candidate / "deploy").glob("com.nickfigura.farmfriends*.plist")):
+            return candidate
+    return here
+
+
+PROJECT = _project_root()
 LEDGER = PROJECT / "state" / "architecture.ndjson"
 
 # Layers, outermost first. The order is the story the diagram tells: the game is
@@ -278,6 +300,10 @@ def snapshot() -> Dict[str, Any]:
         },
         "commit": _git(["rev-parse", "--short", "HEAD"]) or None,
         "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
+        # Recorded so that a scan taken from the wrong root is visible in the ledger
+        # rather than silently producing a different shape. This is how the
+        # release-versus-working-tree flip-flop was eventually diagnosed.
+        "root": str(PROJECT),
     }
 
 
@@ -321,6 +347,7 @@ def record(snap: Optional[Dict[str, Any]] = None, trigger: str = "scan",
         "short": snap["short"],
         "commit": snap.get("commit"),
         "trigger": trigger,
+        "root": snap.get("root"),
         "stats": snap["stats"],
         # The full node and edge set is stored, not just the diff, so any past version
         # can be rendered without replaying history from version 1.

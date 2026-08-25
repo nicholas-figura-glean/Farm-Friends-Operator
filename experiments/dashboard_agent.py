@@ -72,9 +72,30 @@ def _now() -> str:
 def _probe(source: str) -> Dict[str, Any]:
     """Exercise one data source the way the dashboard does.
 
-    Timed, because a readout that takes 8s to build is a defect even when correct:
-    the page polls every 2s and would spend its life waiting.
+    Timed twice, and judged on the second. The dashboard is served by a long-running
+    process, so what a user waits for is a warm call; this agent is a fresh process every
+    15 minutes and pays imports and first disk reads that the server paid once at
+    startup. Judging on the cold number reported the Findings tab as "too slow" at
+    4,066ms when the served cost was 674ms -- measuring the agent's own startup and
+    calling it a defect in the page.
+
+    Both numbers are kept: a cold time far above the warm one is still worth seeing,
+    since it is what the very first request after a monitor restart costs.
     """
+    started = time.time()
+    first = _probe_once(source)
+    first["cold_ms"] = int((time.time() - started) * 1000)
+    if not first.get("ok"):
+        first["ms"] = first["cold_ms"]
+        return first
+    started = time.time()
+    second = _probe_once(source)
+    second["ms"] = int((time.time() - started) * 1000)
+    second["cold_ms"] = first["cold_ms"]
+    return second
+
+
+def _probe_once(source: str) -> Dict[str, Any]:
     started = time.time()
     try:
         if source == "monitor.snapshot":
@@ -167,7 +188,7 @@ def main() -> int:
             problems.append({
                 "severity": "degraded",
                 "what": "dashboard readout '%s' is too slow" % check["tab"],
-                "why": "%dms to build; the page polls every 2s" % probe["ms"],
+                "why": "%dms warm to build; the page polls every 2s" % probe["ms"],
                 "source": check["source"],
             })
 
@@ -246,8 +267,10 @@ def main() -> int:
     for r in results:
         mark = "ok  " if r.get("ok") else "FAIL"
         print("  %s %-26s %-24s %5sms %s"
-              % (mark, r["tab"][:26], r["source"], r.get("ms", "?"),
-                 r.get("detail") or r.get("error") or ""))
+              % (mark, r["tab"][:26], r["source"],
+                 r.get("ms", "?"),
+                 ("cold %sms  " % r.get("cold_ms") if r.get("cold_ms") else "")
+                 + (r.get("detail") or r.get("error") or "")))
     if arch_result.get("recorded"):
         print("  architecture v%s recorded (%s)"
               % (arch_result.get("version"), arch_result.get("short")))
