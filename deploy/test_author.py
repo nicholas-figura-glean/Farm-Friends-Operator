@@ -277,6 +277,33 @@ write_runs(base + [{"run": n, "produce_per_min": 95.0, "collected": 8,
 verdict = canary.evaluate(store, runs)
 check("a risk event alone does not revert a release", verdict["status"] == canary.WATCHING, str(verdict))
 
+section("the canary judges the release, not the weather")
+
+# Both of these were found by watching the first real alien invasion nearly revert
+# the release that added abduction detection.
+_inv = {"run": 900, "animals": 200_000, "produce_per_min": -607664.3,
+        "risk_event_counts": {"aliens": 2}}
+_ok = {"run": 901, "animals": 200_000, "produce_per_min": 70_000.0}
+check("a run with abductions is excluded from the comparison",
+      canary._exogenous_loss(_inv) == "aliens", str(canary._exogenous_loss(_inv)))
+check("a falling lifetime counter is treated as outside loss",
+      canary._exogenous_loss({"run": 902, "animals": 10, "produce_per_min": -5.0})
+      == "negative produce delta")
+check("an ordinary run is not excluded", canary._exogenous_loss(_ok) is None)
+
+# Herd normalisation. Same per-animal productivity, herd 13% smaller: absolute rate
+# looks like a 13% regression, per-animal correctly looks like none.
+_big = {"run": 903, "animals": 256_163, "produce_per_min": 0.40 * 256_163}
+_small = {"run": 904, "animals": 222_406, "produce_per_min": 0.40 * 222_406}
+check("absolute rate falls when only the herd shrank",
+      canary._rate(_small) < canary._rate(_big) * 0.90,
+      "%.0f vs %.0f" % (canary._rate(_small), canary._rate(_big)))
+check("per-animal rate is unchanged when only the herd shrank",
+      abs(canary._per_animal(_small) - canary._per_animal(_big)) < 1e-9,
+      "%.6f vs %.6f" % (canary._per_animal(_small), canary._per_animal(_big)))
+check("per-animal rate needs a positive herd to be defined",
+      canary._per_animal({"run": 905, "animals": 0, "produce_per_min": 5.0}) is None)
+
 section("revert safety")
 
 rev = tempfile.mkdtemp()

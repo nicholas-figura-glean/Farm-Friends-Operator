@@ -115,6 +115,50 @@ def _runs(path: str = RUN_HISTORY, limit: int = 400) -> List[Dict[str, Any]]:
     return out
 
 
+def _exogenous_loss(row: Dict[str, Any]) -> Optional[str]:
+    """Did an outside event, not the release, depress this run?
+
+    Abduction is the case that forced this. An alien invasion removes animals *and*
+    the produce they had accumulated, so lifetime produce actually falls and the run
+    scores far below any baseline. Attributing that to whatever release happened to
+    be on probation is simply wrong, and during the first live invasion it came
+    within 2,160 units/min of auto-reverting the very release that added abduction
+    detection -- the release that made the invasion visible in the first place.
+
+    `_looks_broken` already refuses to treat risk events as breakage. The rate
+    comparison needed the same exclusion and did not have it.
+    """
+    counts = row.get("risk_event_counts") or {}
+    if isinstance(counts, dict) and int(counts.get("aliens") or 0) > 0:
+        return "aliens"
+    # A falling lifetime counter can only mean loss inflicted from outside; normal
+    # operation cannot un-produce.
+    value = row.get("produce_per_min")
+    if isinstance(value, (int, float)) and value < 0:
+        return "negative produce delta"
+    return None
+
+
+def _per_animal(row: Dict[str, Any]) -> Optional[float]:
+    """Produce rate divided by herd size.
+
+    The canary must compare like with like, and absolute rate is not like-for-like
+    when the herd changes underneath it. During the first alien invasion the herd fell
+    13% (256,163 -> 222,406), which by itself dragged absolute rate 23% below
+    baseline -- almost through the 25% revert floor -- while per-animal output was
+    only 11.5% down. The release under probation had nothing to do with either number.
+
+    This is the same confound that made the herd/output estimator unreliable: herd
+    size moves for reasons unrelated to the thing being measured, so anything
+    compared across a herd change has to be normalised first.
+    """
+    value = row.get("produce_per_min")
+    herd = row.get("animals")
+    if isinstance(value, (int, float)) and value >= 0 and isinstance(herd, int) and herd > 0:
+        return float(value) / float(herd)
+    return None
+
+
 def _rate(row: Dict[str, Any]) -> Optional[float]:
     value = row.get("produce_per_min")
     if isinstance(value, (int, float)) and value >= 0:
@@ -131,6 +175,18 @@ def baseline_rate(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float
     """Mean produce rate over the runs immediately before now."""
     rows = runs if runs is not None else _runs()
     rates = [r for r in (_rate(row) for row in rows[-rules.CANARY_BASELINE_RUNS :]) if r is not None]
+    return _mean(rates)
+
+
+def baseline_per_animal(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
+    """Mean per-animal produce rate over the runs immediately before now.
+
+    This is the figure the verdict actually uses. `baseline_rate` is still recorded
+    because it is what an operator recognises, but it must not decide a revert.
+    """
+    rows = runs if runs is not None else _runs()
+    rates = [r for r in (_per_animal(row) for row in rows[-rules.CANARY_BASELINE_RUNS :])
+             if r is not None]
     return _mean(rates)
 
 
@@ -164,6 +220,7 @@ def arm(
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
         "baseline_rate": baseline_rate(runs),
+        "baseline_per_animal": baseline_per_animal(runs),
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
     }
     _write_json(store, record)
@@ -188,10 +245,19 @@ def evaluate(
     armed_at = record.get("armed_at_run")
     runs = _runs(run_history)
     after = [r for r in runs if armed_at is None or int(r.get("run") or 0) > int(armed_at)]
-    rates = [r for r in (_rate(row) for row in after) if r is not None]
+    # Runs an outside event ruined say nothing about the release, so they are not
+    # evidence either way. They are still counted as observed so a long invasion
+    # cannot hold a canary open forever.
+    contaminated = [r for r in after if _exogenous_loss(r)]
+    usable = [r for r in after if not _exogenous_loss(r)]
+    rates = [r for r in (_rate(row) for row in usable) if r is not None]
+    per_animal = [r for r in (_per_animal(row) for row in usable) if r is not None]
 
+    # Absolute rate is reported for legibility; the per-animal figure decides.
     baseline = record.get("baseline_rate")
     observed = _mean(rates)
+    baseline_pa = record.get("baseline_per_animal")
+    observed_pa = _mean(per_animal)
 
     verdict: Dict[str, Any] = {
         "status": WATCHING,
@@ -227,6 +293,37 @@ def evaluate(
         verdict["status"] = HEALTHY
         verdict["reason"] = "no comparable baseline; accepting after %d clean runs" % len(after)
         return verdict
+
+    if contaminated:
+        verdict["excluded_runs"] = [int(r.get("run") or 0) for r in contaminated]
+        verdict["excluded_reason"] = _exogenous_loss(contaminated[0])
+
+    # Prefer the herd-normalised comparison. Fall back to absolute only for a canary
+    # armed before this field existed, so an in-flight canary still resolves.
+    if baseline_pa and observed_pa is not None:
+        floor = baseline_pa * (1.0 - rules.CANARY_REGRESSION_TOLERANCE)
+        verdict["baseline_per_animal"] = round(baseline_pa, 6)
+        verdict["observed_per_animal"] = round(observed_pa, 6)
+        verdict["threshold"] = floor
+        if observed_pa < floor:
+            verdict["status"] = REGRESSED
+            verdict["reason"] = (
+                "per-animal produce %.4f vs baseline %.4f (floor %.4f) over %d run(s)"
+                % (observed_pa, baseline_pa, floor, len(usable))
+            )
+            return verdict
+        if len(after) >= rules.CANARY_MAX_RUNS:
+            verdict["status"] = HEALTHY
+            verdict["reason"] = (
+                "per-animal produce %.4f vs baseline %.4f over %d run(s)"
+                % (observed_pa, baseline_pa, len(usable))
+            )
+            return verdict
+        verdict["reason"] = "per-animal %.4f vs baseline %.4f, %d/%d runs" % (
+            observed_pa, baseline_pa, len(after), rules.CANARY_MAX_RUNS,
+        )
+        return verdict
+
 
     threshold = baseline * (1.0 - rules.CANARY_REGRESSION_TOLERANCE)
     verdict["threshold"] = threshold
