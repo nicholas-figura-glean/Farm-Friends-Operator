@@ -298,6 +298,31 @@ check("a failed revert leaves the pointer alone",
 out = canary.revert("", rev)
 check("reverting with no recorded previous is refused", out.get("reverted") is False, str(out))
 
+# Regression guard for a real incident. canary.revert() used to record a git inverse
+# commit as a side effect. It takes `project` so it can flip a symlink inside a temp
+# directory -- exactly what this suite does -- but the git work ignored that argument
+# and operated on the real repository. Running this suite therefore rewrote the live
+# `main` branch and undid a genuine production commit (alien-abduction detection,
+# 46ee691) while reporting every check green.
+#
+# The side effect now lives in canary.record_inverse_commit(), called only from the
+# adjudication path and only when `project` is the real root.
+section("a temp-directory revert cannot rewrite real history")
+try:
+    from farm import vcs as _vcs
+    if _vcs.available():
+        head_before = _vcs.head()
+        canary.revert("revA", rev)
+        check("flipping a symlink in a temp dir leaves git history alone",
+              _vcs.head() == head_before,
+              "%s -> %s" % (_vcs.short(head_before), _vcs.short(_vcs.head())))
+        check("revert() no longer reports a git side effect",
+              "inverse_commit" not in canary.revert("revA", rev))
+    else:
+        check("git unavailable, nothing to protect", True)
+except ImportError:
+    check("vcs module absent, nothing to protect", True)
+
 section("a resolved canary does not act twice")
 
 # Arm against a healthy baseline FIRST, then let the regression appear, so there

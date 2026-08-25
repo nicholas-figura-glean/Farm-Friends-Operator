@@ -48,6 +48,10 @@ from typing import Any, Dict, List, Optional
 from . import rules
 
 STORE = os.path.join("state", "canary.json")
+# The real project root. Used only to decide whether a caller is operating on live
+# state or on a temp directory, which is what keeps a test suite from rewriting
+# real git history. See record_inverse_commit().
+PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HISTORY = os.path.join("state", "canary.ndjson")
 RUN_HISTORY = os.path.join("state", "history.ndjson")
 
@@ -287,6 +291,13 @@ def resolve(
 
     if status == REGRESSED:
         outcome.update(revert(str(record.get("previous") or ""), project))
+        # Only once the pointer has actually moved, and only when operating on the
+        # real project, record the inverse commit. Guarding on `project` keeps test
+        # suites that flip a symlink in a temp directory from rewriting real history.
+        if outcome.get("reverted") and os.path.abspath(project) == os.path.abspath(str(PROJECT)):
+            inverse = record_inverse_commit(store)
+            if inverse:
+                outcome["inverse_commit"] = inverse
 
     # Clear either way. A regressed canary must not stay armed, or the next
     # supervisor pass would try to revert again and walk the pointer backwards.
@@ -326,35 +337,47 @@ def revert(previous: str, project: str = ".") -> Dict[str, Any]:
     resolved = os.path.realpath(link)
     if os.path.realpath(target) != resolved:
         return {"reverted": False, "error": "flip did not take: %s" % resolved}
+    return {"reverted": True, "now_live": os.path.basename(resolved)}
 
-    out = {"reverted": True, "now_live": os.path.basename(resolved)}
 
-    # The pointer flip is what makes the farm healthy again, and it has already
-    # happened. Recording an inverse commit is a second, separate concern: without
-    # it main still contains the rejected change, and the very next release would
-    # quietly ship it again. Best-effort by design -- a git failure must never turn
-    # a successful revert into a reported failure.
-    record = _read_json(STORE)
+def record_inverse_commit(store: str = STORE) -> Optional[str]:
+    """Record an inverse commit for the change the canary just rejected.
+
+    Deliberately NOT called from revert(). It used to be, and that was a mistake
+    with real consequences: revert() takes a `project` argument so it can flip a
+    symlink inside a temp directory, which is exactly how deploy/test_author.py
+    exercises it -- but the git work ignored that argument and operated on the real
+    repository. The author suite therefore rewrote the live `main` branch and undid
+    a genuine production commit (the alien-abduction detection, 46ee691) while
+    reporting all checks green.
+
+    Two lessons are encoded here. A function whose job is to flip a symlink should
+    flip a symlink and nothing else. And a consequential side effect belongs at the
+    one call site that has actually decided to take it -- the supervisor's canary
+    adjudication -- not buried in a helper that tests call with fake paths.
+
+    Returns the inverse commit sha, or None if there was nothing to do.
+    """
+    record = _read_json(store)
     commit = record.get("commit")
-    if commit:
-        try:
-            from . import vcs
-            if vcs.available():
-                inverse = vcs.revert_commit(
-                    commit,
-                    "Revert: canary rejected release %s\n\n"
-                    "Production regressed after this change shipped, so the release\n"
-                    "pointer was flipped back to %s automatically. This inverse commit\n"
-                    "exists so the next release does not re-publish the same change.\n\n"
-                    "Reverted commit: %s\n"
-                    "Reverted by: farm/canary.py, unattended."
-                    % (record.get("revision"), previous, commit),
-                )
-                if inverse:
-                    out["inverse_commit"] = inverse
-        except Exception:  # noqa: BLE001 - never let bookkeeping undo a good revert
-            pass
-    return out
+    if not commit:
+        return None
+    try:
+        from . import vcs
+        if not vcs.available():
+            return None
+        return vcs.revert_commit(
+            commit,
+            "Revert: canary rejected release %s\n\n"
+            "Production regressed after this change shipped, so the release pointer\n"
+            "was flipped back to %s automatically. This inverse commit exists so the\n"
+            "next release does not re-publish the same change.\n\n"
+            "Reverted commit: %s\n"
+            "Reverted by: farm/canary.py, unattended."
+            % (record.get("revision"), record.get("previous"), commit),
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must never undo a good revert
+        return None
 
 
 def status(store: str = STORE, run_history: str = RUN_HISTORY) -> Dict[str, Any]:
