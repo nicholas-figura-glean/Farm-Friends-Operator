@@ -35,3 +35,4 @@ game-preview.html
 # Local scratch that must never reach a commit.
 .author-stage-*/
 *.local.json
+state/alerts.ndjson.pre-batchid-purge

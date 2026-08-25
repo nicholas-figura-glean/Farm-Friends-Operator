@@ -23,7 +23,7 @@ PROJECT = os.path.dirname(HERE)
 sys.path.insert(0, PROJECT)
 sys.path.insert(0, os.path.join(PROJECT, "experiments"))
 
-from farm import contract, workorders  # noqa: E402
+from farm import contract, journal, workorders  # noqa: E402
 
 FAILURES = []
 CHECKS = [0]
@@ -118,6 +118,11 @@ section("every actionable change yields an instruction")
 
 import contract_watch  # noqa: E402
 
+# The real alert ledger, captured before any redirection, so the suite can prove
+# it never wrote its fabricated breaking change into live operations.
+REAL_ALERTS = journal.ALERTS
+REAL_ALERTS_SIZE = os.path.getsize(REAL_ALERTS) if os.path.exists(REAL_ALERTS) else 0
+
 cases = [
     ("required_arg_added", {"args": ["batch_id"], "we_pass": ["animal_id"]}),
     ("arg_removed", {"arg": "animal_id", "rename_candidate": "id"}),
@@ -189,6 +194,22 @@ def fresh_env():
     contract_watch.STORE = contract_watch.STATE / "contract_watch.json"
     contract_watch.LOCK = contract_watch.STATE / ".contract-watch.lock"
     contract_watch.Client = StubClient
+
+    # Redirect the shared alert ledger too.
+    #
+    # This suite feeds the watcher a fabricated breaking change ("feed_animals now
+    # requires batch_id"). On detecting breaking drift the watcher calls
+    # journal.record_alerts, which appends to a module-level ALERTS constant --
+    # the real state/alerts.ndjson, regardless of where the watcher's own state was
+    # pointed. Every run of this suite therefore wrote a fictional breaking change
+    # into live operations, and the 60s supervisor dutifully escalated it with
+    # needs_llm: true. 34 such entries accumulated before this was caught, each one
+    # inviting a paid escalation for a problem that never existed and making a
+    # genuine breaking change harder to see.
+    #
+    # Redirecting the module constant is the fix; the assertion below is what stops
+    # it regressing.
+    journal.ALERTS = os.path.join(root, "state", "alerts.ndjson")
     return root
 
 
@@ -272,6 +293,20 @@ if orders:
           any("cycle.py is unchanged" in a for a in orders[0]["acceptance"]), str(orders[0]["acceptance"]))
 
 shutil.rmtree(tmp, ignore_errors=True)
+
+section("the suite does not touch live operations")
+# Regression guard for a real incident: this suite leaked 34 fictional
+# "feed_animals now requires batch_id" alerts into state/alerts.ndjson, and the
+# supervisor escalated every one of them with needs_llm: true.
+now_size = os.path.getsize(REAL_ALERTS) if os.path.exists(REAL_ALERTS) else 0
+check("the real alert ledger was not appended to", now_size == REAL_ALERTS_SIZE,
+      "%d -> %d bytes" % (REAL_ALERTS_SIZE, now_size))
+check("journal.ALERTS was redirected away from the real ledger",
+      str(journal.ALERTS) != str(REAL_ALERTS), str(journal.ALERTS))
+if os.path.exists(REAL_ALERTS):
+    with open(REAL_ALERTS) as _fh:
+        check("no fabricated batch_id alert reached the real ledger",
+              "batch_id" not in _fh.read())
 
 print("\n%d checks, %d failures" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
