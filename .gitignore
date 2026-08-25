@@ -6,14 +6,19 @@
 # it continuously, so the index would never be clean. The ledgers are already
 # append-only and immutable on disk, which is the property we actually wanted from
 # version control here.
-state/
+#
+# No trailing slash, and anchored. `state/` would match only a directory, and the
+# author agent's worktrees link state in as a *symlink* -- which `git add -A` then
+# happily committed, putting a machine-specific absolute path into the tree and from
+# there into every published release. Caught by the vcs self-test on 2026-08-25.
+/state
 
 # Immutable release trees and the live pointer. These are *outputs* of a commit,
 # published by deploy/release.sh. Versioning them would store every file twice and
 # let a stale release tree be resurrected by a checkout, which is precisely the
 # confusion the release/ symlink exists to prevent.
-releases/
-release
+/releases
+/release
 
 # Build and editor noise.
 __pycache__/

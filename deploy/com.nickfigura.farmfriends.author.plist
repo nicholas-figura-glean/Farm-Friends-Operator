@@ -24,10 +24,10 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>-u</string>
-    <string>__PROJECT__/experiments/author_agent.py</string>
+    <string>__PROJECT__/release/experiments/author_agent.py</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>__PROJECT__</string>
+  <string>__PROJECT__/release</string>
   <key>StartInterval</key>
   <integer>600</integer>
   <key>StandardOutPath</key>
