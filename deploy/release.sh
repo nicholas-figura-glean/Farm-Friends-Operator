@@ -52,6 +52,7 @@ fi
 # the Desktop-managed token is dormant.
 /usr/bin/python3 deploy/test_contract.py
 /usr/bin/python3 deploy/test_contract_watch.py
+/usr/bin/python3 deploy/test_vcs.py
 /usr/bin/python3 deploy/test_author.py
 # The switchboard's honesty rules (measured flight time, no invented spans, no
 # packet without a recorded call) live in JavaScript, so its JavaScriptCore suite

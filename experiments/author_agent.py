@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import canary, ledger, llm, policy, rules, tokens, workorders  # noqa: E402
+from farm import canary, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
 
 STATE = PROJECT / "state"
 LOCK = STATE / ".author.lock"
@@ -155,13 +155,26 @@ def budget_check(stored: Dict[str, Any]) -> Optional[str]:
 # -- staging -----------------------------------------------------------------
 
 
-def stage_tree() -> str:
-    """An isolated copy of the code, with state/ shared by symlink.
+def stage_tree() -> Dict[str, Any]:
+    """An isolated tree to patch and gate, preferring a git worktree.
 
     The live tree is never edited speculatively: launchd fires every 180s and
     would happily execute a half-applied change, which is incident #1 in
     deploy/release.sh's history.
+
+    Two implementations, same contract. A git worktree is better in every way that
+    matters -- it is a real checkout at a known commit, so the isolation is a
+    property of the tool rather than of STAGE_DIRS being kept in sync, and the
+    result is a reviewable diff and a revertable commit. The copy path stays for
+    when git is unavailable, because losing version control should degrade review
+    quality, not stop the farm from repairing itself.
     """
+    if vcs.available():
+        try:
+            worktree = vcs.worktree_add("stage")
+            return {"root": worktree["path"], "vcs": worktree}
+        except vcs.GitError:
+            pass  # fall through to the copy path
     root = tempfile.mkdtemp(prefix="author-stage-")
     for name in STAGE_DIRS:
         source = PROJECT / name
@@ -177,7 +190,19 @@ def stage_tree() -> str:
     journal = PROJECT / "farm-strategy-journal.md"
     if journal.exists():
         os.symlink(str(journal), os.path.join(root, "farm-strategy-journal.md"))
-    return root
+    return {"root": root, "vcs": None}
+
+
+def unstage(stage: Dict[str, Any], keep_branch: bool = False) -> None:
+    """Tear down a staging tree of either kind."""
+    worktree = stage.get("vcs")
+    if worktree:
+        try:
+            vcs.worktree_remove(worktree, keep_branch=keep_branch)
+            return
+        except vcs.GitError:
+            pass
+    shutil.rmtree(stage.get("root") or "", ignore_errors=True)
 
 
 def editable(rel: str) -> Optional[str]:
@@ -435,6 +460,7 @@ GATES = (
     ("recovery-watch", ["/usr/bin/python3", "deploy/test_recovery_watch.py"]),
     ("contract", ["/usr/bin/python3", "deploy/test_contract.py"]),
     ("contract-watch", ["/usr/bin/python3", "deploy/test_contract_watch.py"]),
+    ("vcs", ["/usr/bin/python3", "deploy/test_vcs.py"]),
 )
 
 
@@ -521,7 +547,8 @@ def current_revision() -> str:
         return ""
 
 
-def publish(files: Dict[str, str], order: Dict[str, Any], summary: str) -> Dict[str, Any]:
+def publish(files: Dict[str, str], order: Dict[str, Any], summary: str,
+            commit: Optional[str] = None) -> Dict[str, Any]:
     """Copy the verified patch into the live tree and release it under a canary."""
     previous = current_revision()
 
@@ -549,6 +576,7 @@ def publish(files: Dict[str, str], order: Dict[str, Any], summary: str) -> Dict[
         return {"published": False, "error": "release pointer did not advance"}
 
     armed = canary.arm(revision, previous, reason=summary, order_id=str(order.get("id") or ""),
+                       commit=commit or "",
                        store=str(PROJECT / canary.STORE), history=str(PROJECT / canary.HISTORY),
                        run_history=str(PROJECT / canary.RUN_HISTORY))
     return {"published": True, "revision": revision, "previous": previous, "canary": armed}
@@ -602,9 +630,13 @@ def main() -> int:
     print("AUTHOR claimed %s (%s %s): %s"
           % (order["id"], order["severity"], order["kind"], (order.get("summary") or "")[:90]))
 
-    root = stage_tree()
+    stage = stage_tree()
+    root = stage["root"]
+    if stage.get("vcs"):
+        print("  staged in a git worktree on %s at %s"
+              % (stage["vcs"]["branch"], vcs.short(stage["vcs"]["base_sha"])))
     try:
-        return author_pass(order, root, queue, stored)
+        return author_pass(order, root, queue, stored, stage)
     except Exception as exc:  # noqa: BLE001 - a bug here must not wedge the queue
         workorders.resolve(order["id"], workorders.FAILED,
                            note="author agent raised %s: %s" % (type(exc).__name__, str(exc)[:300]),
@@ -613,10 +645,11 @@ def main() -> int:
         print("AUTHOR failed on %s: %s: %s" % (order["id"], type(exc).__name__, str(exc)[:200]))
         return 4
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        unstage(stage)
 
 
-def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, Any]) -> int:
+def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, Any],
+                stage: Optional[Dict[str, Any]] = None) -> int:
     """Patch, gate and publish one order inside the staging tree."""
     attempt_notes: List[str] = []
     patch: Optional[Dict[str, Any]] = None
@@ -673,7 +706,7 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             attempt_notes.append("attempt %d: %s" % (attempt, broken))
             print("  attempt %d does not compile" % attempt)
             feedback = broken
-            restore(order, root, files)
+            restore(order, root, files, stage)
             patch = None
             continue
 
@@ -712,13 +745,25 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             attempt_notes.append("attempt %d: %s" % (attempt, detail))
             print("  attempt %d failed gates: %s" % (attempt, detail))
             feedback = detail + "\n\n" + evidence
-            restore(order, root, files)
+            restore(order, root, files, stage)
             patch = None
             continue
 
-        # Verified in isolation. Now publish for real.
+        # Verified in isolation. Commit the branch before publishing, so the diff
+        # that ships is recorded even if publishing itself then fails.
         summary = patch.get("summary") or "work order %s" % order["id"]
-        result = publish(files, order, summary)
+        commit_info: Dict[str, Any] = {}
+        if stage and stage.get("vcs"):
+            try:
+                commit_info = commit_change(stage["vcs"], order, patch, summary)
+            except vcs.GitError as exc:
+                # A version-control failure must not block a repair that already
+                # passed its gates. Record it and publish anyway.
+                print("  vcs: could not record the change (%s); publishing regardless"
+                      % str(exc)[:140])
+                log({"event": "vcs_failed", "order": order["id"], "error": str(exc)[:300]})
+
+        result = publish(files, order, summary, commit=commit_info.get("sha"))
         if not result.get("published"):
             workorders.resolve(order["id"], workorders.FAILED,
                                note=str(result.get("error"))[:400], path=queue)
@@ -726,19 +771,29 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             log({"event": "publish_refused", "order": order["id"], "error": result.get("error")})
             return 3
 
+        if commit_info.get("sha"):
+            vcs.tag_release(result["revision"], commit_info["sha"])
+
         workorders.resolve(order["id"], workorders.PUBLISHED,
                            note=summary, release=result["revision"], path=queue,
-                           backend=patch.get("backend"))
+                           backend=patch.get("backend"),
+                           commit=commit_info.get("sha"),
+                           diff=commit_info.get("stat"))
         write_json(STORE, dict(stored, last_authored_run=canary.latest_run(),
                                last_order=order["id"], last_revision=result["revision"],
+                               last_commit=commit_info.get("sha"),
                                last_ts=utcnow()))
         log({"event": "published", "order": order["id"], "revision": result["revision"],
              "previous": result["previous"], "backend": patch.get("backend"),
-             "files": sorted(files), "summary": summary})
+             "files": sorted(files), "summary": summary,
+             "commit": commit_info.get("sha"), "diff": commit_info.get("stat")})
         ledger.record("author.published", {"order": order["id"], "revision": result["revision"],
-                                          "backend": patch.get("backend"), "files": sorted(files)})
+                                          "backend": patch.get("backend"), "files": sorted(files),
+                                          "commit": commit_info.get("sha")})
         print("AUTHOR published %s as %s (canary armed, previous %s)"
               % (order["id"], result["revision"], result["previous"]))
+        if commit_info.get("sha"):
+            print("  commit %s on main" % vcs.short(commit_info["sha"]))
         return 0
 
     workorders.resolve(order["id"], workorders.FAILED,
@@ -748,8 +803,69 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
     return 3
 
 
-def restore(order: Dict[str, Any], root: str, files: Dict[str, str]) -> None:
-    """Undo a rejected patch in the staging tree so the next attempt starts clean."""
+def commit_change(worktree: Dict[str, Any], order: Dict[str, Any],
+                  patch: Dict[str, Any], summary: str) -> Dict[str, Any]:
+    """Commit the gated branch, fast-forward main, and sync the live tree.
+
+    The commit message is the audit trail a reviewer actually reads, so it carries
+    the order id, the detection source, which backend wrote it, and the acceptance
+    criteria the gates were standing in for. A model-authored change that cannot
+    explain itself is indistinguishable from a corrupted one.
+    """
+    body = [summary, ""]
+    body.append("Work order: %s (%s, %s)" % (order["id"], order.get("severity"), order.get("kind")))
+    if order.get("source"):
+        body.append("Detected by: %s" % order["source"])
+    body.append("Authored by: %s backend" % (patch.get("backend") or "unknown"))
+    if order.get("tool"):
+        body.append("Tool: %s" % order["tool"])
+    acceptance = order.get("acceptance") or []
+    if acceptance:
+        body.append("")
+        body.append("Acceptance criteria carried by this change:")
+        for item in acceptance[:6]:
+            body.append("  * %s" % str(item)[:160])
+    body.append("")
+    body.append("Gates: the full release matrix passed in an isolated worktree before")
+    body.append("this commit was made. A canary is armed on the resulting release and")
+    body.append("will revert the pointer automatically if production regresses.")
+    body.append("")
+    body.append("Authored autonomously by experiments/author_agent.py.")
+    message = "\n".join(body)
+
+    sha = vcs.commit_worktree(worktree, message)
+    if not sha:
+        return {}
+    diff = vcs.diff_stat(worktree)
+    merged = vcs.merge_to_main(worktree, summary)
+    # Only now bring the live tree's copies of those files forward, and only the
+    # files the change touched: a whole-tree checkout could clobber unrelated edits.
+    synced = vcs.sync_live_tree(diff.get("files") or [])
+    return {
+        "sha": merged or sha,
+        "branch": worktree["branch"],
+        "stat": diff.get("stat"),
+        "files": diff.get("files"),
+        "insertions": diff.get("insertions"),
+        "deletions": diff.get("deletions"),
+        "synced": synced,
+    }
+
+
+def restore(order: Dict[str, Any], root: str, files: Dict[str, str],
+            stage: Optional[Dict[str, Any]] = None) -> None:
+    """Undo a rejected patch in the staging tree so the next attempt starts clean.
+
+    In a worktree the authority is the branch's base commit, not the live tree: the
+    live tree may itself have uncommitted edits, and copying those in would mean the
+    retry starts from something that was never gated.
+    """
+    if stage and stage.get("vcs"):
+        try:
+            vcs._run(["checkout", "--", "."], cwd=root, check=False)
+            return
+        except (vcs.GitError, OSError):
+            pass
     for rel in files:
         source = PROJECT / rel
         try:

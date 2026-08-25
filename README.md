@@ -602,3 +602,37 @@ deploy/release.sh
 Routine arithmetic still belongs in `rules.py` or `watch.py`, not a prompt. The
 corollary is now enforced: **a decision that is never re-checked belongs in the
 question ledger.** See `docs/epistemic-control-plane.md`.
+
+## Version control
+
+The repository is the change-management layer for autonomous edits. It is not
+optional decoration: without it an unattended change had no diff, no reviewable
+record, and no way to be undone except by re-pointing at a whole previous release
+directory, which also takes down anything good that shipped after it.
+
+```
+python3 run.py --vcs-status     # main, autonomous commits, release tags
+git log --oneline               # every change, including machine-authored ones
+git show release/<revision>     # the exact code a published release was built from
+```
+
+What is versioned, and what is deliberately not:
+
+| path | tracked | why |
+|---|---|---|
+| code, docs, tests, plists | yes | this is the reviewable surface |
+| `state/` | no | 322MB, rewritten every 180s; already append-only and immutable |
+| `releases/`, `release` | no | outputs of a commit; a checkout must not resurrect a stale tree |
+
+Autonomous changes never touch `main` directly. Each authoring pass gets its own
+`git worktree` on an `author/<order-id>` branch, so the pass is isolated by the
+tool rather than by a hand-maintained list of directories to copy. `main` only
+moves after the full gate matrix has passed inside that worktree, and
+`merge_to_main` refuses if `main` moved during the pass -- the gates that just
+passed were run against a tree that no longer reflects reality.
+
+When the canary rejects a release it does two separate things. The symlink flip is
+what makes the farm healthy again in seconds. The inverse commit is what stops the
+rejected change being silently re-published by the next release, and leaves a record
+that it was tried and rejected. The rejected commit stays in history; nothing is
+erased.

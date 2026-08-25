@@ -301,6 +301,39 @@ def do_orders() -> int:
     return 3 if summary["breaking_open"] else 0
 
 
+def do_vcs_status() -> int:
+    """What the autonomous history looks like, and whether it is safe to author."""
+    from farm import vcs
+    if not vcs.available():
+        print("VCS unavailable: not a git repository")
+        print("  the author agent will fall back to copy-based staging (no diffs, no revert)")
+        return 0
+    print("VCS main at %s" % vcs.short(vcs.head()))
+    dirty = vcs.dirty_paths()
+    if dirty:
+        # Worth flagging: the author agent forks from main, so uncommitted work in the
+        # live tree is invisible to it and will not be part of what it gates.
+        print("  %d uncommitted tracked file(s); the author agent forks from main and"
+              % len(dirty))
+        print("  will not see these: %s" % ", ".join(dirty[:6]))
+    else:
+        print("  working tree clean")
+    stale = vcs.stale_worktrees()
+    if stale:
+        print("  %d stale worktree record(s) from a crashed pass" % len(stale))
+    print()
+    print("recent history:")
+    for row in vcs.recent(10):
+        print("  %s  %-14s %-16s %s" % (row["sha"], row["when"][:14], row["author"][:16],
+                                        row["subject"][:74]))
+    tags = vcs._run(["tag", "--list", vcs.TAG_PREFIX + "*", "--sort=-creatordate"],
+                    check=False).stdout.split()
+    if tags:
+        print()
+        print("release tags (newest first): %s" % ", ".join(tags[:6]))
+    return 0
+
+
 def do_canary_status() -> int:
     """Is a release currently on probation, and how is it doing?"""
     info = canary.status()
@@ -1734,6 +1767,8 @@ def main() -> int:
                     help="show the provisional release under observation")
     ap.add_argument("--llm-status", action="store_true",
                     help="show headless model availability and authoring spend")
+    ap.add_argument("--vcs-status", action="store_true",
+                    help="show git history, autonomous commits and release tags")
     ap.add_argument("--questions", action="store_true", help="show durable open strategy questions")
     ap.add_argument("--all-questions", action="store_true", help="include answered questions")
     ap.add_argument("--sweep", action="store_true", help="pure counterfactual strategy replay")
@@ -1772,6 +1807,8 @@ def main() -> int:
         return do_canary_status()
     if args.llm_status:
         return do_llm_status()
+    if args.vcs_status:
+        return do_vcs_status()
     if args.supervise:
         try:
             return do_supervise()

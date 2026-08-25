@@ -140,6 +140,7 @@ def arm(
     previous: str,
     reason: str = "",
     order_id: str = "",
+    commit: str = "",
     store: str = STORE,
     history: str = HISTORY,
     run_history: str = RUN_HISTORY,
@@ -153,6 +154,9 @@ def arm(
         "previous": previous,
         "reason": reason[:300],
         "order_id": order_id,
+        # The commit this release was built from, so a revert can undo the change by
+        # content and not only by re-pointing at the previous directory.
+        "commit": commit,
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
         "baseline_rate": baseline_rate(runs),
@@ -322,7 +326,35 @@ def revert(previous: str, project: str = ".") -> Dict[str, Any]:
     resolved = os.path.realpath(link)
     if os.path.realpath(target) != resolved:
         return {"reverted": False, "error": "flip did not take: %s" % resolved}
-    return {"reverted": True, "now_live": os.path.basename(resolved)}
+
+    out = {"reverted": True, "now_live": os.path.basename(resolved)}
+
+    # The pointer flip is what makes the farm healthy again, and it has already
+    # happened. Recording an inverse commit is a second, separate concern: without
+    # it main still contains the rejected change, and the very next release would
+    # quietly ship it again. Best-effort by design -- a git failure must never turn
+    # a successful revert into a reported failure.
+    record = _read_json(STORE)
+    commit = record.get("commit")
+    if commit:
+        try:
+            from . import vcs
+            if vcs.available():
+                inverse = vcs.revert_commit(
+                    commit,
+                    "Revert: canary rejected release %s\n\n"
+                    "Production regressed after this change shipped, so the release\n"
+                    "pointer was flipped back to %s automatically. This inverse commit\n"
+                    "exists so the next release does not re-publish the same change.\n\n"
+                    "Reverted commit: %s\n"
+                    "Reverted by: farm/canary.py, unattended."
+                    % (record.get("revision"), previous, commit),
+                )
+                if inverse:
+                    out["inverse_commit"] = inverse
+        except Exception:  # noqa: BLE001 - never let bookkeeping undo a good revert
+            pass
+    return out
 
 
 def status(store: str = STORE, run_history: str = RUN_HISTORY) -> Dict[str, Any]:
