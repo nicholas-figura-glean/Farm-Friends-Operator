@@ -28,6 +28,28 @@ fi
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASES="$PROJECT/releases"
 LINK="$PROJECT/release"
+
+# A release is built from the working tree, so the working tree is what ships. If it
+# disagrees with main, then main is not a record of what is running, and the next
+# release built after any checkout will silently ship something different.
+#
+# This guard exists because that divergence actually happened and hid a real bug: a
+# test suite rewrote main via update-ref, which does not touch the working tree, so
+# the deployment kept running correct code while main had quietly lost it. Nothing
+# noticed, because everything that mattered still worked.
+#
+# A warning rather than a hard failure: an operator mid-edit should still be able to
+# cut a release, and refusing would make this script fail in exactly the situation
+# where someone is trying to fix something urgently.
+if [[ -d "$PROJECT/.git" ]] && command -v git >/dev/null 2>&1; then
+  DIVERGED="$(cd "$PROJECT" && git diff --name-only main -- . 2>/dev/null | head -20)"
+  if [[ -n "$DIVERGED" ]]; then
+    echo "WARNING: the working tree differs from main; this release will ship the" >&2
+    echo "         working tree, and main will not describe what is running:" >&2
+    while IFS= read -r line; do echo "           $line" >&2; done <<< "$DIVERGED"
+    echo "         commit or check out before releasing to keep main authoritative." >&2
+  fi
+fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"
 
