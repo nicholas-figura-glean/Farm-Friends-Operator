@@ -111,8 +111,9 @@ So a flip is provisional. The supervisor adjudicates on every 60s pass with two
 separate gates:
 
 1. **Safety brake.** A hard failure or a herd-normalized loss beyond the loose 25%
-   emergency floor reverts immediately. This catches a parser returning zero or a
-   feed step stopping without treating wolves, sickness, or abduction as code.
+   emergency floor reverts immediately. This catches a confirmed three-run zero
+   streak or a feed transport failure without mistaking one accelerated pre-tick
+   cycle, wolves, sickness, or abduction for broken code.
 2. **Efficacy.** After ten clean runs, reliability repairs must remain inside a
    5% operational equivalence band; strategy candidates must clear their pre-declared gain
    with a 90% lower confidence bound. Merely surviving the emergency band is not a

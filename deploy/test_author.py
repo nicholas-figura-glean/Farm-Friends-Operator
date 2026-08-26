@@ -438,10 +438,14 @@ write_runs(base + [{"run": n, "produce_per_min": 85.0, "collected": 10} for n in
 verdict = canary.evaluate(store, runs)
 check("a 15% dip is tolerated as variance", verdict["status"] == canary.WATCHING, str(verdict))
 
-# A hard failure is decisive immediately, without waiting for an average.
-write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0}])
+# An accelerated cycle can complete before the next production tick. One zero is
+# cadence, not proof of parser failure; the cycle's confirmed zero streak is decisive.
+write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0, "zero_streak": 1}])
 verdict = canary.evaluate(store, runs)
-check("a run producing nothing reverts at once", verdict["status"] == canary.REGRESSED, str(verdict))
+check("one short-interval zero remains watching", verdict["status"] == canary.WATCHING, str(verdict))
+write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0, "zero_streak": 3}])
+verdict = canary.evaluate(store, runs)
+check("a confirmed zero streak reverts at once", verdict["status"] == canary.REGRESSED, str(verdict))
 
 # Collection changed from a scalar to a per-produce mapping. A transport retry on
 # a productive run is not a hard failure, while an all-zero mapping still is.

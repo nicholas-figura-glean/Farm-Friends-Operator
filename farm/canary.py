@@ -381,9 +381,10 @@ def _looks_broken(row: Dict[str, Any]) -> bool:
     losses and must not count, or the canary would revert good releases every time
     a wolf turned up -- the precise confusion POSTMORTEM-run377 warns about.
     """
-    rate = _rate(row)
-    if rate is not None and rate == 0:
-        return True
+    # One zero-rate run is not decisive: an explicitly accelerated cycle can finish
+    # before the next production tick while still collecting and verifying normally.
+    # The cycle already maintains zero_streak across real observation windows, so use
+    # its confirmed three-run signal instead of confusing cadence with parser failure.
     if _quantity(row.get("zero_streak")) >= 3:
         return True
     if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
