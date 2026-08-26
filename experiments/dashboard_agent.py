@@ -250,6 +250,9 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
         missing = [marker for marker in (
             'data-tab="architecture"',
             'id="tab-architecture"',
+            'data-arch-loading',  # static non-blank fallback before JavaScript paints
+            'async function loadArchitecture',
+            'window.loadArchitecture',  # activation checks the global, not block scope
             '/api/architecture',
         ) if marker not in html]
         state = json.loads(payloads["/api/state"].decode("utf-8"))

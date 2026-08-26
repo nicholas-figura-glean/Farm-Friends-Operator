@@ -458,7 +458,9 @@ def _http_fixture(stale=False):
     }
     bodies = {
         "/": '<button data-tab="architecture"></button><div id="tab-architecture">'
-             '<script>fetch("/api/architecture")</script></div>',
+             '<div data-arch-loading>Loading</div><script>'
+             'async function loadArchitecture() { fetch("/api/architecture"); }'
+             'if (window.loadArchitecture) window.loadArchitecture();</script></div>',
         "/api/state": json.dumps(state),
         "/api/autonomy": json.dumps({"agents": {"live": 9}}),
         "/api/architecture": json.dumps({"current": {"nodes": [{"id": "cycle"}]}}),
@@ -494,11 +496,27 @@ finally:
 check("scheduled passes include the browser-path probe",
       "if throttled:\n        served = _served_dashboard()" in agent_src)
 
+# Composition is part of correctness. architecture.js loaded successfully in isolation,
+# but embedding it inside the Switchboard's try block made async function declarations
+# block-scoped in Chromium. renderArchitecture leaked out under Annex B compatibility;
+# loadArchitecture did not. The tab button therefore worked and exposed a blank panel.
+import monitor  # noqa: E402
+composed = monitor.HTML
+wire_end = composed.find("/*WIRE_JS_END*/")
+arch_start = composed.find("/*ARCH_JS_START*/")
+arch_end = composed.find("/*ARCH_JS_END*/")
+check("architecture code is outside the Switchboard block",
+      0 <= wire_end < arch_start < arch_end,
+      "wire_end=%s arch_start=%s arch_end=%s" % (wire_end, arch_start, arch_end))
+check("the served panel is never statically empty", "data-arch-loading" in composed)
+check("tab activation checks the global async loader",
+      'typeof loader!=="function"' in composed and "window.loadArchitecture" in composed)
+check("loader failure becomes visible content",
+      "Architecture renderer failed to initialize" in composed)
+
 
 # --------------------------------------------------------------------------
 section("the server distinguishes its own release from the pointer")
-
-import monitor  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)

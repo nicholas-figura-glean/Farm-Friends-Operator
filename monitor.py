@@ -1301,10 +1301,13 @@ __GAME_CSS__
 __GAME_MARKUP__
 </div>
 <!--GAME_MARKUP_END-->
-<!-- Populated entirely by renderArchitecture from /api/architecture, so the panel is
-     empty in the served document. Everything in it is derived at request time; there
-     is no hand-written architecture markup to fall out of date. -->
-<div class="tab" id="tab-architecture" hidden></div>
+<!-- Replaced entirely by renderArchitecture from /api/architecture. Keep a visible
+     initial state: an empty container hid the block-scope loader bug by presenting a
+     blank tab with no explanation. Derived content still has no hand-maintained copy. -->
+<div class="tab" id="tab-architecture" hidden>
+  <div class="card full" data-arch-loading><h2>Architecture</h2>
+    <p class="arch-note">Loading the live system map and version history…</p></div>
+</div>
 <div class="tab" id="tab-wire" hidden>
 <section class="grid">
   <div class="card wire">
@@ -2003,7 +2006,16 @@ function activateTab(name, writeHash) {
   // architecture is cheap to re-render but its liveness overlay goes stale the
   // moment an agent dies, and a diagram that shows a dead agent as healthy is worse
   // than one that admits it does not know.
-  if (name==="architecture") { if (ARCH) safe(name,()=>renderArchitecture(ARCH,AUTONOMY)); loadArchitecture(true); }
+  if (name==="architecture") {
+    const host=document.getElementById("tab-architecture");
+    const renderer=window.renderArchitecture, loader=window.loadArchitecture;
+    if (typeof renderer!=="function" || typeof loader!=="function") {
+      if (host) host.innerHTML=`<div class="card full"><h2>Architecture</h2><p class="arch-note">Architecture renderer failed to initialize. Expected renderArchitecture and loadArchitecture to be available.</p></div>`;
+    } else {
+      if (window.ARCH) safe(name,()=>renderer(window.ARCH,window.AUTONOMY));
+      Promise.resolve(loader(true)).catch(error=>safe(name,()=>renderer({error:error && error.message ? error.message : String(error)},null)));
+    }
+  }
 }
 document.querySelectorAll("nav.tabs button").forEach(button=>button.addEventListener("click",()=>activateTab(button.dataset.tab,true)));
 if (typeof document.addEventListener==="function") document.addEventListener("click",event=>{
@@ -2050,7 +2062,6 @@ __TRACE_JS__
 try {
 /*WIRE_JS_START*/
 __WIRE_JS__
-__ARCH_JS__
 /*WIRE_JS_END*/
   if (window.MCPWirePanel) window.MCPWirePanel.mount({rootId:"mcp-wire"});
 } catch (error) {
@@ -2058,6 +2069,16 @@ __ARCH_JS__
   const stage = document.getElementById("mcp-wire");
   if (stage) stage.innerHTML = `<div class="mw-empty">The switchboard failed to load: ${esc(error && error.message ? error.message : error)}<br>Every other tab is unaffected.</div>`;
 }
+
+// Architecture is intentionally at global script scope. It was once injected inside
+// the Switchboard try block above. Browser compatibility rules leaked ordinary function
+// declarations (renderArchitecture) out of that block but kept async declarations
+// (loadArchitecture/loadAutonomy) block-scoped. The button therefore existed while its
+// loader was undefined. The asset has definitions only; rendering is still guarded by
+// activateTab and safe().
+/*ARCH_JS_START*/
+__ARCH_JS__
+/*ARCH_JS_END*/
 
 // The dashboard's own refresh is started BEFORE the game bundle is evaluated.
 // It used to come last, so any top-level throw in the game (or a failed game
