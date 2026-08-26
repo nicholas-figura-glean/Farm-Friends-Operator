@@ -339,7 +339,18 @@ AUTHOR_MAX_COST_USD_PER_DAY = 5.00     # hard spend ceiling for authoring
 CANARY_MIN_RUNS = 3                    # never judge a release on fewer runs
 CANARY_MAX_RUNS = 10                   # decide by here, or clear it and move on
 CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert
-CANARY_BASELINE_RUNS = 6               # pre-flip window used as the comparison
+CANARY_BASELINE_RUNS = 6               # pre-flip safety window used for fast rollback
+
+# Safety and efficacy are deliberately different decisions. Reliability repairs
+# need equivalence; strategy candidates must prove a pre-declared gain. The
+# champion ledger carries a cumulative budget so repeated small losses cannot hide
+# below the per-release emergency threshold.
+EFFICACY_BASELINE_RUNS = 12
+EFFICACY_MIN_RUNS = CANARY_MAX_RUNS
+EFFICACY_CONFIDENCE_Z = 1.645           # two-sided 90% normal interval
+STRATEGY_MIN_IMPROVEMENT = 0.01         # at least +1%, including the lower bound
+RELIABILITY_EQUIVALENCE_TOLERANCE = 0.05
+CUMULATIVE_REGRESSION_BUDGET = 0.05
 
 
 def feed_reserve_target(animal_count: int, committed_feed: int) -> int:

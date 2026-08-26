@@ -263,7 +263,7 @@ def mechanical_patch(order: Dict[str, Any], root: str) -> Optional[Dict[str, Any
         r"(\.(?:call|_call|call_tool)\(\s*[\"']%s[\"'][^()]*?)\b%s\s*=" % (re.escape(tool), re.escape(old)),
         re.DOTALL,
     )
-    for rel in candidate_files(order, root):
+    for rel in mechanical_candidate_files(order, root):
         path = os.path.join(root, rel)
         try:
             before = open(path, "r", encoding="utf-8").read()
@@ -282,8 +282,25 @@ def mechanical_patch(order: Dict[str, Any], root: str) -> Optional[Dict[str, Any
     }
 
 
+def mechanical_candidate_files(order: Dict[str, Any], root: str) -> List[str]:
+    """Files eligible for the narrow deterministic keyword-rename backend.
+
+    A model can never edit trusted code. A mechanically derived endpoint rename is
+    different: it only changes one named keyword inside one named MCP call and is
+    fully checked by the release matrix. Keeping this path permits contract repair
+    in cycle.py without granting model judgement over the control plane.
+    """
+    out: List[str] = []
+    for rel in list(order.get("files") or []):
+        rel = control.normalize_path(str(rel))
+        if (control.mechanically_editable(rel)
+                and os.path.isfile(os.path.join(root, rel))):
+            out.append(rel)
+    return out[: rules.AUTHOR_MAX_FILES_PER_ORDER]
+
+
 def candidate_files(order: Dict[str, Any], root: str) -> List[str]:
-    """Files this order may touch, filtered through the edit policy."""
+    """Files the model may touch, filtered through the trusted edit policy."""
     out: List[str] = []
     for rel in list(order.get("files") or []):
         rel = control.normalize_path(str(rel))
@@ -344,6 +361,10 @@ def build_prompt(order: Dict[str, Any], root: str) -> Tuple[str, List[str]]:
     if order.get("detail"):
         parts += ["", "## Machine detail", "```json",
                   json.dumps(order["detail"], indent=2, sort_keys=True)[:2000], "```"]
+    if order.get("provenance"):
+        parts += ["", "## Pre-registered evidence contract", "```json",
+                  json.dumps(order["provenance"], indent=2, sort_keys=True)[:3000], "```",
+                  "The implementation must preserve this hypothesis identity and must not reuse its discovery evidence as validation evidence."]
 
     parts += ["", "## Files you may edit", ""]
     if not files:
@@ -471,6 +492,7 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
 GATES = (
     ("self-test", ["/usr/bin/python3", "run.py", "--self-test"]),
     ("knowledge", ["/usr/bin/python3", "deploy/test_knowledge.py"]),
+    ("safety", ["/usr/bin/python3", "deploy/test_safety.py"]),
     ("evidence", ["/usr/bin/python3", "deploy/test_evidence.py"]),
     ("tool-trace", ["/usr/bin/python3", "deploy/test_tool_trace.py"]),
     ("topology", ["/usr/bin/python3", "deploy/test_topology.py"]),
@@ -580,12 +602,18 @@ def publish(source_root: str, order: Dict[str, Any], summary: str,
     if not script.is_file():
         return {"published": False, "error": "canonical release script is missing"}
     env = dict(os.environ)
+    lineage = order.get("provenance") or {}
+    runtime_policy = policy.runtime_context().get("policy_id")
     env.update({
         "FARM_SOURCE_ROOT": str(Path(source_root).resolve()),
         "FARM_DEPLOY_ROOT": str(PROJECT),
         "FARM_CANARY_ORDER_ID": str(order.get("id") or ""),
         "FARM_CANARY_REASON": summary[:500],
         "FARM_CANARY_COMMIT": commit or "",
+        "FARM_CANARY_CHANGE_CLASS": str(lineage.get("change_class") or "reliability")[:40],
+        "FARM_CANARY_HYPOTHESIS_ID": str(lineage.get("hypothesis_id") or "")[:120],
+        "FARM_CANARY_POLICY_ID": str(lineage.get("policy_id") or runtime_policy or "")[:120],
+        "FARM_CANARY_EXPECTED_IMPROVEMENT": str(lineage.get("expected_improvement") or 0),
     })
     proc = subprocess.run(["/bin/bash", str(script)], cwd=str(source_root), env=env,
                           capture_output=True, text=True, timeout=1800, check=False)

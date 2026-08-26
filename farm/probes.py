@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import analysis, rules
+from . import analysis, provenance, rules
 
 PROJECT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
@@ -97,12 +97,21 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             raise
 
         started = _utcnow()
+        hypothesis_id = str(spec.get("hypothesis_id") or "")
+        result_count_before = sum(
+            1 for item in provenance.events()
+            if item.get("event") == "hypothesis.result"
+            and item.get("hypothesis_id") == hypothesis_id
+        ) if hypothesis_id else 0
         tool_log = _state_dir() / "tool_calls.ndjson"
         before_size = tool_log.stat().st_size if tool_log.exists() else 0
         budget = dict(spec.get("budget") or {})
         timeout = max(1, int(budget.get("wall_seconds") or 60))
         env = dict(os.environ)
         env["FARM_PROBE_ID"] = probe_id
+        if hypothesis_id:
+            env["FARM_HYPOTHESIS_ID"] = hypothesis_id
+            env["FARM_EVIDENCE_CLASS"] = str(spec.get("evidence_class") or "holdout")
         try:
             completed = subprocess.run(
                 _command(spec),
@@ -126,6 +135,15 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
         if int(budget.get("calls") or 0) == 0 and after_size != before_size:
             status = "budget_violation"
             reason = "read-only probe wrote MCP tool telemetry"
+        if status == "passed" and hypothesis_id:
+            result_count_after = sum(
+                1 for item in provenance.events()
+                if item.get("event") == "hypothesis.result"
+                and item.get("hypothesis_id") == hypothesis_id
+            )
+            if result_count_after <= result_count_before:
+                status = "evidence_missing"
+                reason = "hypothesis-linked probe did not record a validation result"
         result = {
             "schema_version": SCHEMA_VERSION,
             "ts": _utcnow(),
@@ -138,6 +156,8 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             "read_only": bool(spec.get("read_only")),
             "explicit": bool(explicit),
             "hypothesis": spec.get("hypothesis"),
+            "hypothesis_id": hypothesis_id or None,
+            "evidence_class": spec.get("evidence_class"),
             "budget": budget,
             "stop_condition": spec.get("stop_condition"),
             "evidence_destination": spec.get("evidence_destination"),

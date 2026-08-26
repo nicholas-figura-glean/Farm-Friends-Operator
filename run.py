@@ -29,9 +29,11 @@ from farm import (  # noqa: E402
     analysis,
     canary,
     claims,
+    compaction,
     contract,
     control,
     cycle,
+    evaluation,
     growth,
     heal,
     journal,
@@ -40,6 +42,7 @@ from farm import (  # noqa: E402
     policy,
     probes,
     progress,
+    provenance,
     questions,
     report,
     research,
@@ -455,6 +458,7 @@ def do_supervise(cadence: int = 180) -> int:
     #     regressed release has to be reverted before the recovery cycle below
     #     executes it, or the recovery itself runs the broken build.
     canary_note = ""
+    compaction_safe = False
     try:
         verdict = canary.evaluate()
         if verdict.get("status") in (canary.HEALTHY, canary.REGRESSED):
@@ -471,13 +475,38 @@ def do_supervise(cadence: int = 180) -> int:
                 canary_note = "canary cleared %s: %s" % (
                     outcome.get("revision"), verdict.get("reason", ""),
                 )
+                compaction_safe = True
             notes.append(canary_note)
         elif verdict.get("status") == canary.WATCHING:
             canary_note = "canary watching %s (%s)" % (
                 verdict.get("revision"), verdict.get("reason", ""),
             )
+        else:
+            compaction_safe = True
     except Exception as exc:  # noqa: BLE001
         notes.append("canary check failed: %s" % str(exc)[:100])
+
+    # 1c. Keep high-volume source evidence bounded without summarising or deleting
+    #     it. Rotation is a no-op below threshold and all readers replay segments.
+    try:
+        # Do not rewrite storage while a candidate may still roll back to an older
+        # release whose readers predate segmented ledgers. The first accepted
+        # compaction-capable release establishes the compatibility boundary.
+        compacted = []
+        if compaction_safe:
+            compacted = [
+                item for item in compaction.maintain(analysis.state_dir())
+                if item.get("compacted")
+            ]
+        if compacted:
+            notes.append("compacted %s" % ", ".join(
+                "%s:%s rows" % (item.get("ledger"), item.get("rows_moved"))
+                for item in compacted
+            ))
+    except Exception as exc:  # noqa: BLE001
+        # Evidence integrity fails visibly, but a maintenance error does not replace
+        # the canary or recovery decision already made by this supervisor pass.
+        notes.append("compaction check failed: %s" % str(exc)[:100])
 
     # 2. Recover a stale loop by running one cycle inline, under the same lock
     #    the scheduled runs use, so this can never double-run the farm.
@@ -712,7 +741,18 @@ def do_sweep() -> int:
     return 0
 
 
-def do_knowledge_refresh(promote_policy: bool = False) -> int:
+def _promotion_contract(path: Optional[str]) -> Optional[dict]:
+    if not path:
+        return None
+    import json
+    with open(path, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("promotion contract must be a JSON object")
+    return value
+
+
+def do_knowledge_refresh(promote_policy: bool = False, contract_path: Optional[str] = None) -> int:
     registry = claims.refresh()
     audit = research.semantic_audit(registry=registry)
     candidate = policy.compile_snapshot(registry)
@@ -731,7 +771,9 @@ def do_knowledge_refresh(promote_policy: bool = False) -> int:
     if not audit.get("ok"):
         return 4
     if promote_policy:
-        promoted = policy.promote(candidate, registry)
+        promoted = policy.promote(
+            candidate, registry, promotion_contract=_promotion_contract(contract_path)
+        )
         print("PROMOTED %s" % promoted.get("policy_id"))
     else:
         print("candidate only; use --promote-policy for the explicit behavior contract")
@@ -743,6 +785,36 @@ def do_policy_status() -> int:
     print(json.dumps({
         "runtime": policy.runtime_context(),
         "promoted": policy.load(),
+    }, indent=2, sort_keys=True, allow_nan=False))
+    return 0
+
+
+def do_compaction(run: bool = False) -> int:
+    import json
+    state = analysis.state_dir()
+    if run:
+        canary_store = str(state / "canary.json")
+        live_compactor = state.parent / "release" / "farm" / "compaction.py"
+        if canary.active(canary_store):
+            print("COMPACTION REFUSED: a release is still provisional")
+            return 4
+        if not live_compactor.is_file():
+            print("COMPACTION REFUSED: publish and accept a compaction-capable release first")
+            return 4
+    result = (
+        compaction.maintain(state)
+        if run else compaction.state_status(state)
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+    return 0
+
+
+def do_safety_status() -> int:
+    import json
+    print(json.dumps({
+        "lineage": provenance.status(),
+        "efficacy": evaluation.status(str(analysis.state_dir() / "canary.json")),
+        "compaction": compaction.state_status(analysis.state_dir()),
     }, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
@@ -1824,7 +1896,7 @@ def main() -> int:
     ap.add_argument(
         "--supervise",
         action="store_true",
-        help="self-healing pass: repair the schedule, remediate alerts",
+        help="self-healing pass: schedule, canary, compaction, recovery, alerts",
     )
     ap.add_argument(
         "--heal-status", action="store_true", help="show healing knobs and token cost"
@@ -1846,7 +1918,15 @@ def main() -> int:
     ap.add_argument("--research-audit", action="store_true", help="run semantic and model-drift audits")
     ap.add_argument("--knowledge-refresh", action="store_true", help="rebuild the claim registry")
     ap.add_argument("--promote-policy", action="store_true", help="explicitly promote a passing policy snapshot")
+    ap.add_argument("--promotion-contract", metavar="JSON",
+                    help="pre-registered holdout/intervention evidence for a changed policy")
     ap.add_argument("--policy-status", action="store_true", help="show promoted/runtime policy compatibility")
+    ap.add_argument("--compaction-status", action="store_true",
+                    help="show hot and checksummed archived ledger sizes")
+    ap.add_argument("--compact-state", action="store_true",
+                    help="losslessly rotate oversized source ledgers")
+    ap.add_argument("--safety-status", action="store_true",
+                    help="show lineage, champion, and compaction safeguards")
     ap.add_argument("--probes", action="store_true", help="list bounded research probes")
     ap.add_argument("--run-probe", metavar="ID", help="explicitly run one registered bounded probe")
     ap.add_argument("--align", action="store_true", help="wait for :35s before acting")
@@ -1861,9 +1941,15 @@ def main() -> int:
     if args.research_audit:
         return do_research_audit()
     if args.knowledge_refresh or args.promote_policy:
-        return do_knowledge_refresh(promote_policy=args.promote_policy)
+        return do_knowledge_refresh(
+            promote_policy=args.promote_policy, contract_path=args.promotion_contract
+        )
     if args.policy_status:
         return do_policy_status()
+    if args.compaction_status or args.compact_state:
+        return do_compaction(run=args.compact_state)
+    if args.safety_status:
+        return do_safety_status()
     if args.probes:
         return do_probes()
     if args.run_probe:

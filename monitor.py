@@ -30,7 +30,7 @@ sys.path.insert(0, str(PROJECT))
 
 # Reuse the operator's own modules so the dashboard can never disagree with the
 # loop about knobs, cost, or which agents are supposed to exist.
-from farm import evidence, growth, heal, progress, release as release_info, rules, scheduler, tokens, topology  # noqa: E402
+from farm import compaction, evidence, growth, heal, progress, release as release_info, rules, scheduler, tokens, topology  # noqa: E402
 
 STATE = PROJECT / "state"
 HISTORY = STATE / "history.ndjson"
@@ -47,6 +47,8 @@ CADENCE_SECONDS = 300
 
 
 def _json_lines(path: Path, limit: int = 100) -> List[Dict[str, Any]]:
+    if path.name in compaction.DEFAULT_LEDGERS:
+        return compaction.read_rows(path, limit=limit)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):

@@ -79,6 +79,7 @@ fi
 # calls; test_knowledge redirects every mutable epistemic store to a temp dir.
 /usr/bin/python3 run.py --self-test
 /usr/bin/python3 deploy/test_knowledge.py
+/usr/bin/python3 deploy/test_safety.py
 /usr/bin/python3 deploy/test_evidence.py
 /usr/bin/python3 deploy/test_tool_trace.py
 /usr/bin/python3 deploy/test_topology.py
@@ -229,6 +230,10 @@ if [[ -n "$PREVIOUS" ]]; then
   if ! FARM_CANARY_REASON="${FARM_CANARY_REASON:-release $REV}" \
        FARM_CANARY_ORDER_ID="${FARM_CANARY_ORDER_ID:-manual-release-$REV}" \
        FARM_CANARY_COMMIT="${FARM_CANARY_COMMIT:-}" \
+       FARM_CANARY_CHANGE_CLASS="${FARM_CANARY_CHANGE_CLASS:-reliability}" \
+       FARM_CANARY_HYPOTHESIS_ID="${FARM_CANARY_HYPOTHESIS_ID:-}" \
+       FARM_CANARY_POLICY_ID="${FARM_CANARY_POLICY_ID:-}" \
+       FARM_CANARY_EXPECTED_IMPROVEMENT="${FARM_CANARY_EXPECTED_IMPROVEMENT:-0}" \
        /usr/bin/python3 - "$TARGET" "$DEPLOY_PROJECT" "$REV" "$PREVIOUS" <<'PY'
 import os
 import sys
@@ -245,6 +250,10 @@ armed = canary.arm(
     reason=os.environ.get("FARM_CANARY_REASON", "release " + revision)[:500],
     order_id=os.environ.get("FARM_CANARY_ORDER_ID", "manual-release-" + revision)[:160],
     commit=os.environ.get("FARM_CANARY_COMMIT", "")[:80],
+    change_class=os.environ.get("FARM_CANARY_CHANGE_CLASS", "reliability")[:40],
+    hypothesis_id=os.environ.get("FARM_CANARY_HYPOTHESIS_ID", "")[:120],
+    policy_id=os.environ.get("FARM_CANARY_POLICY_ID", "")[:120],
+    expected_improvement=float(os.environ.get("FARM_CANARY_EXPECTED_IMPROVEMENT", "0") or 0),
     store=str(root / canary.STORE),
     history=str(root / canary.HISTORY),
     run_history=str(root / canary.RUN_HISTORY),

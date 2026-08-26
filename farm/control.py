@@ -115,18 +115,24 @@ SERVICES: List[Dict[str, Any]] = [
 TRUSTED_PATHS = frozenset(
     {
         "run.py",
+        "farm/analysis.py",
         "farm/architecture.py",
         "farm/autonomy.py",
         "farm/canary.py",
         "farm/claims.py",
+        "farm/compaction.py",
         "farm/contract.py",
         "farm/control.py",
+        "farm/cycle.py",
+        "farm/evaluation.py",
+        "farm/evidence.py",
         "farm/heal.py",
         "farm/ledger.py",
         "farm/llm.py",
         "farm/mcp.py",
         "farm/policy.py",
         "farm/probes.py",
+        "farm/provenance.py",
         "farm/questions.py",
         "farm/research.py",
         "farm/rules.py",
@@ -178,13 +184,17 @@ def is_release_source(path: str) -> bool:
     return rel in RELEASE_SOURCE_FILES or any(rel.startswith(prefix) for prefix in RELEASE_SOURCE_PREFIXES)
 
 
-def author_editable(path: str) -> bool:
+def mechanically_editable(path: str) -> bool:
+    """Can the deterministic endpoint-rename backend inspect this source file?"""
     rel = normalize_path(path)
     if not rel.endswith(".py") or rel.startswith("/") or ".." in rel.split("/"):
         return False
-    if is_protected(rel):
-        return False
     return rel in AUTHOR_EDITABLE_FILES or any(rel.startswith(prefix) for prefix in AUTHOR_EDITABLE_PREFIXES)
+
+
+def author_editable(path: str) -> bool:
+    rel = normalize_path(path)
+    return mechanically_editable(rel) and not is_protected(rel)
 
 
 def service(value: str) -> Optional[Dict[str, Any]]:

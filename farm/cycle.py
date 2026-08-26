@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from . import analysis, growth, heal, ledger, mcp, parse, policy, progress, rules
+from . import analysis, compaction, growth, heal, ledger, mcp, parse, policy, progress, rules
 from .mcp import Client, McpError, ToolError
 
 STATE_DIR = "state"
@@ -65,18 +65,7 @@ def save_meta(meta: Dict[str, Any]) -> None:
 
 
 def tail_history(n: int) -> List[Dict[str, Any]]:
-    try:
-        with open(HISTORY) as fh:
-            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
-    except OSError:
-        return []
-    out = []
-    for ln in lines[-n:]:
-        try:
-            out.append(json.loads(ln))
-        except ValueError:
-            continue
-    return out
+    return compaction.read_rows(HISTORY, limit=n)
 
 
 def last_history() -> Optional[Dict[str, Any]]:
@@ -86,8 +75,7 @@ def last_history() -> Optional[Dict[str, Any]]:
 
 def append_history(row: Dict[str, Any]) -> None:
     _ensure_dirs()
-    with open(HISTORY, "a") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    compaction.append_json(HISTORY, row)
 
 
 def _raw(name: str, text: str) -> None:
@@ -98,8 +86,7 @@ def _raw(name: str, text: str) -> None:
 
 def _intent(action: str, **detail: Any) -> None:
     _ensure_dirs()
-    with open(INTENTS, "a") as fh:
-        fh.write(json.dumps({"ts": utcnow(), "action": action, "detail": detail}) + "\n")
+    compaction.append_json(INTENTS, {"ts": utcnow(), "action": action, "detail": detail})
     # Self-tests and low-level unit calls exercise these helpers without an
     # execution identity. Keep the legacy intent fixture behavior, but never
     # contaminate the epistemic ledger with an unscoped pseudo-observation.

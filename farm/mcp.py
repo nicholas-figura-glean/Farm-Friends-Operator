@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from . import ledger
+from . import compaction, ledger
 
 DEFAULT_ENDPOINT_FILE = os.path.expanduser("~/.config/farm/endpoint")
 DEFAULT_TOOL_CALL_LOG = os.path.join("state", "tool_calls.ndjson")
@@ -55,11 +55,7 @@ def _write_tool_call(row: Dict[str, Any]) -> None:
         if probe_id:
             row.setdefault("probe_id", probe_id)
         path = os.environ.get("FARM_TOOL_CALL_LOG", DEFAULT_TOOL_CALL_LOG)
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "a") as fh:
-            fh.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        compaction.append_json(path, row, strict=False)
     except (OSError, TypeError, ValueError):
         pass
 

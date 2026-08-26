@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import claims, rules
+from . import claims, provenance, rules
 
 SCHEMA_VERSION = 1
 
@@ -210,19 +210,57 @@ def _event(path: Path, value: Dict[str, Any]) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def promote(snapshot: Optional[Dict[str, Any]] = None, registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _events(path: Path) -> List[Dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            out.append(value)
+    return out
+
+
+def promote(
+    snapshot: Optional[Dict[str, Any]] = None,
+    registry: Optional[Dict[str, Any]] = None,
+    promotion_contract: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     candidate = dict(snapshot or compile_snapshot(registry))
     if not (candidate.get("audit") or {}).get("ok"):
         raise ValueError("policy promotion rejected: %s" % "; ".join((candidate.get("audit") or {}).get("errors") or []))
     if candidate.get("policy_id") != _policy_id(candidate):
         raise ValueError("policy content hash mismatch")
-    candidate["status"] = "promoted"
-    candidate["promoted_ts"] = _utcnow()
     current, events, lock = _paths()
     current.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         previous = load()
+        lineage_errors = provenance.validate_promotion_contract(
+            promotion_contract,
+            str(candidate.get("policy_id") or ""),
+            previous.get("policy_id"),
+            _events(events),
+        )
+        if lineage_errors:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            raise ValueError("policy promotion rejected: %s" % "; ".join(lineage_errors))
+        # Durable lineage is written before behavior changes. If that append fails,
+        # promotion fails closed with the previous policy still current. A later
+        # snapshot/event write failure may leave an unused authorization record, but
+        # can never leave behavior promoted without its evidence graph.
+        provenance.record_policy_promotion(
+            str(candidate["policy_id"]), previous.get("policy_id"), promotion_contract
+        )
+        candidate["status"] = "promoted"
+        candidate["promoted_ts"] = _utcnow()
+        if promotion_contract:
+            candidate["promotion_contract"] = dict(promotion_contract)
         _write(current, candidate)
         _event(
             events,
@@ -234,6 +272,8 @@ def promote(snapshot: Optional[Dict[str, Any]] = None, registry: Optional[Dict[s
                 "previous_policy_id": previous.get("policy_id"),
                 "rules_fingerprint": candidate["rules_fingerprint"],
                 "claim_policy_fingerprint": candidate["claim_policy_fingerprint"],
+                "hypothesis_id": (promotion_contract or {}).get("hypothesis_id"),
+                "validation_evidence": (promotion_contract or {}).get("validation_evidence") or [],
             },
         )
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

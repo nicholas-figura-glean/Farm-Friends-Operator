@@ -272,10 +272,9 @@ check("no module is silently unclassified", snap["unmapped"] == [],
 
 protected = {n["path"] for n in snap["nodes"] if n.get("protected")}
 for path in ("farm/canary.py", "farm/workorders.py", "farm/llm.py", "farm/rules.py",
-             "farm/vcs.py", "experiments/author_agent.py"):
+             "farm/vcs.py", "farm/cycle.py", "farm/compaction.py",
+             "farm/evaluation.py", "farm/provenance.py", "experiments/author_agent.py"):
     check("%s is marked unwritable" % path, path in protected)
-check("cycle is not marked unwritable",
-      "farm/cycle.py" not in protected)
 check("the diagram consumes the enforced protected manifest",
       architecture.PROTECTED == control.TRUSTED_PATHS)
 check("run.py orchestration is marked unwritable", "run.py" in protected)

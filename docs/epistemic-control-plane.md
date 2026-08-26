@@ -23,10 +23,20 @@ All paths are relative to `state/` and can be redirected with `FARM_STATE_DIR` i
 - `question_events.ndjson` — append-only question transitions.
 - `policy.json` — current explicitly promoted policy snapshot.
 - `policy_events.ndjson` — append-only compile/promotion history.
+- `provenance.ndjson` — pre-registered hypothesis, validation-result, and policy lineage.
+- `champion.json` — accepted release and cumulative performance ratio.
+- `efficacy_events.ndjson` — independent candidate acceptance/rejection outcomes.
 - `audits.ndjson` — semantic and model-drift audit results.
 - `experiments.ndjson` — bounded probe executions and outcomes.
+- `segments/<ledger>/manifest.json` — ordered checksums for compressed immutable source segments.
 
-Existing `history.ndjson`, `tool_calls.ndjson`, and `intents.ndjson` remain source evidence. They are not rewritten or truncated.
+`history.ndjson`, `tool_calls.ndjson`, `observations.ndjson`, and `intents.ndjson` remain logical source evidence. The supervisor may move old complete rows byte-for-byte into gzip segments while retaining a hot tail at the legacy path. No model summary replaces source rows, and transparent readers replay segments plus the tail.
+
+## Lossless compaction
+
+High-volume ledgers rotate after 64 MiB and retain 2,000 hot rows. Rotation is suspended while a release is provisional so rollback can never target an older reader before the segmented-ledger compatibility boundary is accepted. Writers and the compactor share a sidecar lock. Each closed segment records the uncompressed SHA-256, byte count, row count, first/last identity, and sequence in a manifest. A transaction record recovers an interrupted manifest/tail swap; unexpected bytes fail closed rather than being guessed at.
+
+Compaction is valid only when replay is identical before and after rotation. `deploy/test_safety.py` asserts full-history equality, transparent tail reads, post-rotation appends, and checksum failure on tampering. Smaller registries are not compacted until every reader has migrated to the transparent interface.
 
 ## Observation schema
 
@@ -92,6 +102,11 @@ Promotion fails closed when:
 - a policy parameter has no claim or safety-invariant owner
 - the snapshot fingerprint does not match compiled rules
 - estimator output and published claim status disagree
+- a changed policy has no pre-registered hypothesis, null, falsifier, primary metric, or declared gain
+- discovery and validation evidence overlap
+- evidence is observational rather than an intervention, holdout, or direct mechanism
+- the provenance graph contains a dependency cycle
+- the recent policy sequence would oscillate A→B→A
 
 Runtime remains deterministic: a missing or incompatible policy snapshot does not invent values. It uses the compiled rules and records the unversioned/mismatch condition for investigation.
 
@@ -105,7 +120,11 @@ Pure replay runs without MCP access and covers:
 - output-model drift and regime changes
 - counterfactual sweeps over growth threshold/window, threat share, and feed cooldown
 
-Bounded probes are declared in a registry. Read-only probes may be scheduled under the existing farm lock. Mutating probes require explicit invocation and retain coin, call, and wall-time ceilings.
+Bounded probes are declared in a registry. Read-only probes may be scheduled under the existing farm lock. Mutating probes require explicit invocation and retain coin, call, and wall-time ceilings. The research agent pre-registers hypotheses by semantic fingerprint rather than model-written title. A hypothesis-linked probe cannot pass merely because its process exits zero: it must append a supported or falsified validation-result node with immutable evidence references. Policy promotion requires a matching durable supporting result. A failed hypothesis cannot be re-filed on unchanged evidence.
+
+## Candidate efficacy
+
+Release tests prove correctness; the canary and evaluator judge outcomes. Hard failures and losses beyond the 25% emergency floor revert immediately. At the complete candidate window, reliability releases must fit a 5% equivalence band and strategy releases must clear their pre-declared improvement with a 90% lower confidence bound. Accepted releases advance `champion.json`; projected cumulative performance below 95% of the anchor rejects the candidate, preventing a sequence of individually small regressions.
 
 ## Migration
 
@@ -113,6 +132,6 @@ Bounded probes are declared in a registry. Read-only probes may be scheduled und
 2. Bootstrap claims and compile a candidate policy without changing behavior.
 3. Instrument cycle and expansion, preserving existing intent and tool-call logs.
 4. Promote a compatible policy snapshot explicitly.
-5. Publish through an immutable release only after all parser, knowledge, evidence, dashboard, topology, and trace gates pass.
+5. Publish through an immutable release only after parser, knowledge, safety, evidence, dashboard, topology, and trace gates pass.
 
 Rollback is the previous `release` symlink target; epistemic files are additive and ignored by older releases.

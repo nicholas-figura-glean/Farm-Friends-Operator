@@ -90,12 +90,12 @@ budget -> claim -> stage -> patch -> gate -> publish -> canary
   judgement (reparsing, fallbacks for a removed capability).
 * **Strict edit format.** The model returns SEARCH/REPLACE blocks. A SEARCH string
   matching zero or several times is refused rather than guessed at.
-* **It cannot weaken its own supervision.** `PROTECTED` refuses edits to
-  `farm/canary.py`, `farm/workorders.py`, `farm/llm.py`, `farm/rules.py` (every
-  budget lives there), `deploy/release.sh`, and both agents' own source. An agent
-  that can rewrite its gates is not supervised. Orders needing protected files are
-  safely contained on the last verified release and recorded for an alternate
-  agent-owned approach; they are never handed to an operator.
+* **It cannot weaken its own supervision.** The model cannot edit the cycle,
+  evidence readers, compactor, provenance graph, policy compiler, efficacy judge,
+  canary, budgets, release script, work queue, or either agent's own source. A
+  mechanically derived endpoint-keyword rename remains allowed through a separate
+  narrow backend; it cannot make a judgement or rewrite arbitrary code. Orders
+  needing protected model edits are safely contained on the last verified release.
 * **Rationed.** Passes per day, dollars per day, minimum runs between changes, and
   a hard rule that no pass starts while a canary is still watching the last one —
   two unproven changes at once make an unhealthy canary impossible to attribute.
@@ -107,21 +107,22 @@ score*, and the score is the only thing that decides the game. POSTMORTEM-run377
 is exactly that failure: three individually reasonable throttles that together
 nearly lost first place, with every suite green.
 
-So a flip is provisional. The supervisor adjudicates on every 60s pass:
+So a flip is provisional. The supervisor adjudicates on every 60s pass with two
+separate gates:
 
-* `watching` — fewer than `CANARY_MIN_RUNS` post-flip runs
-* `healthy` — producing at least as fast as the pre-flip baseline; clear it
-* `regressed` — revert the pointer to the previous revision and record why
+1. **Safety brake.** A hard failure or a herd-normalized loss beyond the loose 25%
+   emergency floor reverts immediately. This catches a parser returning zero or a
+   feed step stopping without treating wolves, sickness, or abduction as code.
+2. **Efficacy.** After ten clean runs, reliability repairs must remain inside a
+   5% operational equivalence band; strategy candidates must clear their pre-declared gain
+   with a 90% lower confidence bound. Merely surviving the emergency band is not a
+   promotion.
 
-The band is loose (25%) on purpose: `produce_per_min` moves with herd size,
-wolves, sickness and latency. The canary catches a real break — a parser returning
-zero, a feed step that stopped running — not a few percent of throughput. A run
-that produces nothing is decisive on its own and does not wait for an average. A
-wolf attack is explicitly **not** a regression.
-
-Safety properties: never revert to a pruned tree, never revert twice (a resolved
-canary is cleared, so a flapping metric cannot walk the pointer backwards), and
-never block the farm — every failure path leaves the pointer alone.
+Accepted releases advance a durable champion ledger. Each candidate projects its
+measured ratio through the prior releases; crossing a cumulative 5% regression
+budget reverts even when every individual loss was smaller. Safety properties:
+never revert to a pruned tree, never revert twice, never overlap candidates, and
+never let evaluator bookkeeping delay the runtime pointer flip.
 
 ## research_agent — whether the strategy should change at all
 
@@ -140,10 +141,17 @@ Hypothesis sources, cheapest first:
    exhausted. Must return falsifiable proposals with a bounded probe design.
 
 A sensitive parameter with no claim backing its value becomes a durable *question*,
-not a change. And the research agent may not edit constants directly: it files a
-work order, the author implements it, the gates prove correctness, and the canary
-proves it did not cost production. That gives strategy changes the property the
-postmortems say they lacked — reversible before a human notices.
+not a change. Every proposal is pre-registered by semantic hypothesis, null,
+falsifier, primary metric, discovery cohort, and expected gain. The same evidence
+cannot both discover and validate it; observational association may prioritize a
+probe but cannot promote behavior. Failed hypotheses require novel evidence, the
+lineage graph must remain acyclic, and a policy sequence that returns A→B→A pauses.
+
+The research agent may not edit constants directly: it files a lineage-carrying
+work order, the author proves correctness, and the provisional deployment must
+prove efficacy against the champion before promotion. That gives strategy changes
+the property the postmortems say they lacked — reversible and independently judged
+before a human notices.
 
 ## Model access
 

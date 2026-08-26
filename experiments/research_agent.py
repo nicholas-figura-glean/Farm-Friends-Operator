@@ -52,8 +52,8 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from farm import (  # noqa: E402
-    analysis, canary, claims, contract, journal, ledger, llm, policy, questions,
-    research, rules, workorders,
+    analysis, canary, claims, contract, journal, ledger, llm, policy, provenance,
+    questions, research, rules, workorders,
 )
 
 STATE = PROJECT / "state"
@@ -428,9 +428,15 @@ def main() -> int:
             }
             try:
                 for item in model_hypotheses(payload):
-                    key = "hypothesis:%s" % item["title"].lower()[:60]
-                    if key in proposed:
-                        continue
+                    semantic = provenance.semantic_fingerprint({
+                        "hypothesis": item["hypothesis"],
+                        "null_hypothesis": "No measurable improvement in %s." % item["metric"],
+                        "falsifier": item["falsifier"],
+                        "primary_metric": item["metric"],
+                    })
+                    key = "hypothesis:%s" % semantic[:20]
+                    # Semantic lineage, not title memory, decides whether this is a
+                    # duplicate or a legitimately re-opened hypothesis with new data.
                     proposals.append((hypothesis_proposal(item), key))
                     record_finding({"event": "hypothesis", "item": item})
                     if len(proposals) >= MAX_PROPOSALS_PER_PASS:
@@ -444,12 +450,57 @@ def main() -> int:
             print("  model dormant: %s" % availability.get("reason"))
 
     filed = []
+    discovery_refs = [
+        "history.ndjson#run=%s" % context.get("run"),
+        "policy.json#%s" % runtime.get("policy_id"),
+    ]
+    question_ids = [str(item.get("id")) for item in questions.open_questions() if item.get("id")]
     for proposal, key in proposals:
-        order = workorders.submit(
-            proposal["change"], source="research_agent", intent=proposal["intent"],
-            acceptance=proposal["acceptance"], files=proposal["files"], path=queue,
+        change = proposal["change"]
+        detail = change.get("detail") or {}
+        if change.get("kind") == "strategy_hypothesis":
+            spec = {
+                "hypothesis": detail.get("hypothesis"),
+                "null_hypothesis": "The probe produces no measurable improvement in %s."
+                                   % detail.get("metric"),
+                "falsifier": detail.get("falsifier"),
+                "primary_metric": detail.get("metric"),
+                "expected_improvement": 0.01,
+            }
+        else:
+            capability = str(change.get("tool") or change.get("summary") or "capability")
+            spec = {
+                "hypothesis": "A bounded use of %s improves lifetime-produce efficiency."
+                              % capability,
+                "null_hypothesis": "%s produces no measurable lifetime-produce benefit."
+                                   % capability,
+                "falsifier": "The bounded probe shows no gain or violates a declared safety budget.",
+                "primary_metric": "lifetime produce gained per bounded call or coin",
+                "expected_improvement": 0.01,
+            }
+        registered = provenance.register_hypothesis(
+            spec,
+            discovery_refs,
+            context_policy_id=runtime.get("policy_id"),
+            question_ids=question_ids,
         )
         proposed.add(key)
+        if not registered.get("accepted"):
+            print("  skipped %s: %s" % (registered.get("id"), registered.get("reason")))
+            continue
+        lineage = dict(spec, hypothesis_id=registered["id"],
+                       discovery_evidence=discovery_refs,
+                       change_class="research_probe")
+        acceptance = list(proposal["acceptance"]) + [
+            "the registry entry carries hypothesis_id %s and a causal evidence_class"
+            % registered["id"],
+            "the probe records supported or falsified via farm.provenance.record_result using validation evidence that is not discovery evidence",
+        ]
+        order = workorders.submit(
+            change, source="research_agent", intent=proposal["intent"],
+            acceptance=acceptance, files=proposal["files"], path=queue,
+            provenance=lineage,
+        )
         if order:
             filed.append(order)
             print("  proposed %s: %s" % (order["id"], str(order["summary"])[:90]))

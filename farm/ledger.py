@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import fcntl
-import json
 import os
 import threading
 import time
@@ -19,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+from . import compaction
 
 SCHEMA_VERSION = 1
 _CONTEXT: contextvars.ContextVar = contextvars.ContextVar("farm_epistemic_context", default={})
@@ -101,36 +101,12 @@ def _bounded(value: Any, depth: int = 0) -> Any:
 
 
 def _append(row: Dict[str, Any], strict: bool = False) -> bool:
-    path = _path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = (json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False,
-                              default=str) + "\n").encode("utf-8")
-        with open(path, "ab", buffering=0) as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            handle.write(encoded)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return True
-    except (OSError, TypeError, ValueError):
-        if strict:
-            raise
-        return False
+    return compaction.append_json(_path(), row, strict=strict)
 
 
 def rows(include_invalid: bool = False) -> list:
     """Read observation rows, applying append-only invalidation markers."""
-    try:
-        lines = _path().read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError):
-        return []
-    parsed = []
-    for line in lines:
-        try:
-            value = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(value, dict):
-            parsed.append(value)
+    parsed = compaction.read_rows(_path())
     if include_invalid:
         return parsed
     invalid = {

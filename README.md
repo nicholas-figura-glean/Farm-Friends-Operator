@@ -44,9 +44,11 @@ promotion live off the mutation path.
 run.py                 execution, supervision, questions, audits, sweep, policy CLI
 experiments/           declarative bounded probes; mutating probes require explicit use
 farm/analysis.py       full-ledger cohorts, regimes, regression, immutable fingerprints
+farm/compaction.py     lossless checksummed NDJSON segments + transparent replay
 farm/claims.py         versioned claims, confidence, freshness, falsifiers, supersession
 farm/questions.py      durable current question registry + transition events
-farm/policy.py         content-addressed compile, semantic gate, explicit promotion
+farm/policy.py         content-addressed compile, lineage gate, explicit promotion
+farm/provenance.py     pre-registration, evidence DAG, cohort separation, cycle rejection
 farm/research.py       replay audits, drift checks, counterfactuals, decision bundles
 farm/ledger.py         normalized actor/run/policy/intervention observation stream
 farm/probes.py         lock- and budget-enforced probe scheduler
@@ -61,7 +63,8 @@ farm/heal.py           operational remedies + durable-question disposition
 farm/scheduler.py      launchd liveness and repair for both agents
 farm/contract.py       full server contract capture, fingerprint, severity-classified drift
 farm/workorders.py     append-only work queue between detection and repair
-farm/canary.py         provisional releases: prove a flip helped, or revert it
+farm/canary.py         provisional releases: emergency brake + efficacy decision
+farm/evaluation.py     champion/challenger gain, equivalence, cumulative-regret budget
 farm/llm.py            the ONLY module that talks to a model (Glean llm_proxy gateway)
 farm/progress.py       live pipeline position for the dashboard
 farm/topology.py       static call graph (steps -> functions -> MCP tools), read from farm/*.py with ast
@@ -100,6 +103,10 @@ state/contract.ndjson  one row per contract scan, with classified drift
 state/workorders.ndjson code-change work orders; one current row per order id
 state/canary.json      the release currently on probation, if any
 state/canary.ndjson    every arm/resolve event, including reverts
+state/champion.json    accepted release and cumulative performance ratio
+state/efficacy_events.ndjson independent candidate acceptance/rejection outcomes
+state/provenance.ndjson hypothesis/result/policy lineage graph
+state/segments/        checksummed gzip source-ledger segments and manifests
 state/research_findings.ndjson  research scans and model hypotheses
 state/tokens.ndjson    token/cost ledger; routine runs record an explicit zero
 state/raw/latest/      last raw responses, overwritten each run
@@ -123,6 +130,9 @@ python3 run.py --research-audit # semantic contracts + drift + question updates
 python3 run.py --sweep        # pure counterfactual replay; zero MCP calls
 python3 run.py --knowledge-refresh # rebuild versioned claims
 python3 run.py --policy-status # promoted/runtime compatibility
+python3 run.py --safety-status # lineage, champion efficacy, and compaction summary
+python3 run.py --compaction-status # hot/archive bytes without modifying evidence
+python3 run.py --compact-state # explicitly run the same lossless supervisor maintenance
 python3 run.py --probes       # list bounded probes and budgets
 python3 run.py --self-test    # focused runtime regression suite
 python3 run.py --contract-status # server contract baseline + recent drift
@@ -427,17 +437,17 @@ Two agents run and repair each other, so no single stopped job silences the farm
 | `com.nickfigura.farmfriends` | 180s | the full cycle |
 | `com.nickfigura.farmfriends.supervisor` | 60s | keep the schedule alive, remediate alerts |
 
-`--supervise` does three things in order, and makes **no** farm calls unless the
+`--supervise` does five things in order, and makes **no** farm calls unless the
 loop has actually gone stale:
 
 1. **Repair the schedule.** A dead scheduler makes every other signal
-   meaningless. This is the failure that started it: the agent was simply not
-   loaded, `--alerts` looked calm, and nothing ran for half an hour. Repairs are
-   capped at `HEAL_SCHEDULER_MAX_REPAIRS_PER_HOUR` so a broken plist cannot
-   become a restart loop.
-2. **Recover a stale loop** by running one cycle inline, under the same lock the
-   scheduled runs use, so it can never double-run the farm.
-3. **Remediate alerts** via `farm/heal.py`, then acknowledge only what it fixed.
+   meaningless. Repairs are capped so a broken plist cannot become a restart loop.
+2. **Adjudicate the provisional release** before recovery can run suspect code.
+3. **Compact oversized source ledgers** into checksummed immutable segments; this
+   changes storage, never logical replay.
+4. **Recover a stale loop** by running one cycle inline under the same lock, so it
+   can never double-run the farm.
+5. **Remediate alerts** via `farm/heal.py`, then acknowledge only what it fixed.
 
 The healer's constraints are the interesting part:
 
@@ -592,22 +602,27 @@ out of `ps` and shell history), and scrubbed from every exception and log line b
 
 ## Changing strategy
 
-Do not edit a constant and call that learning. Refresh evidence, inspect the
-claim transition and counterfactual sweep, compile a candidate policy, run every
-release gate, then explicitly promote and publish:
+Do not edit a constant and call that learning. A changed policy requires a
+pre-registered hypothesis, disjoint discovery and validation evidence, an
+intervention/holdout/direct-mechanism evidence class, a falsifier, and a declared
+minimum improvement. Correlation may open a probe; it cannot promote behavior.
 
 ```bash
 python3 run.py --knowledge-refresh
 python3 run.py --research-audit
 python3 run.py --sweep
-python3 run.py --promote-policy
-# full deploy test matrix
+python3 run.py --promote-policy --promotion-contract state/candidate-promotion.json
+# full deploy test matrix; activation remains provisional
 deploy/release.sh
 ```
 
-Routine arithmetic still belongs in `rules.py` or `watch.py`, not a prompt. The
-corollary is now enforced: **a decision that is never re-checked belongs in the
-question ledger.** See `docs/epistemic-control-plane.md`.
+The provisional release then faces two independent decisions: a loose emergency
+canary catches catastrophic breakage, while `farm/evaluation.py` requires strategy
+gain or reliability equivalence before advancing the champion. A cumulative 5%
+regression budget prevents repeated small losses, and policy A→B→A pauses instead
+of oscillating. Routine arithmetic still belongs in `rules.py` or `watch.py`, not a
+prompt. **A decision that is never re-checked belongs in the question ledger.** See
+`docs/epistemic-control-plane.md`.
 
 ## Version control
 
@@ -627,7 +642,7 @@ What is versioned, and what is deliberately not:
 | path | tracked | why |
 |---|---|---|
 | code, docs, tests, plists | yes | this is the reviewable surface |
-| `state/` | no | 322MB, rewritten every 180s; already append-only and immutable |
+| `state/` | no | live evidence; high-volume ledgers rotate losslessly into checksummed compressed segments |
 | `releases/`, `release` | no | outputs of a commit; a checkout must not resurrect a stale tree |
 
 Autonomous changes never edit `main` directly. Each authoring pass gets its own

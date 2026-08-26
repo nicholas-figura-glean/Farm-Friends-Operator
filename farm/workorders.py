@@ -97,6 +97,7 @@ def submit(
     acceptance: Optional[List[str]] = None,
     files: Optional[List[str]] = None,
     path: str = QUEUE,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """File an order for a detected change, unless one is already live.
 
@@ -141,6 +142,9 @@ def submit(
             # are the order-specific ones.
             "acceptance": list(acceptance or []),
             "files": list(files or []),
+            # Research-authored orders carry the pre-registered hypothesis and
+            # cohort contract through authoring, release, canary, and promotion.
+            "provenance": dict(provenance or {}),
             "attempts": attempts,
         },
         path,

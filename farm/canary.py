@@ -9,9 +9,9 @@ When the author agent flips a release it **arms** a canary recording the previou
 revision and a pre-flip performance baseline. The supervisor then evaluates on
 every pass:
 
-    watching   -> not enough post-flip runs yet to judge
-    healthy    -> the farm is producing at least as fast as before; clear it
-    regressed  -> revert the pointer to the previous revision and file the reason
+    watching   -> not enough clean post-flip runs yet to judge
+    healthy    -> safety passed and efficacy/equivalence accepted; clear it
+    regressed  -> breakage, regression, or unproven strategy; revert and record why
 
 Why produce_per_min and not a test result
 ----------------------------------------
@@ -19,8 +19,8 @@ The gate matrix already proves the code is *correct*. It cannot prove the code i
 *good for the score*, and the score is the only thing that decides the game. A
 change can pass every suite and still halve output -- POSTMORTEM-run377 documents
 exactly that: three throttles aimed at the wrong variable, all individually
-reasonable, which together nearly lost first place. So the canary watches the one
-number that matters.
+reasonable, which together nearly lost first place. The canary therefore combines
+a fast emergency floor with the independent champion/candidate evaluator.
 
 Why the band is loose
 ---------------------
@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import control, rules
+from . import compaction, control, evaluation, rules
 
 STORE = os.path.join("state", "canary.json")
 # The real project root. Used only to decide whether a caller is operating on live
@@ -96,24 +96,8 @@ def _append(path: str, row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _runs(path: str = RUN_HISTORY, limit: int = 400) -> List[Dict[str, Any]]:
-    """Recent run rows, oldest first. Bounded: history.ndjson is megabytes."""
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return []
-    out: List[Dict[str, Any]] = []
-    for line in lines[-limit:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and row.get("run") is not None:
-            out.append(row)
-    return out
+    """Recent logical run rows, oldest first, across active and archived history."""
+    return [row for row in compaction.read_rows(path, limit=limit) if row.get("run") is not None]
 
 
 def _exogenous_loss(row: Dict[str, Any]) -> Optional[str]:
@@ -202,12 +186,17 @@ def arm(
     reason: str = "",
     order_id: str = "",
     commit: str = "",
+    change_class: str = "reliability",
+    hypothesis_id: str = "",
+    policy_id: str = "",
+    expected_improvement: float = 0.0,
     store: str = STORE,
     history: str = HISTORY,
     run_history: str = RUN_HISTORY,
 ) -> Dict[str, Any]:
     """Record that `revision` is live provisionally and must prove itself."""
     runs = _runs(run_history)
+    efficacy_baseline = evaluation.baseline_samples(runs)
     record = {
         "schema_version": 1,
         "status": WATCHING,
@@ -218,11 +207,18 @@ def arm(
         # The commit this release was built from, so a revert can undo the change by
         # content and not only by re-pointing at the previous directory.
         "commit": commit,
+        "change_class": change_class if change_class in {"reliability", "strategy", "research_probe"} else "reliability",
+        "hypothesis_id": hypothesis_id,
+        "policy_id": policy_id,
+        "expected_improvement": max(0.0, float(expected_improvement or 0.0)),
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
         "baseline_rate": baseline_rate(runs),
         "baseline_per_animal": baseline_per_animal(runs),
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
+        "efficacy_metric": efficacy_baseline["metric"],
+        "efficacy_baseline_samples": efficacy_baseline["samples"],
+        "efficacy_baseline_runs": rules.EFFICACY_BASELINE_RUNS,
     }
     _write_json(store, record)
     _append(history, dict(record, event="armed"))
@@ -232,6 +228,20 @@ def arm(
 def active(store: str = STORE) -> Optional[Dict[str, Any]]:
     record = _read_json(store)
     return record if record.get("status") == WATCHING else None
+
+
+def _efficacy_verdict(
+    record: Dict[str, Any],
+    usable: List[Dict[str, Any]],
+    store: str,
+    verdict: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = evaluation.judge(record, usable, store)
+    verdict["efficacy"] = result
+    verdict["last_run"] = int(usable[-1].get("run") or 0) if usable else None
+    verdict["reason"] = result.get("reason") or "efficacy evaluation produced no reason"
+    verdict["status"] = HEALTHY if result.get("accepted") else REGRESSED
+    return verdict
 
 
 def evaluate(
@@ -287,12 +297,20 @@ def evaluate(
     if len(after) < rules.CANARY_MIN_RUNS:
         verdict["reason"] = "%d/%d runs observed" % (len(after), rules.CANARY_MIN_RUNS)
         return verdict
+    if len(after) >= rules.EFFICACY_MIN_RUNS * 2 and len(usable) < rules.EFFICACY_MIN_RUNS:
+        verdict["status"] = REGRESSED
+        verdict["reason"] = "insufficient clean efficacy evidence after %d observed runs" % len(after)
+        return verdict
 
-    # No usable baseline (a fresh install, or history without rates) means there is
-    # nothing to compare against. Clear rather than revert on no evidence.
+    # A strategy candidate may never promote on missing evidence. Reliability
+    # releases can remain provisionally live, but still wait through the complete
+    # efficacy window before equivalence is adjudicated.
     if baseline is None or observed is None or baseline <= 0:
-        verdict["status"] = HEALTHY
-        verdict["reason"] = "no comparable baseline; accepting after %d clean runs" % len(after)
+        if len(usable) >= rules.EFFICACY_MIN_RUNS:
+            return _efficacy_verdict(record, usable, store, verdict)
+        verdict["reason"] = "no comparable baseline; %d/%d efficacy runs observed" % (
+            len(usable), rules.EFFICACY_MIN_RUNS,
+        )
         return verdict
 
     if contaminated:
@@ -313,13 +331,8 @@ def evaluate(
                 % (observed_pa, baseline_pa, floor, len(usable))
             )
             return verdict
-        if len(after) >= rules.CANARY_MAX_RUNS:
-            verdict["status"] = HEALTHY
-            verdict["reason"] = (
-                "per-animal produce %.4f vs baseline %.4f over %d run(s)"
-                % (observed_pa, baseline_pa, len(usable))
-            )
-            return verdict
+        if len(usable) >= rules.EFFICACY_MIN_RUNS:
+            return _efficacy_verdict(record, usable, store, verdict)
         verdict["reason"] = "per-animal %.4f vs baseline %.4f, %d/%d runs" % (
             observed_pa, baseline_pa, len(after), rules.CANARY_MAX_RUNS,
         )
@@ -335,12 +348,8 @@ def evaluate(
         )
         return verdict
 
-    if len(after) >= rules.CANARY_MAX_RUNS:
-        verdict["status"] = HEALTHY
-        verdict["reason"] = "produce %.1f/min vs baseline %.1f/min over %d runs" % (
-            observed, baseline, len(after),
-        )
-        return verdict
+    if len(usable) >= rules.EFFICACY_MIN_RUNS:
+        return _efficacy_verdict(record, usable, store, verdict)
 
     verdict["reason"] = "%.1f/min vs baseline %.1f/min, %d/%d runs" % (
         observed, baseline, len(after), rules.CANARY_MAX_RUNS,
@@ -426,8 +435,14 @@ def resolve(
     # Clear either way. A regressed canary must not stay armed, or the next
     # supervisor pass would try to revert again and walk the pointer backwards.
     _write_json(store, dict(record, status=status, resolved_ts=_utcnow(),
-                            resolution=verdict.get("reason", "")[:300]))
-    _append(history, dict(outcome, event="resolved", ts=_utcnow()))
+                            resolution=verdict.get("reason", "")[:300],
+                            efficacy=verdict.get("efficacy") or {}))
+    _append(history, dict(outcome, event="resolved", ts=_utcnow(),
+                          efficacy=verdict.get("efficacy") or {}))
+    try:
+        evaluation.record_resolution(record, verdict, store)
+    except Exception as exc:  # noqa: BLE001 - pointer safety already decided
+        outcome["efficacy_record_error"] = str(exc)[:200]
     return outcome
 
 
@@ -537,6 +552,11 @@ def status(store: str = STORE, run_history: str = RUN_HISTORY) -> Dict[str, Any]
         "armed_ts": record.get("armed_ts"),
         "resolved_ts": record.get("resolved_ts"),
         "resolution": record.get("resolution"),
+        "change_class": record.get("change_class") or "reliability",
+        "hypothesis_id": record.get("hypothesis_id"),
+        "policy_id": record.get("policy_id"),
+        "efficacy": record.get("efficacy") or {},
+        "champion": evaluation.champion(store),
     }
     if out["armed"]:
         out["verdict"] = evaluate(store, run_history)

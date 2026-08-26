@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from . import rules
+from . import compaction, rules
 
 PROJECT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
@@ -59,29 +59,14 @@ def parse_ts(value: Any) -> Optional[datetime]:
 
 
 def read_ndjson(path: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Read valid object rows, tolerating a corrupt or partial line.
+    """Read the full logical ledger, including checksummed compacted segments.
 
     Evidence reads are full-history by default. A caller asking for a tail must
     do so explicitly; a hidden retention limit must never change an old finding.
+    Corrupt individual NDJSON rows remain tolerated, while a missing or tampered
+    archive segment fails closed instead of silently changing an estimator.
     """
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError):
-        return []
-    if limit is not None:
-        lines = lines[-max(0, int(limit)):]
-    rows: List[Dict[str, Any]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-    return rows
+    return compaction.read_rows(path, limit=limit)
 
 
 def history_rows(
