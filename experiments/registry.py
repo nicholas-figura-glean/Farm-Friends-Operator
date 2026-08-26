@@ -69,6 +69,17 @@ PROBES = {
         "stop_condition": "one explicitly invoked visit_farm call and immediate lifetime-produce comparison",
         "evidence_destination": "state/experiments.ndjson",
     },
+    "peek_top_rival": {
+        "hypothesis": "The current best rival's farm state cannot plausibly generate more than 25% of our recent per-cycle gain before the next cycle, so threat allocation should remain unchanged.",
+        "question_classes": ["opportunity", "strategy_hypothesis"],
+        "subject_patterns": ["rival", "visit_farm", "threat_allocation"],
+        "command": ["experiments/registry.py", "--peek-top-rival"],
+        "read_only": True,
+        "autonomous": True,
+        "budget": {"coins": 0, "calls": 1, "wall_seconds": 30},
+        "stop_condition": "one visit_farm call against the current best rival or prior evidence exists",
+        "evidence_destination": "state/peek_top_rival_probe.json and state/experiments.ndjson",
+    },
 }
 
 
@@ -175,8 +186,225 @@ def _run_visit_farm_probe(argv):
     return 0
 
 
+def _read_top_rival_snapshot():
+    import json
+    import os
+    from pathlib import Path
+
+    env_rival = os.environ.get("TOP_RIVAL") or os.environ.get("PEEK_TOP_RIVAL")
+    if env_rival:
+        return {"path": "environment", "key": "TOP_RIVAL", "farmer": env_rival, "score": None}
+
+    def score_of(item):
+        for key in ("score", "lifetime_produce", "lifetimeProduce", "produce", "rank_score"):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                return value
+        return None
+
+    def name_of(item):
+        for key in ("farmer", "farmer_name", "username", "name", "id"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    for path in (
+        Path("state/leaderboard.json"),
+        Path("state/status.json"),
+        Path("state/latest.json"),
+        Path("state/state.json"),
+        Path("state/farm.json"),
+    ):
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+
+        containers = [data] if isinstance(data, list) else []
+        if isinstance(data, dict):
+            for key in ("leaderboard", "rivals", "rankings", "farms", "players"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    containers.append(value)
+
+        best = None
+        for container in containers:
+            for item in container:
+                if not isinstance(item, dict) or item.get("is_self") or item.get("self"):
+                    continue
+                farmer = name_of(item)
+                score = score_of(item)
+                if not farmer or score is None:
+                    continue
+                if best is None or score > best["score"]:
+                    best = {"path": str(path), "key": "leaderboard", "farmer": farmer, "score": score}
+
+        if best is not None:
+            return best
+
+    return None
+
+
+def _json_from_text(text):
+    import json
+
+    try:
+        return json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    if not isinstance(text, str):
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _sum_nonnegative_numbers(value):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return value if value > 0 else 0
+    if isinstance(value, dict):
+        return sum(_sum_nonnegative_numbers(child) for child in value.values())
+    if isinstance(value, list):
+        return sum(_sum_nonnegative_numbers(child) for child in value)
+    return 0
+
+
+def _sum_named_numbers(value, needles):
+    total = 0
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if any(needle in str(key).lower() for needle in needles):
+                total += _sum_nonnegative_numbers(child)
+            else:
+                total += _sum_named_numbers(child, needles)
+    elif isinstance(value, list):
+        total += sum(_sum_named_numbers(child, needles) for child in value)
+    return total
+
+
+def _project_rival_next_cycle_gain(visit_farm_state):
+    if not isinstance(visit_farm_state, (dict, list)):
+        return None
+
+    ready_produce = _sum_named_numbers(
+        visit_farm_state,
+        ("ready_produce", "pending_harvest", "harvestable", "uncollected", "ready"),
+    )
+    herd_size = _sum_named_numbers(visit_farm_state, ("herd", "livestock", "animals"))
+    stored_resources = _sum_named_numbers(visit_farm_state, ("stored", "stockpile", "resources", "inventory"))
+    # This is a falsifier probe, so the projection intentionally uses a simple
+    # visible upper-bound proxy rather than a strategy model that could hide risk.
+    projected = ready_produce + herd_size + stored_resources
+    return {
+        "projected_rival_next_cycle_gain": projected,
+        "visible_ready_produce": ready_produce,
+        "visible_herd_size": herd_size,
+        "visible_stored_resources": stored_resources,
+    }
+
+
+def _run_peek_top_rival_probe(argv):
+    import json
+    import os
+    import shlex
+    import subprocess
+    import time
+    from pathlib import Path
+
+    budget = PROBES["peek_top_rival"]["budget"]
+    started = time.monotonic()
+    evidence_path = Path("state/peek_top_rival_probe.json")
+    if evidence_path.exists():
+        try:
+            prior = json.loads(evidence_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            prior = {}
+        record = {
+            "kind": "peek_top_rival_probe",
+            "status": "already_ran",
+            "budget": budget,
+            "projected_rival_next_cycle_gain": prior.get("projected_rival_next_cycle_gain"),
+            "prior_evidence": str(evidence_path),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+        _append_visit_farm_probe_outcome(record)
+        return 0
+
+    recent_gain = 705531
+    falsifier_threshold = 176383
+    rival = _read_top_rival_snapshot()
+    farmer = argv[0] if argv else (rival or {}).get("farmer")
+    status = "no_rival"
+    call = {"attempted": False}
+    visit_farm_state = None
+
+    command = os.environ.get("VISIT_FARM_COMMAND")
+    if farmer and command:
+        args = shlex.split(command) + [farmer]
+        timeout = max(1, min(budget["wall_seconds"], budget["wall_seconds"] - int(time.monotonic() - started)))
+        call["attempted"] = True
+        call["command"] = command
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            call["returncode"] = completed.returncode
+            call["stdout"] = completed.stdout[-12000:]
+            call["stderr"] = completed.stderr[-2000:]
+            status = "called" if completed.returncode == 0 else "call_failed"
+            visit_farm_state = _json_from_text(completed.stdout)
+        except subprocess.TimeoutExpired as exc:
+            call["timeout_seconds"] = timeout
+            call["stdout"] = (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else ""
+            call["stderr"] = (exc.stderr or "")[-2000:] if isinstance(exc.stderr, str) else ""
+            status = "timeout"
+    elif farmer:
+        status = "not_configured"
+
+    projection = _project_rival_next_cycle_gain(visit_farm_state)
+    projected = projection["projected_rival_next_cycle_gain"] if projection else None
+    record = {
+        "kind": "peek_top_rival_probe",
+        "hypothesis": PROBES["peek_top_rival"]["hypothesis"],
+        "capability": "visit_farm",
+        "farmer": farmer,
+        "top_rival_snapshot": rival,
+        "status": status,
+        "budget": budget,
+        "read_only": PROBES["peek_top_rival"]["read_only"],
+        "autonomous": PROBES["peek_top_rival"]["autonomous"],
+        "recent_per_cycle_gain": recent_gain,
+        "falsifier_threshold": falsifier_threshold,
+        "projected_rival_next_cycle_gain": projected,
+        "projection_components": projection,
+        "falsified": projected is not None and projected > falsifier_threshold,
+        "visit_farm_state": visit_farm_state,
+        "call": call,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    _append_visit_farm_probe_outcome(record)
+    return 0
+
+
 if __name__ == "__main__":
     import sys
 
     if sys.argv[1:2] == ["--visit-farm-probe"]:
         raise SystemExit(_run_visit_farm_probe(sys.argv[2:]))
+    if sys.argv[1:2] == ["--peek-top-rival"]:
+        raise SystemExit(_run_peek_top_rival_probe(sys.argv[2:]))
