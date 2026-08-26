@@ -66,8 +66,15 @@ def build_repo(root: str) -> None:
 
 sandbox = tempfile.mkdtemp(prefix="vcs-test-")
 repo = os.path.join(sandbox, "repo")
+remote = os.path.join(sandbox, "remote.git")
 os.makedirs(repo)
 build_repo(repo)
+# A local bare repository exercises the real push and ls-remote plumbing without
+# touching a network or depending on credentials. Production separately allowlists
+# the Farm-Friends-Operator GitHub identity.
+git(["init", "--bare", "-q", remote], sandbox)
+git(["remote", "add", "origin", remote], repo)
+git(["push", "-q", "-u", "origin", "main"], repo)
 
 # Point the module at the sandbox. Every test below therefore operates on the
 # throwaway repo, and a bug here cannot reach the farm's own history.
@@ -87,6 +94,10 @@ try:
     check(vcs.short(base_sha) == base_sha[:12], "short() truncates to 12")
     check(vcs.dirty_paths() == [], "a fresh commit leaves no dirty tracked files",
           str(vcs.dirty_paths()))
+    proof = vcs.require_remote_sync(expected_repository=remote)
+    check(proof.get("synchronized") is True,
+          "a clean HEAD already on origin/main has remote proof", str(proof))
+    check(proof.get("sha") == base_sha, "remote proof names the exact local commit", str(proof))
 
     section("worktree isolation")
     wt = vcs.worktree_add("order-1")
@@ -131,6 +142,30 @@ try:
     with open(os.path.join(repo, "farm", "cycle.py")) as fh:
         check(fh.read().strip() == "VALUE = 1", "the live tree is untouched by the branch")
 
+    section("the gated commit is pushed before local main moves")
+    refused = False
+    try:
+        vcs.push_main(sha, expected_remote_sha=base_sha, expected_local_sha=base_sha,
+                      expected_repository="https://github.com/not-the-allowlisted/project")
+    except vcs.GitError as exc:
+        refused = "allowlisted" in str(exc)
+    check(refused, "a differently configured repository identity is refused")
+    check(git(["rev-parse", "refs/heads/main"], remote) == base_sha,
+          "a refused destination check leaves remote main untouched")
+
+    pushed = vcs.push_main(sha, expected_remote_sha=base_sha,
+                           expected_local_sha=base_sha, expected_repository=remote)
+    check(pushed.get("sha") == sha, "the exact gated commit is pushed", str(pushed))
+    check(pushed.get("remote") == "origin" and pushed.get("branch") == "main",
+          "push proof names origin/main", str(pushed))
+    check(git(["rev-parse", "refs/heads/main"], remote) == sha,
+          "the remote main ref resolves to the gated commit")
+    again = vcs.push_main(sha, expected_remote_sha=base_sha,
+                          expected_local_sha=base_sha, expected_repository=remote)
+    check(again.get("already_current") is True,
+          "re-reading an ambiguously completed push is idempotent", str(again))
+    check(vcs.head() == base_sha, "pushing the branch does not move local main")
+
     merged = vcs.merge_to_main(wt, "merge order-1")
     check(merged == sha, "main fast-forwards to the gated commit", str(merged))
     check(vcs.head() == sha, "main now points at the change")
@@ -141,6 +176,19 @@ try:
     check(synced == ["farm/cycle.py"], "only the changed file is synced", str(synced))
     with open(os.path.join(repo, "farm", "cycle.py")) as fh:
         check(fh.read().strip() == "VALUE = 2", "the live tree now matches main")
+    proof = vcs.require_remote_sync(expected_repository=remote)
+    check(proof.get("sha") == sha and proof.get("clean") is True,
+          "release preflight proves clean local and remote main are identical", str(proof))
+
+    with open(os.path.join(repo, "farm", "cycle.py"), "a") as fh:
+        fh.write("# local-only\n")
+    refused = False
+    try:
+        vcs.require_remote_sync(expected_repository=remote)
+    except vcs.GitError as exc:
+        refused = "uncommitted" in str(exc)
+    check(refused, "release preflight refuses an uncommitted source tree")
+    git(["checkout", "--", "farm/cycle.py"], repo)
 
     section("teardown leaves nothing behind")
     path_was = wt["path"]
@@ -179,6 +227,12 @@ try:
     check(inverse != before, "the revert is a new commit, not a rewind")
     content = git(["show", "%s:farm/cycle.py" % inverse], repo)
     check(content.strip() == "VALUE = 1", "the reverted content is restored on main", content)
+    with open(os.path.join(repo, "farm", "cycle.py")) as fh:
+        check(fh.read().strip() == "VALUE = 1",
+              "clean reverted paths are synchronized into the canonical tree")
+    check(vcs.dirty_paths() == [],
+          "an unattended inverse does not leave the canonical tree staged or dirty",
+          str(vcs.dirty_paths()))
     check(git(["cat-file", "-t", sha], repo) == "commit",
           "the rejected commit is still in history, not erased")
     log = git(["log", "--oneline"], repo)
@@ -211,6 +265,12 @@ try:
     check(vcs.recent() == [], "recent() is empty rather than raising")
     check(vcs.tag_release("r") is None, "tagging fails soft")
     check(vcs.revert_commit("deadbeef") is None, "reverting fails soft")
+    remote_refused = False
+    try:
+        vcs.require_remote_sync()
+    except (vcs.GitError, OSError):
+        remote_refused = True
+    check(remote_refused, "remote synchronization fails closed outside a repository")
 
 finally:
     vcs.PROJECT = REAL_PROJECT

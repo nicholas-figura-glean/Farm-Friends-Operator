@@ -307,7 +307,7 @@ def do_vcs_status() -> int:
     from farm import vcs
     if not vcs.available():
         print("VCS unavailable: not a git repository")
-        print("  the author agent will fall back to copy-based staging (no diffs, no revert)")
+        print("  autonomous authoring and release are blocked because remote proof is required")
         return 0
     print("VCS main at %s" % vcs.short(vcs.head()))
     dirty = vcs.dirty_paths()
@@ -319,6 +319,13 @@ def do_vcs_status() -> int:
         print("  will not see these: %s" % ", ".join(dirty[:6]))
     else:
         print("  working tree clean")
+    try:
+        remote = vcs.require_remote_sync(require_clean=True)
+        print("  remote verified: %s == %s/%s (%s)"
+              % (vcs.short(remote.get("sha")), remote.get("remote"),
+                 remote.get("branch"), remote.get("url")))
+    except (vcs.GitError, OSError) as exc:
+        print("  REMOTE NOT SYNCHRONIZED: %s" % str(exc)[:300])
     stale = vcs.stale_worktrees()
     if stale:
         print("  %d stale worktree record(s) from a crashed pass" % len(stale))

@@ -48,6 +48,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote, urlparse
 
 from . import control
 
@@ -58,6 +59,11 @@ PROJECT = control.project_root(Path(__file__).resolve().parent.parent)
 BRANCH_PREFIX = "author/"
 TAG_PREFIX = "release/"
 MAIN = "main"
+PUSH_REMOTE = "origin"
+# An unattended author must never trust whichever destination happens to be named
+# "origin". The repository identity is allowlisted so a local configuration mistake
+# cannot redirect machine-authored code to another project.
+EXPECTED_REMOTE_REPOSITORY = "https://github.com/nicholas-figura-glean/Farm-Friends-Operator"
 
 
 class GitError(RuntimeError):
@@ -65,10 +71,11 @@ class GitError(RuntimeError):
 
 
 def _run(args: List[str], cwd: Optional[str] = None, check: bool = True,
-         timeout: int = 120) -> subprocess.CompletedProcess:
+         timeout: int = 120,
+         env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     proc = subprocess.run(
         ["git"] + args, cwd=cwd or str(PROJECT), capture_output=True, text=True,
-        timeout=timeout, check=False,
+        timeout=timeout, check=False, env=env,
     )
     if check and proc.returncode != 0:
         raise GitError("git %s failed: %s" % (" ".join(args[:3]),
@@ -79,9 +86,9 @@ def _run(args: List[str], cwd: Optional[str] = None, check: bool = True,
 def available() -> bool:
     """Is this a usable git repository?
 
-    Everything in this module is optional. The author agent falls back to the
-    directory-copy path when git is unavailable, because losing version control
-    should degrade review quality, never stop the farm from repairing itself.
+    Runtime healing remains independent of Git, but source authoring and release now
+    fail closed when this is false: an unattended code change without a reviewable,
+    remotely durable commit is not publishable.
     """
     if not (PROJECT / ".git").exists():
         return False
@@ -266,6 +273,167 @@ def sync_live_tree(paths: List[str]) -> List[str]:
     return updated
 
 
+# -- remote synchronization --------------------------------------------------
+
+
+def _network_env() -> Dict[str, str]:
+    """Git environment suitable for an unattended launchd process.
+
+    A missing key, passphrase, or host-key decision must fail quickly rather than
+    wedging the single author lock on an invisible prompt. Existing SSH options are
+    respected so an operator can still select a specific key in ~/.ssh/config.
+    """
+    env = dict(os.environ)
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15")
+    return env
+
+
+def _repository_identity(url: str) -> str:
+    """Normalize SSH, HTTPS, file URLs and local paths for destination checks."""
+    value = str(url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value and "@" in value.split(":", 1)[0] and ":" in value:
+        host, path = value.split(":", 1)
+        host = host.rsplit("@", 1)[-1]
+        path = path.rstrip("/")
+        if path.lower().endswith(".git"):
+            path = path[:-4]
+        return (host + "/" + path.lstrip("/")).lower()
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.scheme != "file" and parsed.hostname:
+        path = unquote(parsed.path).strip("/")
+        if path.lower().endswith(".git"):
+            path = path[:-4]
+        return (parsed.hostname + "/" + path).lower()
+    local = unquote(parsed.path) if parsed.scheme == "file" else value
+    return "file:" + os.path.realpath(os.path.expanduser(local))
+
+
+def remote_url(remote: str = PUSH_REMOTE) -> str:
+    """Configured push URL for the autonomous destination, or raise loudly."""
+    url = _run(["remote", "get-url", "--push", remote]).stdout.strip()
+    if not url:
+        raise GitError("remote %s has no push URL" % remote)
+    return url
+
+
+def _checked_remote_url(remote: str, expected_repository: Optional[str]) -> str:
+    url = remote_url(remote)
+    if expected_repository:
+        actual = _repository_identity(url)
+        expected = _repository_identity(expected_repository)
+        if actual != expected:
+            raise GitError(
+                "refusing to push %s: configured destination %s is not allowlisted %s"
+                % (remote, actual or "unknown", expected or "unknown")
+            )
+    return url
+
+
+def remote_head(remote: str = PUSH_REMOTE) -> str:
+    """Read the remote main SHA over the configured non-interactive transport."""
+    out = _run(
+        ["ls-remote", "--exit-code", remote, "refs/heads/" + MAIN],
+        timeout=30, env=_network_env(),
+    ).stdout.strip()
+    rows = [line.split()[0] for line in out.splitlines() if line.split()]
+    if len(rows) != 1 or len(rows[0]) != 40:
+        raise GitError("remote %s did not return one %s commit" % (remote, MAIN))
+    return rows[0]
+
+
+def push_main(sha: Optional[str] = None, remote: str = PUSH_REMOTE,
+              expected_remote_sha: Optional[str] = None,
+              expected_local_sha: Optional[str] = None,
+              expected_repository: Optional[str] = EXPECTED_REMOTE_REPOSITORY) -> Dict[str, Any]:
+    """Push one verified commit to remote main and read it back.
+
+    ``expected_remote_sha`` is the gated branch's base during autonomous authoring.
+    Requiring that exact value makes a concurrent remote update a refusal, never a
+    force-push. ``expected_local_sha`` closes the equivalent race in the local repo.
+    The push itself is an ordinary fast-forward update; history is never rewritten.
+    """
+    local_main = _run(["rev-parse", MAIN]).stdout.strip()
+    target = _run(["rev-parse", sha or MAIN]).stdout.strip()
+    if expected_local_sha and local_main != expected_local_sha:
+        raise GitError(
+            "local %s moved from %s to %s before push; refusing"
+            % (MAIN, short(expected_local_sha), short(local_main))
+        )
+    if _run(["cat-file", "-e", target + "^{commit}"], check=False).returncode != 0:
+        raise GitError("push target %s is not a commit" % short(target))
+
+    url = _checked_remote_url(remote, expected_repository)
+    before = remote_head(remote)
+    # A previous attempt may have completed remotely and lost its response. Reading
+    # the exact target back makes that ambiguous transport outcome safely idempotent.
+    if before == target:
+        return {"remote": remote, "url": url, "branch": MAIN, "sha": target,
+                "previous": before, "already_current": True}
+    if expected_remote_sha and before != expected_remote_sha:
+        raise GitError(
+            "remote %s/%s moved from %s to %s; refusing"
+            % (remote, MAIN, short(expected_remote_sha), short(before))
+        )
+    if _run(["merge-base", "--is-ancestor", before, target], check=False).returncode != 0:
+        raise GitError(
+            "%s is not a descendant of remote %s/%s at %s; refusing"
+            % (short(target), remote, MAIN, short(before))
+        )
+
+    spec = "%s:refs/heads/%s" % (target, MAIN)
+    proc = _run(["push", "--porcelain", remote, spec], check=False,
+                timeout=120, env=_network_env())
+    if proc.returncode != 0:
+        # The server may have accepted the update immediately before the connection
+        # dropped. Verify before calling it a failure; repeating the same SHA is safe.
+        try:
+            observed = remote_head(remote)
+        except (GitError, OSError, subprocess.TimeoutExpired):
+            observed = ""
+        if observed != target:
+            detail = (proc.stderr or proc.stdout or "push failed").strip()[-500:]
+            raise GitError("push to %s/%s failed: %s" % (remote, MAIN, detail))
+
+    observed = remote_head(remote)
+    if observed != target:
+        raise GitError(
+            "push returned success but %s/%s is %s, expected %s"
+            % (remote, MAIN, short(observed), short(target))
+        )
+    # Keep the local tracking ref useful to read-only status views without making
+    # those views perform network calls of their own.
+    _run(["update-ref", "refs/remotes/%s/%s" % (remote, MAIN), target], check=False)
+    return {"remote": remote, "url": url, "branch": MAIN, "sha": target,
+            "previous": before, "already_current": False}
+
+
+def require_remote_sync(remote: str = PUSH_REMOTE,
+                        expected_repository: Optional[str] = EXPECTED_REMOTE_REPOSITORY,
+                        require_clean: bool = True) -> Dict[str, Any]:
+    """Fail unless the release source is clean and exactly present on remote main."""
+    url = _checked_remote_url(remote, expected_repository)
+    local = head()
+    if not local:
+        raise GitError("local %s does not resolve to a commit" % MAIN)
+    dirty = dirty_paths(include_untracked=True)
+    if require_clean and dirty:
+        raise GitError(
+            "release source has %d uncommitted path(s): %s"
+            % (len(dirty), ", ".join(dirty[:6]))
+        )
+    observed = remote_head(remote)
+    if observed != local:
+        raise GitError(
+            "local %s %s is not synchronized with %s/%s %s"
+            % (MAIN, short(local), remote, MAIN, short(observed))
+        )
+    return {"remote": remote, "url": url, "branch": MAIN, "sha": local,
+            "clean": not dirty, "synchronized": True}
+
+
 # -- release identity and revert --------------------------------------------
 
 
@@ -291,9 +459,11 @@ def revert_commit(sha: str, message: Optional[str] = None) -> Optional[str]:
     change from being silently re-published by the next release, and what leaves a
     reviewable record that it was tried and rejected.
 
-    Implemented with a temporary worktree so main's files are never rewritten under
-    a running process.
+    The inverse is authored in a temporary worktree, so no half-written revert is
+    visible. After main moves, only clean paths touched by the inverse are synchronized
+    into the canonical tree; concurrent operator edits are never overwritten.
     """
+    dirty_before = set(dirty_paths(include_untracked=True))
     path = tempfile.mkdtemp(prefix="revert-wt-")
     os.rmdir(path)
     branch = "revert/" + short(sha)
@@ -307,7 +477,10 @@ def revert_commit(sha: str, message: Optional[str] = None) -> Optional[str]:
             _run(["commit", "-q", "--amend", "-m", message], cwd=path)
         reverted = _run(["rev-parse", "HEAD"], cwd=path).stdout.strip()
         main_sha = _run(["rev-parse", MAIN]).stdout.strip()
+        changed = _run(["diff", "--name-only", main_sha, reverted], cwd=path).stdout.split()
         _run(["update-ref", "refs/heads/" + MAIN, reverted, main_sha])
+        safe_to_sync = [item for item in changed if item not in dirty_before]
+        sync_live_tree(safe_to_sync)
         return reverted
     except (GitError, OSError, subprocess.TimeoutExpired):
         return None

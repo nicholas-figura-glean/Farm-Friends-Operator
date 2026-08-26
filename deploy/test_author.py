@@ -254,6 +254,130 @@ check("publication invokes the canonical release script",
       str(captured.get("args")))
 check("author source no longer writes candidate bodies into PROJECT before release",
       "live.write_text(body" not in pathlib.Path(author_agent.__file__).read_text(encoding="utf-8"))
+release_source = (pathlib.Path(ROOT) / "deploy" / "release.sh").read_text(encoding="utf-8")
+check("the canonical release path independently requires remote synchronization",
+      "vcs.require_remote_sync(require_clean=True)" in release_source)
+check("the release remote gate is fail-closed rather than advisory",
+      "release rejected: remote synchronization failed" in release_source)
+
+
+# -- remote publication ------------------------------------------------------
+
+section("gated commits are durable on the allowlisted remote before release")
+
+saved_commit_worktree = vcs.commit_worktree
+saved_diff_stat = vcs.diff_stat
+saved_push_main = vcs.push_main
+saved_merge_to_main = vcs.merge_to_main
+saved_sync_live_tree = vcs.sync_live_tree
+sequence = []
+commit_sha = "b" * 40
+base_sha = "a" * 40
+try:
+    vcs.commit_worktree = lambda *a, **k: sequence.append("commit") or commit_sha
+    vcs.diff_stat = lambda *a, **k: sequence.append("diff") or {
+        "files": ["farm/parse.py"], "stat": "1 file changed", "insertions": 1, "deletions": 0,
+    }
+
+    def _push(sha, **kwargs):
+        sequence.append("push")
+        check("push receives the gated branch commit", sha == commit_sha, str(sha))
+        check("push leases against the branch base on remote",
+              kwargs.get("expected_remote_sha") == base_sha, str(kwargs))
+        check("push refuses a locally moved base",
+              kwargs.get("expected_local_sha") == base_sha, str(kwargs))
+        return {"remote": "origin", "branch": "main", "sha": sha}
+
+    vcs.push_main = _push
+    vcs.merge_to_main = lambda *a, **k: sequence.append("merge") or commit_sha
+    vcs.sync_live_tree = lambda paths: sequence.append("sync") or list(paths)
+    recorded = author_agent.commit_change(
+        {"path": sandbox, "branch": "author/remote-test", "base_sha": base_sha},
+        {"id": "remote-test", "severity": "shape", "kind": "repair"},
+        {"backend": "mechanical", "files": {"farm/parse.py": "VALUE = 2\n"}},
+        "push before release",
+    )
+    check("commit metadata carries remote proof",
+          recorded.get("push", {}).get("sha") == commit_sha, str(recorded))
+    check("remote acknowledgement precedes local main and live-tree updates",
+          sequence == ["commit", "diff", "push", "merge", "sync"], str(sequence))
+
+    sequence[:] = []
+
+    def _refuse_push(*args, **kwargs):
+        sequence.append("push")
+        raise vcs.GitError("SSH authentication failed")
+
+    vcs.push_main = _refuse_push
+    refused = False
+    try:
+        author_agent.commit_change(
+            {"path": sandbox, "branch": "author/remote-test", "base_sha": base_sha},
+            {"id": "remote-test", "severity": "shape", "kind": "repair"},
+            {"backend": "mechanical", "files": {"farm/parse.py": "VALUE = 2\n"}},
+            "must not publish locally",
+        )
+    except vcs.GitError:
+        refused = True
+    check("a remote failure escapes as a hard refusal", refused)
+    check("remote failure leaves local main and live files untouched",
+          "merge" not in sequence and "sync" not in sequence, str(sequence))
+finally:
+    vcs.commit_worktree = saved_commit_worktree
+    vcs.diff_stat = saved_diff_stat
+    vcs.push_main = saved_push_main
+    vcs.merge_to_main = saved_merge_to_main
+    vcs.sync_live_tree = saved_sync_live_tree
+
+section("authoring never publishes after a remote synchronization failure")
+
+saved_mechanical = author_agent.mechanical_patch
+saved_gates = author_agent.run_gates
+saved_commit_change = author_agent.commit_change
+saved_publish = author_agent.publish
+saved_resolve = workorders.resolve
+saved_log = author_agent.log
+saved_ledger_record = author_agent.ledger.record
+resolved = []
+publish_calls = []
+with tempfile.TemporaryDirectory(prefix="author-remote-fail-") as failroot:
+    os.makedirs(os.path.join(failroot, "farm"))
+    with open(os.path.join(failroot, "farm", "parse.py"), "w") as handle:
+        handle.write("VALUE = 1\n")
+    try:
+        author_agent.mechanical_patch = lambda *a, **k: {
+            "backend": "mechanical", "summary": "repair parser",
+            "files": {"farm/parse.py": "VALUE = 2\n"}, "problems": [],
+        }
+        author_agent.run_gates = lambda *a, **k: {"passed": True, "failed": []}
+
+        def _commit_refused(*args, **kwargs):
+            raise vcs.GitError("origin/main was unreachable")
+
+        author_agent.commit_change = _commit_refused
+        author_agent.publish = lambda *a, **k: publish_calls.append(True) or {"published": True}
+        workorders.resolve = lambda *a, **k: resolved.append((a, k)) or {}
+        author_agent.log = lambda *a, **k: None
+        author_agent.ledger.record = lambda *a, **k: None
+        rc = author_agent.author_pass(
+            {"id": "push-fail", "severity": "shape", "kind": "repair",
+             "files": ["farm/parse.py"]},
+            failroot, "unused-queue", {}, {"vcs": {"base_sha": base_sha}},
+        )
+    finally:
+        author_agent.mechanical_patch = saved_mechanical
+        author_agent.run_gates = saved_gates
+        author_agent.commit_change = saved_commit_change
+        author_agent.publish = saved_publish
+        workorders.resolve = saved_resolve
+        author_agent.log = saved_log
+        author_agent.ledger.record = saved_ledger_record
+
+check("remote failure returns a failed author pass", rc == 3, str(rc))
+check("release publication is never attempted after push failure", publish_calls == [], str(publish_calls))
+check("the work order records a remote synchronization failure",
+      bool(resolved) and resolved[-1][0][1] == workorders.FAILED
+      and "remote" in str(resolved[-1][1].get("note", "")).lower(), str(resolved))
 
 
 # -- canary ------------------------------------------------------------------
@@ -400,6 +524,61 @@ try:
         check("git unavailable, nothing to protect", True)
 except ImportError:
     check("vcs module absent, nothing to protect", True)
+
+section("a canary inverse commit is pushed without delaying runtime rollback")
+
+inverse_store = os.path.join(can, "inverse-canary.json")
+rejected_sha = "c" * 40
+inverse_sha = "d" * 40
+with open(inverse_store, "w") as handle:
+    json.dump({"commit": rejected_sha, "revision": "revB", "previous": "revA"}, handle)
+saved_available = vcs.available
+saved_revert_commit = vcs.revert_commit
+saved_push_main = vcs.push_main
+push_args = {}
+try:
+    vcs.available = lambda: True
+    vcs.revert_commit = lambda *a, **k: inverse_sha
+
+    def _push_inverse(sha, **kwargs):
+        push_args.update({"sha": sha, **kwargs})
+        return {"remote": "origin", "branch": "main", "sha": sha}
+
+    vcs.push_main = _push_inverse
+    inverse_result = canary.record_inverse_commit(inverse_store)
+finally:
+    vcs.available = saved_available
+    vcs.revert_commit = saved_revert_commit
+    vcs.push_main = saved_push_main
+
+check("the inverse commit is retained in rollback bookkeeping",
+      inverse_result.get("commit") == inverse_sha, str(inverse_result))
+check("the inverse commit is pushed to origin/main",
+      inverse_result.get("pushed") is True and inverse_result.get("remote") == "origin/main",
+      str(inverse_result))
+check("rollback push leases against the rejected remote commit",
+      push_args.get("sha") == inverse_sha
+      and push_args.get("expected_remote_sha") == rejected_sha
+      and push_args.get("expected_local_sha") == inverse_sha,
+      str(push_args))
+
+try:
+    vcs.available = lambda: True
+    vcs.revert_commit = lambda *a, **k: inverse_sha
+
+    def _fail_inverse_push(*args, **kwargs):
+        raise vcs.GitError("SSH unavailable")
+
+    vcs.push_main = _fail_inverse_push
+    failed_inverse = canary.record_inverse_commit(inverse_store)
+finally:
+    vcs.available = saved_available
+    vcs.revert_commit = saved_revert_commit
+    vcs.push_main = saved_push_main
+check("a rollback push failure remains explicit without erasing the local inverse",
+      failed_inverse.get("commit") == inverse_sha
+      and failed_inverse.get("pushed") is False
+      and "not pushed" in failed_inverse.get("error", ""), str(failed_inverse))
 
 section("a resolved canary does not act twice")
 

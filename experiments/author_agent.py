@@ -773,19 +773,28 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             patch = None
             continue
 
-        # Verified in isolation. Commit the branch before publishing, so the diff
-        # that ships is recorded even if publishing itself then fails.
+        # Verified in isolation. A repair is not publishable until the exact gated
+        # commit is present on the allowlisted remote. This is deliberately fail-closed:
+        # a locally successful patch with no durable upstream record is not a release.
         summary = patch.get("summary") or "work order %s" % order["id"]
-        commit_info: Dict[str, Any] = {}
-        if stage and stage.get("vcs"):
-            try:
-                commit_info = commit_change(stage["vcs"], order, patch, summary)
-            except vcs.GitError as exc:
-                # A version-control failure must not block a repair that already
-                # passed its gates. Record it and publish anyway.
-                print("  vcs: could not record the change (%s); publishing regardless"
-                      % str(exc)[:140])
-                log({"event": "vcs_failed", "order": order["id"], "error": str(exc)[:300]})
+        if not (stage and stage.get("vcs")):
+            note = "version control unavailable; remote synchronization is required"
+            workorders.resolve(order["id"], workorders.FAILED, note=note, path=queue)
+            log({"event": "remote_sync_failed", "order": order["id"], "error": note})
+            ledger.record("author.remote_sync_failed", {"order": order["id"], "error": note})
+            print("  publish refused: %s" % note)
+            return 3
+
+        try:
+            commit_info = commit_change(stage["vcs"], order, patch, summary)
+        except (vcs.GitError, OSError) as exc:
+            note = "version control or remote synchronization failed: %s" % str(exc)[:320]
+            workorders.resolve(order["id"], workorders.FAILED, note=note, path=queue)
+            log({"event": "remote_sync_failed", "order": order["id"], "error": str(exc)[:300]})
+            ledger.record("author.remote_sync_failed", {"order": order["id"],
+                                                         "error": str(exc)[:300]})
+            print("  publish refused: %s" % note[:300])
+            return 3
 
         result = publish(root, order, summary, commit=commit_info.get("sha"))
         if not result.get("published"):
@@ -795,37 +804,39 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             log({"event": "publish_refused", "order": order["id"], "error": result.get("error")})
             return 3
 
-        if commit_info.get("sha"):
-            vcs.tag_release(result["revision"], commit_info["sha"])
-        elif not (stage and stage.get("vcs")):
-            # Git-less fallback: persist only the files that were gated, and only
-            # after the immutable artifact is live. This never touches release/.
-            for rel in files:
-                source = Path(root) / rel
-                target = PROJECT / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), str(target))
-
+        vcs.tag_release(result["revision"], commit_info["sha"])
+        push = commit_info.get("push") or {}
+        remote_ref = "%s/%s" % (push.get("remote") or vcs.PUSH_REMOTE,
+                                  push.get("branch") or vcs.MAIN)
+        audit_note = "%s | pushed %s to %s" % (
+            summary, vcs.short(commit_info.get("sha")), remote_ref,
+        )
         workorders.resolve(order["id"], workorders.PUBLISHED,
-                           note=summary, release=result["revision"], path=queue,
+                           note=audit_note, release=result["revision"], path=queue,
                            backend=patch.get("backend"),
                            commit=commit_info.get("sha"),
+                           remote=remote_ref,
+                           remote_commit=push.get("sha"),
                            diff=commit_info.get("stat"))
         write_json(STORE, dict(stored, last_authored_run=canary.latest_run(),
                                last_order=order["id"], last_revision=result["revision"],
                                last_commit=commit_info.get("sha"),
+                               last_remote=remote_ref,
+                               last_remote_commit=push.get("sha"),
                                last_ts=utcnow()))
         log({"event": "published", "order": order["id"], "revision": result["revision"],
              "previous": result["previous"], "backend": patch.get("backend"),
              "files": sorted(files), "summary": summary,
-             "commit": commit_info.get("sha"), "diff": commit_info.get("stat")})
+             "commit": commit_info.get("sha"), "remote": remote_ref,
+             "remote_commit": push.get("sha"), "diff": commit_info.get("stat")})
         ledger.record("author.published", {"order": order["id"], "revision": result["revision"],
                                           "backend": patch.get("backend"), "files": sorted(files),
-                                          "commit": commit_info.get("sha")})
+                                          "commit": commit_info.get("sha"), "remote": remote_ref,
+                                          "remote_commit": push.get("sha")})
         print("AUTHOR published %s as %s (canary armed, previous %s)"
               % (order["id"], result["revision"], result["previous"]))
-        if commit_info.get("sha"):
-            print("  commit %s on main" % vcs.short(commit_info["sha"]))
+        print("  commit %s pushed to %s before release"
+              % (vcs.short(commit_info["sha"]), remote_ref))
         return 0
 
     workorders.resolve(order["id"], workorders.FAILED,
@@ -837,12 +848,14 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
 
 def commit_change(worktree: Dict[str, Any], order: Dict[str, Any],
                   patch: Dict[str, Any], summary: str) -> Dict[str, Any]:
-    """Commit the gated branch, fast-forward main, and sync the live tree.
+    """Commit, push the gated SHA, fast-forward local main, and sync the live tree.
 
     The commit message is the audit trail a reviewer actually reads, so it carries
     the order id, the detection source, which backend wrote it, and the acceptance
     criteria the gates were standing in for. A model-authored change that cannot
-    explain itself is indistinguishable from a corrupted one.
+    explain itself is indistinguishable from a corrupted one. Remote publication
+    happens before local main moves, so an SSH or destination failure leaves the
+    canonical branch and live release untouched.
     """
     body = [summary, ""]
     body.append("Work order: %s (%s, %s)" % (order["id"], order.get("severity"), order.get("kind")))
@@ -867,11 +880,17 @@ def commit_change(worktree: Dict[str, Any], order: Dict[str, Any],
 
     sha = vcs.commit_worktree(worktree, message)
     if not sha:
-        return {}
+        raise vcs.GitError("gated patch produced no commit")
     diff = vcs.diff_stat(worktree)
+    base_sha = worktree.get("base_sha")
+    push = vcs.push_main(
+        sha,
+        expected_remote_sha=base_sha,
+        expected_local_sha=base_sha,
+    )
     merged = vcs.merge_to_main(worktree, summary)
-    # Only now bring the live tree's copies of those files forward, and only the
-    # files the change touched: a whole-tree checkout could clobber unrelated edits.
+    # Only after GitHub has acknowledged the exact gated commit do local main and
+    # the live tree move forward. A whole-tree checkout could clobber unrelated edits.
     synced = vcs.sync_live_tree(diff.get("files") or [])
     return {
         "sha": merged or sha,
@@ -881,6 +900,7 @@ def commit_change(worktree: Dict[str, Any], order: Dict[str, Any],
         "insertions": diff.get("insertions"),
         "deletions": diff.get("deletions"),
         "synced": synced,
+        "push": push,
     }
 
 

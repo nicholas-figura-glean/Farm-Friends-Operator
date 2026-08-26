@@ -127,7 +127,8 @@ python3 run.py --contract-status # server contract baseline + recent drift
 python3 run.py --orders        # the code-change work order queue
 python3 run.py --canary-status # the release currently on probation
 python3 run.py --llm-status    # headless model availability and authoring spend
-deploy/release.sh             # publish the working tree (required after ANY edit)
+python3 run.py --vcs-status    # local/remote commit proof and autonomous history
+deploy/release.sh             # publish only a clean HEAD verified on origin/main
 deploy/install.sh             # install/refresh both agents
 deploy/install.sh --uninstall # stop the schedule (boots out the supervisor first)
 python3 monitor.py             # open the read-only live dashboard
@@ -614,7 +615,7 @@ record, and no way to be undone except by re-pointing at a whole previous releas
 directory, which also takes down anything good that shipped after it.
 
 ```
-python3 run.py --vcs-status     # main, autonomous commits, release tags
+python3 run.py --vcs-status     # main, origin/main proof, autonomous commits, release tags
 git log --oneline               # every change, including machine-authored ones
 git show release/<revision>     # the exact code a published release was built from
 ```
@@ -627,15 +628,20 @@ What is versioned, and what is deliberately not:
 | `state/` | no | 322MB, rewritten every 180s; already append-only and immutable |
 | `releases/`, `release` | no | outputs of a commit; a checkout must not resurrect a stale tree |
 
-Autonomous changes never touch `main` directly. Each authoring pass gets its own
+Autonomous changes never edit `main` directly. Each authoring pass gets its own
 `git worktree` on an `author/<order-id>` branch, so the pass is isolated by the
-tool rather than by a hand-maintained list of directories to copy. `main` only
-moves after the full gate matrix has passed inside that worktree, and
-`merge_to_main` refuses if `main` moved during the pass -- the gates that just
-passed were run against a tree that no longer reflects reality.
+tool rather than by a hand-maintained list of directories to copy. After the full
+gate matrix passes, the exact branch commit is pushed non-interactively to the
+allowlisted `origin/main` repository over SSH and read back. Only then does local
+`main` fast-forward and the immutable release path run. A changed local or remote
+base, a different `origin` destination, missing SSH authentication, an uncommitted
+path, or a remote SHA mismatch fails closed before release. `deploy/release.sh`
+independently repeats the clean-HEAD/remote-SHA proof for manual and autonomous
+publishes.
 
 When the canary rejects a release it does two separate things. The symlink flip is
 what makes the farm healthy again in seconds. The inverse commit is what stops the
 rejected change being silently re-published by the next release, and leaves a record
-that it was tried and rejected. The rejected commit stays in history; nothing is
-erased.
+that it was tried and rejected. That inverse is also pushed to `origin/main`; a push
+failure cannot delay runtime restoration and is recorded explicitly in the canary
+ledger. The rejected commit stays in history; nothing is erased.

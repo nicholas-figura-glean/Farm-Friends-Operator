@@ -395,8 +395,16 @@ def resolve(
         # suites that flip a symlink in a temp directory from rewriting real history.
         if outcome.get("reverted") and os.path.abspath(project) == os.path.abspath(str(PROJECT)):
             inverse = record_inverse_commit(store)
-            if inverse:
-                outcome["inverse_commit"] = inverse
+            if inverse.get("commit"):
+                outcome["inverse_commit"] = inverse["commit"]
+            if inverse.get("pushed"):
+                outcome["inverse_remote"] = inverse.get("remote")
+                outcome["inverse_remote_commit"] = inverse.get("remote_commit")
+            if inverse.get("error"):
+                # Runtime safety has already been restored by the pointer flip. Keep
+                # any GitHub bookkeeping failure explicit in the immutable event so
+                # an operator never mistakes a local inverse for a synchronized one.
+                outcome["inverse_push_error"] = inverse["error"]
 
     # Clear either way. A regressed canary must not stay armed, or the next
     # supervisor pass would try to revert again and walk the pointer backwards.
@@ -440,8 +448,8 @@ def revert(previous: str, project: Optional[str] = None) -> Dict[str, Any]:
     return {"reverted": True, "now_live": os.path.basename(resolved)}
 
 
-def record_inverse_commit(store: str = STORE) -> Optional[str]:
-    """Record an inverse commit for the change the canary just rejected.
+def record_inverse_commit(store: str = STORE) -> Dict[str, Any]:
+    """Record and push an inverse commit for the change the canary rejected.
 
     Deliberately NOT called from revert(). It used to be, and that was a mistake
     with real consequences: revert() takes a `project` argument so it can flip a
@@ -456,17 +464,20 @@ def record_inverse_commit(store: str = STORE) -> Optional[str]:
     one call site that has actually decided to take it -- the supervisor's canary
     adjudication -- not buried in a helper that tests call with fake paths.
 
-    Returns the inverse commit sha, or None if there was nothing to do.
+    Runtime restoration is the pointer flip and always comes first. This helper is
+    durable bookkeeping: it records the inverse on local main, pushes that exact SHA
+    to the allowlisted origin, and reports either proof or a bounded error for the
+    canary ledger. It never turns a successful runtime rollback back into a failure.
     """
     record = _read_json(store)
     commit = record.get("commit")
     if not commit:
-        return None
+        return {}
     try:
         from . import vcs
         if not vcs.available():
-            return None
-        return vcs.revert_commit(
+            return {"error": "version control unavailable after canary rollback"}
+        inverse = vcs.revert_commit(
             commit,
             "Revert: canary rejected release %s\n\n"
             "Production regressed after this change shipped, so the release pointer\n"
@@ -476,8 +487,23 @@ def record_inverse_commit(store: str = STORE) -> Optional[str]:
             "Reverted by: farm/canary.py, unattended."
             % (record.get("revision"), record.get("previous"), commit),
         )
-    except Exception:  # noqa: BLE001 - bookkeeping must never undo a good revert
-        return None
+        if not inverse:
+            return {"error": "could not record inverse commit after canary rollback"}
+        result: Dict[str, Any] = {"commit": inverse, "pushed": False}
+        try:
+            pushed = vcs.push_main(
+                inverse,
+                expected_remote_sha=str(commit),
+                expected_local_sha=inverse,
+            )
+            result.update({"pushed": True,
+                           "remote": "%s/%s" % (pushed.get("remote"), pushed.get("branch")),
+                           "remote_commit": pushed.get("sha")})
+        except Exception as exc:  # noqa: BLE001 - runtime rollback already succeeded
+            result["error"] = "inverse commit was not pushed: %s" % str(exc)[:300]
+        return result
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must never undo a good revert
+        return {"error": "inverse commit bookkeeping failed: %s" % str(exc)[:300]}
 
 
 def status(store: str = STORE, run_history: str = RUN_HISTORY) -> Dict[str, Any]:

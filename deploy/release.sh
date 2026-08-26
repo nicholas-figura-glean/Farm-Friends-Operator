@@ -39,26 +39,31 @@ if [[ -L "$LINK" ]]; then
   PREVIOUS="$(basename "$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$LINK")")"
 fi
 
-# A release is built from the working tree, so the working tree is what ships. If it
-# disagrees with main, then main is not a record of what is running, and the next
-# release built after any checkout will silently ship something different.
+# A release is built from the working tree, so the exact source that ships must be
+# both committed and durable upstream. This is a hard gate rather than a warning:
+# publishing a local-only repair makes the live runtime impossible to reproduce from
+# GitHub and lets the next checkout silently erase an autonomous change.
 #
-# This guard exists because that divergence actually happened and hid a real bug: a
-# test suite rewrote main via update-ref, which does not touch the working tree, so
-# the deployment kept running correct code while main had quietly lost it. Nothing
-# noticed, because everything that mattered still worked.
-#
-# A warning rather than a hard failure: an operator mid-edit should still be able to
-# cut a release, and refusing would make this script fail in exactly the situation
-# where someone is trying to fix something urgently.
-if command -v git >/dev/null 2>&1 && git -C "$SOURCE_PROJECT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  DIVERGED="$(git -C "$SOURCE_PROJECT" diff --name-only main -- . 2>/dev/null | head -20)"
-  if [[ -n "$DIVERGED" ]]; then
-    echo "WARNING: the working tree differs from main; this release will ship the" >&2
-    echo "         working tree, and main will not describe what is running:" >&2
-    while IFS= read -r line; do echo "           $line" >&2; done <<< "$DIVERGED"
-    echo "         commit or check out before releasing to keep main authoritative." >&2
-  fi
+# FARM_PROJECT_ROOT is deliberately rebound to SOURCE_PROJECT for this one check.
+# An autonomous build runs release.sh from a gated worktree while DEPLOY_PROJECT is
+# the canonical checkout; the worktree's HEAD is the commit whose bytes will ship.
+if ! (
+  cd "$SOURCE_PROJECT"
+  FARM_PROJECT_ROOT="$SOURCE_PROJECT" PYTHONPATH="$SOURCE_PROJECT" /usr/bin/python3 - <<'PY'
+from farm import vcs
+
+if not vcs.available():
+    raise SystemExit("release rejected: source is not a Git worktree")
+try:
+    proof = vcs.require_remote_sync(require_clean=True)
+except (vcs.GitError, OSError) as exc:
+    raise SystemExit("release rejected: remote synchronization failed: %s" % exc)
+print("remote gate: %s pushed to %s/%s" % (
+    vcs.short(proof.get("sha")), proof.get("remote"), proof.get("branch"),
+))
+PY
+); then
+  exit 3
 fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"

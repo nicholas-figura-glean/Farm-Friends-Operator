@@ -233,10 +233,15 @@ def vcs_state() -> Dict[str, Any]:
     tags = [t.strip() for t in
             _git(["tag", "--list", "release/*", "--sort=-creatordate"]).splitlines()
             if t.strip()][:8]
+    head_sha = vcs.head() or ""
+    remote_tracking_sha = _git(["rev-parse", "refs/remotes/origin/main"])
     return {
         "available": True,
         "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
-        "head": vcs.short(vcs.head() or ""),
+        "head": vcs.short(head_sha),
+        "remote": "origin/main",
+        "remote_head": vcs.short(remote_tracking_sha),
+        "remote_tracking_synced": bool(head_sha and head_sha == remote_tracking_sha),
         "clean": not dirty,
         "dirty_paths": dirty[:8],
         "dirty_source_paths": dirty_source[:12],
@@ -501,6 +506,11 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
                     "what": "working source differs from main; autonomous authoring is paused",
                     "why": "%d release-source file(s) are uncommitted, including %s" % (
                         len(dirty_source), ", ".join(str(path) for path in dirty_source[:3]))})
+    if (vcs_view.get("available") and vcs_view.get("remote_head")
+            and vcs_view.get("remote_tracking_synced") is False):
+        out.append({"severity": "warn",
+                    "what": "local main differs from last-known origin/main",
+                    "why": "release is blocked until the exact commit is pushed and verified"})
 
     con = view.get("contract") or {}
     age = con.get("last_scan_age_seconds")
