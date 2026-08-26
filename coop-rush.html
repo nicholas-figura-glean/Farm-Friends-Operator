@@ -117,6 +117,38 @@ code { background:#ffffff10; border-radius:4px; padding:1px 5px; font-size:12px;
 .race-track i { display:block; height:100%; border-radius:99px; background:#557063; transition:width .45s ease; }
 .racer.self .race-track i { background:linear-gradient(90deg,#3f9d6b,var(--green)); }
 .racer small { display:block; color:var(--muted); font-size:10.5px; margin-top:3px; text-align:right; }
+
+/* ---- Produce Grand Prix ------------------------------------------------
+ * A historical leaderboard race built only from snapshots the cycle already
+ * records. Every player remains in the legend; endpoint labels are limited to
+ * the front pack so a crowded field stays readable.
+ */
+.grand-prix { position:relative; overflow:hidden; background:
+  radial-gradient(circle at 82% 10%,#8fc8ff12 0,transparent 34%),
+  radial-gradient(circle at 12% 110%,#72e09a12 0,transparent 40%),rgba(24,35,30,.94); }
+.grand-prix:before { content:""; position:absolute; inset:0; pointer-events:none; opacity:.16;
+  background:repeating-linear-gradient(115deg,transparent 0 32px,#ffffff08 33px,#ffffff08 34px); }
+.gp-head { position:relative; display:flex; justify-content:space-between; align-items:flex-start; gap:18px; flex-wrap:wrap; }
+.gp-head h2 { margin-bottom:3px; color:var(--text); font-size:17px; letter-spacing:.04em; }
+.gp-kicker { color:var(--green); font-size:10px; font-weight:750; text-transform:uppercase; letter-spacing:.16em; }
+.gp-controls { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; }
+.gp-controls .chips { margin:0; }
+.gp-chart { position:relative; height:310px; margin-top:12px; }
+.gp-chart svg { width:100%; height:100%; overflow:visible; }
+.gp-line { fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; opacity:.72; }
+.gp-line.self { stroke-width:4; opacity:1; filter:drop-shadow(0 0 5px #72e09a55); }
+.gp-point { stroke:var(--panel); stroke-width:2; }
+.gp-end-label { font-size:10.5px; font-weight:700; paint-order:stroke; stroke:#101714; stroke-width:4px; stroke-linejoin:round; }
+.gp-legend { position:relative; display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:7px; margin-top:10px; }
+.gp-racer { display:grid; grid-template-columns:10px minmax(0,1fr) auto; gap:8px; align-items:center;
+  background:#0b100d8c; border:1px solid #ffffff0d; border-radius:9px; padding:7px 9px; min-width:0; }
+.gp-racer.self { border-color:#72e09a55; background:#173124a8; }
+.gp-swatch { width:9px; height:9px; border-radius:50%; box-shadow:0 0 9px currentColor; background:currentColor; }
+.gp-racer b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.gp-racer b small { color:var(--muted); font-weight:500; margin-left:4px; }
+.gp-racer span:last-child { text-align:right; font-variant-numeric:tabular-nums; font-size:11.5px; }
+.gp-racer span:last-child small { display:block; color:var(--muted); font-size:10px; }
+.gp-note { position:relative; margin-top:10px; color:var(--muted); font-size:11.5px; }
 .gauge { background:#0b1a13b8; border:1px solid var(--line); border-radius:10px; padding:10px 11px; }
 .gauge label { display:flex; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px;
   text-transform:uppercase; letter-spacing:.07em; }
@@ -259,7 +291,7 @@ kbd { background:#ffffff12; border:1px solid var(--line); border-bottom-width:2p
   .herd i, .pstep.active .dot { animation:none; }
   .gtrack i, .bartrack i, .pbar i { transition:none; }
 }
-@media (max-width:900px) { .status,.blockers,.release,.wide,.side,.cost,.healing { grid-column:1/-1; } header { display:block; } .refresh { text-align:left; margin-top:10px; } .history-controls { align-items:flex-start; margin-top:12px; } .history-controls .chips { justify-content:flex-start; } .costcurve { height:240px; } }
+@media (max-width:900px) { .status,.blockers,.release,.wide,.side,.cost,.healing { grid-column:1/-1; } header { display:block; } .refresh { text-align:left; margin-top:10px; } .history-controls { align-items:flex-start; margin-top:12px; } .history-controls .chips { justify-content:flex-start; } .costcurve { height:240px; } .gp-chart { height:250px; } .gp-controls { gap:7px; } }
 /* ---- execution trace explorer -------------------------------------------
  * A compact observability UI: nested span rows, a shared time axis, a step/tool
  * dependency matrix and a persistent detail inspector. No spatial layout and no
@@ -463,6 +495,7 @@ button.te-row.selected { box-shadow:inset 3px 0 #76d99c; }
   .te-workspace { grid-template-columns:minmax(0,1fr); }
   .te-main { border-right:0; }
   .te-inspector { border-top:1px solid var(--line); max-height:none; }
+  .te-inspector.empty { display:none; }
 }
 @media (max-width:700px) {
   .te-summary { grid-template-columns:1fr 1fr; }
@@ -478,8 +511,427 @@ button.te-row.selected { box-shadow:inset 3px 0 #76d99c; }
   .te-step-span,.te-call-span { transition:none; }
 }
 
+/* ---- MCP switchboard ------------------------------------------------------
+ * The animated half of the process boundary. Motion is entirely declarative:
+ * every packet is a DOM node with its own --t0 (measured start) and --dur
+ * (measured duration) driving one CSS animation, so there is no rAF loop, no
+ * canvas, and nothing to keep running when the tab is hidden.
+ *
+ * prefers-reduced-motion is not a downgrade to nothing: packets fall back to a
+ * static strip chart positioned at --x, their real launch time in the run.
+ */
+.wire { grid-column:1/-1; }
+.wire .head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+.wire .head h2 { margin:0; }
+.wire-sub { color:var(--muted); font-size:12px; margin-top:4px; max-width:82ch; line-height:1.55; }
+.mcp-wire { margin-top:14px; border:1px solid var(--line); border-radius:12px; overflow:hidden;
+  background:radial-gradient(120% 140% at 12% 0%,#0f1a15 0,#080d0b 62%); min-height:520px; }
+.mw-empty { min-height:420px; display:grid; place-items:center; text-align:center; color:var(--muted); padding:34px; line-height:1.6; }
+.mw-empty small { display:block; margin-top:8px; max-width:62ch; font-size:11.5px; }
+.mw-empty-small { color:var(--muted); font-size:11px; padding:8px 2px; }
+
+/* toolbar */
+.mw-toolbar { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
+  padding:11px 13px; border-bottom:1px solid var(--line); background:#0c1310; }
+.mw-title b { font-size:13.5px; letter-spacing:.01em; }
+.mw-title span { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+.mw-controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.mw-chips { display:inline-flex; padding:3px; border:1px solid var(--line); border-radius:9px; background:#080d0b; }
+.mw-chips button, .mw-toggle { appearance:none; border:0; background:transparent; color:var(--muted);
+  font:650 11.5px/1.2 inherit; cursor:pointer; border-radius:6px; padding:6px 11px; }
+.mw-chips button[aria-pressed="true"] { color:#dff6e7; background:#244633; box-shadow:inset 0 0 0 1px #3c6b4e; }
+.mw-chips button:hover, .mw-toggle:hover { color:var(--text); }
+.mw-toggle { border:1px solid var(--line); background:#080d0b; }
+.mw-toggle[aria-pressed="true"] { color:#ffe7a8; border-color:#7d6535; background:#5b491d55; }
+
+/* stat strip */
+.mw-stats { display:grid; grid-template-columns:repeat(6,1fr); border-bottom:1px solid var(--line); background:#0a100d; }
+.mw-stat { min-width:0; padding:12px 14px; border-right:1px solid var(--line); }
+.mw-stat:last-child { border-right:0; }
+.mw-stat small { display:block; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:9px; }
+.mw-stat b { display:block; font-size:20px; letter-spacing:-.03em; margin:3px 0 1px; font-variant-numeric:tabular-nums; }
+.mw-stat span { display:block; color:var(--muted); font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mw-stat.good b { color:var(--green); }
+.mw-stat.bad b { color:var(--red); }
+
+/* stage: python rail | tool lanes | server tower */
+.mw-stage { display:grid; grid-template-columns:186px minmax(0,1fr) 148px; gap:0; padding:14px 0 10px;
+  background:linear-gradient(90deg,#0e1712 0,#080d0b 30%,#080d0b 74%,#101c15 100%); }
+.mw-rail { padding:0 12px; border-right:1px dashed #2b4034; display:flex; flex-direction:column; gap:4px; }
+.mw-rail-head { padding:0 2px 6px; }
+.mw-rail-head b { font-size:11.5px; }
+.mw-rail-head small { display:block; color:var(--muted); font-size:10px; }
+.mw-pad { appearance:none; text-align:left; display:grid; grid-template-columns:8px 1fr auto; align-items:center; gap:7px;
+  border:1px solid transparent; border-radius:8px; background:#0d1512; color:var(--muted); cursor:pointer;
+  padding:5px 8px; font:600 11px/1.15 inherit; }
+.mw-pad:hover { color:var(--text); border-color:#2f4a3a; }
+.mw-pad-dot { width:8px; height:8px; border-radius:50%; background:#22302a; }
+.mw-pad.lit { color:#e7f6ec; background:hsl(var(--hue) 34% 15%); border-color:hsl(var(--hue) 40% 30%); }
+.mw-pad.lit .mw-pad-dot { background:hsl(var(--hue) 78% 62%); box-shadow:0 0 9px hsl(var(--hue) 88% 60% / .75); }
+.mw-pad.active .mw-pad-dot { animation:mw-blink 1.1s ease-in-out infinite; }
+.mw-pad.focus { border-color:hsl(var(--hue) 70% 55%); box-shadow:0 0 0 1px hsl(var(--hue) 70% 55% / .5); }
+.mw-pad-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mw-pad-n { font-variant-numeric:tabular-nums; color:#cfe6d8; font-size:10.5px; }
+
+.mw-lanes { min-width:0; padding:0 4px; }
+.mw-lane { position:relative; display:grid; grid-template-columns:224px minmax(0,1fr); align-items:center;
+  gap:10px; padding:3px 8px 6px; border-radius:9px; }
+.mw-lane:hover { background:#ffffff06; }
+.mw-lane.focus { background:hsl(var(--hue) 40% 14%); box-shadow:inset 0 0 0 1px hsl(var(--hue) 45% 32%); }
+.mw-lane.silent { opacity:.5; }
+.mw-lane-label { appearance:none; border:0; background:transparent; cursor:pointer; color:inherit; text-align:left;
+  display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:8px; padding:2px 0; min-width:0; }
+.mw-ico { font-size:15px; line-height:1; filter:saturate(1.1); }
+.mw-lane-copy { min-width:0; }
+.mw-lane-copy b { display:flex; align-items:center; gap:6px; font-size:11.5px; color:hsl(var(--hue) 62% 74%);
+  min-width:0; }
+.mw-lane-copy b > i { flex:0 0 auto; }
+.mw-lane-copy small { display:block; color:var(--muted); font-size:10px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.mw-kind { border:1px solid var(--line); border-radius:99px; padding:0 5px; font:700 8px/1.55 inherit;
+  font-style:normal; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.mw-kind.write { color:#ffc9a8; border-color:#6d4a2f; background:#4a2c1855; }
+.mw-kind.read { color:#a9d8ff; border-color:#345470; background:#16324955; }
+.mw-lane.failing .mw-lane-copy b { color:var(--red); }
+
+/* the wire itself */
+.mw-track { position:relative; height:20px; min-width:0; border-radius:99px;
+  background:linear-gradient(90deg,#ffffff08,#ffffff03 60%,#ffffff10);
+  box-shadow:inset 0 0 0 1px #ffffff08; overflow:hidden; }
+.mw-track:before { content:""; position:absolute; inset:9px 6px auto; height:2px; border-radius:2px;
+  background:repeating-linear-gradient(90deg,#ffffff1c 0 6px,transparent 6px 12px); }
+.mw-silent-note { position:absolute; inset:0; display:flex; align-items:center; padding-left:10px;
+  color:var(--muted); font-size:9.5px; letter-spacing:.03em; }
+.mw-silent-note:before { content:""; position:absolute; inset:4px 40% 4px 4px; background:#0b110ecc;
+  border-radius:99px; z-index:-1; }
+.mw-lane-meter { position:absolute; left:232px; right:8px; bottom:1px; height:2px; border-radius:2px; background:#ffffff0a; }
+.mw-lane-meter i { display:block; height:100%; border-radius:2px; background:hsl(var(--hue) 66% 52%); opacity:.75; }
+
+.mw-packet { position:absolute; top:50%; left:0; width:10px; height:10px; margin-top:-5px; border-radius:50%;
+  background:hsl(var(--hue) 82% 64%); box-shadow:0 0 10px hsl(var(--hue) 90% 60% / .75);
+  animation:mw-fly var(--dur,1s) cubic-bezier(.36,.02,.62,1) var(--t0,0s) both; }
+.mw-packet.padded { width:7px; height:7px; margin-top:-3.5px; }
+.mw-packet.error { background:var(--red); box-shadow:0 0 12px #ff8a83cc; }
+.mw-packet.event { background:#cbd6cf; box-shadow:none; opacity:.75; }
+.mw-packet.stranded { background:#7f8f86; box-shadow:none; opacity:.55;
+  animation:mw-hold var(--dur,1s) linear var(--t0,0s) both; }
+.mw-packet.flying { animation:mw-hold var(--dur,1s) linear var(--t0,0s) both,
+  mw-throb 1.05s ease-in-out var(--t0,0s) infinite; }
+.mw-stage.paused .mw-packet, .mw-stage.paused .mw-pad-dot { animation-play-state:paused; }
+
+@keyframes mw-fly {
+  0%   { left:0; opacity:0; transform:scale(.35); }
+  9%   { opacity:1; transform:scale(1); }
+  86%  { opacity:1; transform:scale(1); }
+  100% { left:calc(100% - 11px); opacity:0; transform:scale(2.1); }
+}
+@keyframes mw-hold {
+  0%   { left:0; opacity:0; transform:scale(.4); }
+  14%  { opacity:1; transform:scale(1); }
+  100% { left:var(--reach,50%); opacity:1; }
+}
+@keyframes mw-throb { 0%,100% { box-shadow:0 0 6px hsl(var(--hue) 90% 60% / .55); } 50% { box-shadow:0 0 16px hsl(var(--hue) 92% 66% / .95); } }
+@keyframes mw-blink { 0%,100% { opacity:.45; } 50% { opacity:1; } }
+@keyframes mw-breathe { 0%,100% { transform:scale(1); opacity:.35; } 50% { transform:scale(1.35); opacity:.85; } }
+
+/* server side */
+.mw-server { padding:0 12px; border-left:1px dashed #2b4034; display:flex; flex-direction:column; gap:9px; }
+.mw-server-tower { position:relative; border:1px solid #33513f; border-radius:12px; background:#0f1b14;
+  padding:12px 10px; text-align:center; box-shadow:inset 0 0 24px #72e09a12; }
+.mw-server-tower b { display:block; font-size:22px; line-height:1.1; }
+.mw-server-tower span { display:block; font-size:11.5px; font-weight:700; margin-top:3px; }
+.mw-server-tower small { display:block; color:var(--muted); font-size:9.5px; text-transform:uppercase; letter-spacing:.07em; }
+.mw-server-pulse { position:absolute; inset:-6px; border-radius:14px; border:1px solid #72e09a55; opacity:0; }
+.mw-server-tower.busy .mw-server-pulse { animation:mw-breathe 1.6s ease-in-out infinite; }
+.mw-server-note { color:var(--muted); font-size:9.5px; line-height:1.5; }
+
+/* legend */
+.mw-legend { display:flex; align-items:center; gap:13px; flex-wrap:wrap; padding:9px 13px;
+  border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:#0b110e;
+  color:var(--muted); font-size:10.5px; }
+.mw-legend span { display:flex; align-items:center; gap:5px; }
+.mw-legend i { width:9px; height:9px; border-radius:50%; background:#8fd4a6; }
+.mw-legend i.flying { background:#f5cc75; box-shadow:0 0 8px #f5cc7599; }
+.mw-legend i.error { background:var(--red); }
+.mw-legend i.padded { width:6px; height:6px; background:#9cb4a4; }
+.mw-legend i.stranded { background:#7f8f86; opacity:.6; }
+.mw-legend-note { color:#7d9488; font-size:10px; max-width:74ch; }
+
+/* concurrency + superlatives */
+.mw-split { display:grid; grid-template-columns:1.25fr 1fr; gap:0; }
+.mw-flow { padding:12px 14px; border-right:1px solid var(--line); min-width:0; }
+.mw-flow svg { width:100%; height:130px; display:block; }
+.mw-flow-area { fill:#72e09a1f; }
+.mw-flow-line { fill:none; stroke:#72e09a; stroke-width:1.6; vector-effect:non-scaling-stroke; }
+.mw-flow-mark line { stroke:hsl(var(--hue) 60% 55%); stroke-width:1; stroke-dasharray:2 3; opacity:.5;
+  vector-effect:non-scaling-stroke; }
+.mw-flow-mark text { fill:hsl(var(--hue) 55% 68%); font:600 9px sans-serif; opacity:.85; }
+.mw-flow-axis { display:flex; justify-content:space-between; gap:10px; color:var(--muted); font-size:10px; margin-top:6px; }
+.mw-flow-window { fill:#f5cc750f; stroke:#f5cc7544; stroke-width:1; vector-effect:non-scaling-stroke; }
+.mw-flow-note { color:#7d9488; font-size:10px; margin-top:5px; }
+
+.mw-hall { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.mw-card { padding:11px 13px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); min-width:0; }
+.mw-card:nth-child(2n) { border-right:0; }
+.mw-card small { display:block; color:var(--muted); font-size:9.5px; text-transform:uppercase; letter-spacing:.07em; }
+.mw-card b { display:block; font-size:15px; margin:3px 0 2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mw-card span { display:block; color:var(--muted); font-size:10.5px; line-height:1.45; }
+.mw-card.good b { color:var(--green); }
+.mw-card.warn b { color:var(--yellow); }
+
+@media (max-width:1100px) {
+  .mw-stats { grid-template-columns:repeat(3,1fr); }
+  .mw-stat:nth-child(3n) { border-right:0; }
+  .mw-stage { grid-template-columns:150px minmax(0,1fr) 116px; }
+  .mw-lane { grid-template-columns:170px minmax(0,1fr); }
+  .mw-lane-meter { left:178px; }
+  .mw-split { grid-template-columns:1fr; }
+  .mw-flow { border-right:0; border-bottom:1px solid var(--line); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Same measured data, no motion: each packet sits at the real time it was
+   * issued, so the picture becomes a strip chart of the run's traffic. */
+  .mw-packet, .mw-packet.flying, .mw-packet.stranded { animation:none; left:var(--x,0); opacity:.9; }
+  .mw-packet.flying { box-shadow:0 0 0 2px #f5cc7566; }
+  .mw-pad.active .mw-pad-dot, .mw-server-tower.busy .mw-server-pulse { animation:none; }
+  .mw-server-tower.busy .mw-server-pulse { opacity:.6; }
+}
+
+/* ---- interactive architecture explorer --------------------------------- */
+/* The map uses the dashboard's existing palette, but gets its own visual hierarchy:
+   controls and explanation stay still while the derived SVG model can zoom and pan. */
+
+.arch-shell { display:flex; flex-direction:column; gap:14px; }
+.arch-hero { position:relative; overflow:hidden; padding:19px 20px; border:1px solid var(--line);
+  border-radius:16px; background:
+  radial-gradient(circle at 86% -30%,#8fc8ff26 0,transparent 42%),
+  radial-gradient(circle at 8% 130%,#72e09a1b 0,transparent 44%),rgba(24,35,30,.94);
+  box-shadow:0 12px 34px #0003; }
+.arch-hero:after { content:""; position:absolute; inset:0; pointer-events:none; opacity:.16;
+  background:repeating-linear-gradient(118deg,transparent 0 38px,#ffffff08 39px,#ffffff08 40px); }
+.arch-head { position:relative; z-index:1; display:flex; justify-content:space-between; gap:24px; align-items:flex-start; }
+.arch-head h2 { margin:2px 0 3px; color:var(--text); font-size:24px; letter-spacing:-.025em; text-transform:none; }
+.arch-head p { margin:0; color:var(--muted); max-width:760px; font-size:13px; }
+.arch-kicker { color:var(--green); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.15em; }
+.arch-version { display:flex; flex-direction:column; align-items:flex-end; gap:4px; text-align:right; flex:0 0 auto; }
+.arch-version code { color:var(--blue); font-size:12px; background:#0a1410aa; border:1px solid var(--line); padding:4px 8px; }
+.arch-version span { color:var(--muted); font-size:10.5px; }
+.arch-note { color:var(--muted); font-size:12px; line-height:1.5; }
+
+.arch-stats { position:relative; z-index:1; display:grid; grid-template-columns:repeat(6,minmax(72px,1fr)); gap:8px; margin-top:16px; }
+.arch-stat { padding:8px 10px; border:1px solid #ffffff12; border-radius:10px; background:#08120da6; }
+.arch-stat b { display:block; color:var(--text); font-size:18px; font-weight:760; line-height:1.1; font-variant-numeric:tabular-nums; }
+.arch-stat span { color:var(--muted); font-size:9.5px; text-transform:uppercase; letter-spacing:.08em; }
+.arch-warn { border:1px solid #f5cc7577; border-radius:10px; padding:9px 12px; color:var(--yellow); background:#3b321b66; font-size:12px; }
+
+.arch-toolbar { display:grid; grid-template-columns:auto minmax(210px,1fr) auto; gap:10px; align-items:end;
+  padding:11px 12px; border:1px solid var(--line); border-radius:13px; background:rgba(18,28,23,.96); box-shadow:0 8px 24px #0002; }
+.arch-view-switch { display:flex; padding:3px; border:1px solid var(--line); border-radius:10px; background:#0b140f; }
+.arch-view-switch button { appearance:none; border:0; border-radius:7px; padding:8px 12px; background:transparent; color:var(--muted);
+  font:700 12px/1 inherit; cursor:pointer; }
+.arch-view-switch button span { margin-right:5px; font-size:10px; }
+.arch-view-switch button:hover { color:var(--text); }
+.arch-view-switch button[aria-pressed="true"] { color:#0b1710; background:var(--green); box-shadow:0 3px 10px #0004; }
+.arch-search { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.arch-search > span { color:var(--muted); font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+.arch-search input { width:100%; min-width:0; height:34px; border:1px solid var(--line); border-radius:9px; outline:0;
+  background:#0b140f; color:var(--text); padding:0 10px; font:12px/1 inherit; }
+.arch-search input:focus { border-color:var(--green); box-shadow:0 0 0 2px #72e09a1f; }
+.arch-map-controls { display:flex; align-items:center; height:34px; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:#0b140f; }
+.arch-map-controls button { appearance:none; height:100%; min-width:34px; border:0; border-right:1px solid var(--line); background:transparent;
+  color:var(--text); font:700 13px/1 inherit; cursor:pointer; }
+.arch-map-controls button:last-child { border-right:0; padding:0 10px; color:var(--muted); font-size:10.5px; }
+.arch-map-controls button:hover { color:var(--green); background:#ffffff08; }
+.arch-map-controls span { min-width:48px; color:var(--muted); font-size:10.5px; text-align:center; font-variant-numeric:tabular-nums; }
+.arch-relation-note { grid-column:1/-1; color:var(--muted); font-size:11px; padding:2px 2px 0; }
+.arch-relation-note b { color:var(--text); }
+
+.arch-step-rail { display:flex; gap:7px; overflow-x:auto; padding:1px 1px 7px; scrollbar-width:thin; scroll-snap-type:x proximity; }
+.arch-step-rail > button { appearance:none; flex:0 0 auto; min-width:112px; scroll-snap-align:start; display:grid;
+  grid-template-columns:auto 1fr; gap:1px 7px; text-align:left; border:1px solid var(--line); border-radius:10px;
+  padding:7px 9px; background:var(--panel); color:var(--muted); cursor:pointer; }
+.arch-step-rail > button small { grid-row:1/3; align-self:center; color:#61786a; font:700 10px/1 ui-monospace,Menlo,monospace; }
+.arch-step-rail > button b { color:var(--text); font-size:11.5px; line-height:1.1; }
+.arch-step-rail > button span { font-size:9.5px; white-space:nowrap; }
+.arch-step-rail > button:hover { border-color:#72e09a77; }
+.arch-step-rail > button[aria-pressed="true"] { border-color:var(--green); background:#193226; box-shadow:0 0 0 1px #72e09a33 inset; }
+.arch-step-rail > button[aria-pressed="true"] small,.arch-step-rail > button[aria-pressed="true"] span { color:var(--green); }
+
+.arch-workspace { display:grid; grid-template-columns:minmax(0,1fr) 326px; gap:12px; align-items:start; }
+.arch-map-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:rgba(18,27,23,.9); box-shadow:0 8px 28px #0002; }
+.arch-map-context { display:flex; flex-wrap:wrap; align-items:baseline; gap:7px 12px; min-height:48px; padding:10px 13px 8px; border-bottom:1px solid #ffffff0c; }
+.arch-map-context > span { color:var(--green); font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; }
+.arch-map-context > b { color:var(--text); font-size:13px; }
+.arch-map-context > small { color:var(--muted); font-size:10.5px; }
+.arch-map-context > button { margin-left:auto; appearance:none; border:0; background:transparent; color:var(--blue); font:700 10.5px/1 inherit; cursor:pointer; }
+.arch-map-legend { display:flex; flex-wrap:wrap; gap:7px 14px; align-items:center; padding:8px 13px; border-bottom:1px solid #ffffff0c;
+  color:var(--muted); font-size:9.5px; }
+.arch-map-legend span { display:inline-flex; align-items:center; gap:5px; }
+.arch-map-legend i { display:block; width:12px; height:7px; border:1px solid var(--line); border-radius:3px; background:var(--panel2); }
+.arch-map-legend i.agent { background:#244334; border-color:#4e7b61; }
+.arch-map-legend i.tool { background:#162c3d; border-style:dashed; border-color:var(--blue); }
+.arch-map-legend i.locked { border-left:3px solid var(--yellow); }
+.arch-map-legend i.incoming,.arch-map-legend i.outgoing { width:18px; height:2px; border:0; border-radius:99px; }
+.arch-map-legend i.incoming { background:var(--yellow); }.arch-map-legend i.outgoing { background:var(--green); }
+.arch-map-stage { position:relative; width:100%; height:auto; min-height:360px; max-height:760px;
+  aspect-ratio:var(--arch-ratio,1.75); overflow:hidden; background:
+  radial-gradient(circle at 50% 22%,#253b3022 0,transparent 48%),#0b120f; touch-action:none; }
+.arch-map-svg { display:block; width:100%; height:100%; user-select:none; }
+.arch-map-bg { fill:transparent; cursor:grab; }
+.arch-panning .arch-map-bg { cursor:grabbing; }
+.arch-map-help { padding:7px 12px; border-top:1px solid #ffffff0c; color:#6f8778; font-size:9.5px; text-align:center; }
+
+/* Stable layer bands. Semantic color accents orient without turning the map into a rainbow. */
+.arch-map-svg .arch-layer rect { fill:#16221c; stroke:#2b4035; stroke-width:1; }
+.arch-map-svg .arch-layer[data-layer="world"] rect { fill:#10202a; stroke:#4f7186; stroke-dasharray:6 5; }
+.arch-map-svg .arch-layer[data-layer="play"] rect { fill:#13271d; stroke:#355e45; }
+.arch-map-svg .arch-layer[data-layer="decide"] rect { fill:#29251b; stroke:#6b5c37; }
+.arch-map-svg .arch-layer[data-layer="guard"] rect { fill:#28231a; stroke:#806c38; }
+.arch-map-svg .arch-layer-title { fill:#dce9df; font-size:11px; font-weight:780; text-transform:uppercase; letter-spacing:1.4px; }
+.arch-map-svg .arch-layer-note { fill:#718679; font-size:10px; }
+
+.arch-edge { fill:none; stroke:#4f685a; stroke-width:1.25; opacity:.42; vector-effect:non-scaling-stroke;
+  transition:opacity .15s,stroke .15s,stroke-width .15s; }
+#arch-arrow path { fill:#4f685a; } #arch-arrow-out path { fill:var(--green); } #arch-arrow-in path { fill:var(--yellow); }
+.arch-edge.selected-out { stroke:var(--green); stroke-width:2.7; opacity:1; }
+.arch-edge.selected-in { stroke:var(--yellow); stroke-width:2.7; opacity:1; }
+.arch-edge.impact { stroke:#c7a3ff; stroke-width:1.8; opacity:.72; }
+.arch-edge.dependency-path { stroke:var(--blue); stroke-width:1.6; opacity:.6; }
+.arch-edge.search { stroke:var(--blue); stroke-width:2; opacity:.85; }
+.arch-edge.dim { opacity:.045; }
+
+.arch-map-svg .arch-node { cursor:pointer; outline:none; transition:opacity .15s; }
+.arch-map-svg .arch-node rect { fill:#1d2b24; stroke:#3d5548; stroke-width:1.2; vector-effect:non-scaling-stroke;
+  transition:fill .15s,stroke .15s,stroke-width .15s; }
+.arch-map-svg .arch-node:hover rect,.arch-map-svg .arch-node:focus rect { stroke:var(--green); stroke-width:2; fill:#23362c; }
+.arch-map-svg .arch-node-title { fill:var(--text); font-size:11.5px; font-weight:720; pointer-events:none; }
+.arch-map-svg .arch-node-meta { fill:#849a8c; font-size:9px; pointer-events:none; }
+.arch-map-svg .arch-node.agent rect { fill:#21382c; stroke:#50745f; }
+.arch-map-svg .arch-node.tool rect { fill:#152a38; stroke:#63859b; stroke-dasharray:4 3; }
+.arch-map-svg .arch-node.tool .arch-node-meta { fill:#84b6d6; }
+.arch-map-svg .arch-node.protected rect { stroke:var(--yellow); stroke-width:1.8; }
+.arch-node-lock { fill:var(--yellow); font-size:6.7px; font-weight:800; letter-spacing:.7px; pointer-events:none; }
+.arch-node-health.live { fill:var(--green); filter:drop-shadow(0 0 3px #72e09a); }
+.arch-node-health.down { fill:var(--red); filter:drop-shadow(0 0 3px #ff8a83); }
+.arch-map-svg .arch-node.down rect { stroke:var(--red); fill:#382321; }
+.arch-map-svg .arch-node.selected rect { stroke:var(--green); stroke-width:3; fill:#244333; filter:drop-shadow(0 0 7px #72e09a55); }
+.arch-map-svg .arch-node.related-out rect { stroke:var(--green); stroke-width:2.2; }
+.arch-map-svg .arch-node.related-in rect { stroke:var(--yellow); stroke-width:2.2; }
+.arch-map-svg .arch-node.impact rect { stroke:#c7a3ff; }
+.arch-map-svg .arch-node.search-match rect { stroke:var(--blue); stroke-width:2.5; fill:#20394a; }
+.arch-map-svg .arch-node.search-neighbor rect { stroke:#6d90a6; }
+.arch-map-svg .arch-node.dim { opacity:.15; }
+
+.arch-detail { position:sticky; top:12px; max-height:clamp(530px,68vh,760px); overflow:auto; padding:16px; }
+.arch-detail h3 { margin:2px 0 7px; color:var(--text); font-size:18px; line-height:1.18; letter-spacing:-.02em; overflow-wrap:anywhere; }
+.arch-detail .dpath { color:var(--blue); font:10.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; }
+.arch-detail .ddoc { margin:9px 0 0; color:var(--muted); font-size:11.5px; line-height:1.5; }
+.arch-detail dl { display:grid; grid-template-columns:auto 1fr; gap:5px 10px; margin:12px 0; padding-top:11px; border-top:1px solid #ffffff0d; font-size:11px; }
+.arch-detail dt { color:var(--muted); }.arch-detail dd { margin:0; color:var(--text); }
+.arch-detail section { margin-top:14px; }
+.arch-detail h5 { margin:0 0 6px; color:var(--muted); font-size:9.5px; text-transform:uppercase; letter-spacing:.09em; }
+.arch-badges { display:flex; flex-wrap:wrap; gap:5px; }
+.arch-badge { padding:2px 6px; border:1px solid var(--line); border-radius:99px; color:var(--muted); font-size:8.5px; text-transform:uppercase; letter-spacing:.06em; }
+.arch-badge.good { color:var(--green); border-color:#72e09a66; }.arch-badge.bad { color:var(--red); border-color:#ff8a8366; }
+.arch-badge.lock { color:var(--yellow); border-color:#f5cc7566; }
+.arch-impact { display:flex; align-items:center; gap:10px; margin-top:12px; padding:9px 10px; border:1px solid #c7a3ff44; border-radius:9px; background:#2e244066; }
+.arch-impact b { color:#d5baff; font-size:23px; line-height:1; }.arch-impact span { color:#b8a8ce; font-size:10.5px; line-height:1.3; }
+.arch-dep { appearance:none; display:inline-block; max-width:100%; margin:2px 3px 2px 0; padding:3px 7px; overflow:hidden; text-overflow:ellipsis;
+  border:1px solid var(--line); border-radius:6px; background:var(--panel2); color:var(--text); cursor:pointer;
+  font:10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.arch-dep:hover { color:var(--green); border-color:var(--green); }
+.arch-step-tags { display:flex; flex-wrap:wrap; gap:4px; }
+.arch-step-tags button { appearance:none; border:1px solid #4d6979; border-radius:99px; background:#172936; color:var(--blue); padding:3px 7px; cursor:pointer; font:700 9px/1 inherit; }
+.arch-detail-empty h3 { margin-top:4px; }
+.arch-detail-empty p { color:var(--muted); font-size:11.5px; line-height:1.5; }
+.arch-starts { display:flex; flex-direction:column; gap:7px; margin-top:14px; }
+.arch-starts button { appearance:none; display:flex; flex-direction:column; gap:2px; text-align:left; border:1px solid var(--line); border-radius:9px;
+  padding:8px 10px; background:var(--panel2); color:var(--text); cursor:pointer; }
+.arch-starts button:hover { border-color:var(--green); }.arch-starts button b { font-size:11px; }.arch-starts button span { color:var(--muted); font-size:9.5px; }
+
+.arch-history { padding:0; overflow:hidden; }
+.arch-history > summary { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:14px 16px; cursor:pointer; list-style:none; }
+.arch-history > summary::-webkit-details-marker { display:none; }
+.arch-history > summary span { display:flex; flex-direction:column; gap:2px; }
+.arch-history > summary b { font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+.arch-history > summary small { color:var(--muted); font-size:10.5px; }
+.arch-history > summary em { color:var(--blue); font-size:10.5px; font-style:normal; }
+.arch-history[open] > summary { border-bottom:1px solid var(--line); }
+.arch-history-body { padding:13px 16px 16px; }
+.arch-filter { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+.arch-filter button { appearance:none; cursor:pointer; border:1px solid var(--line); border-radius:99px; background:var(--panel2); color:var(--muted);
+  padding:4px 10px; font:700 9.5px/1 inherit; text-transform:uppercase; letter-spacing:.05em; }
+.arch-filter button[aria-pressed="true"] { color:var(--green); border-color:var(--green); }
+.arch-timeline { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:0 18px; max-height:430px; overflow-y:auto; }
+.arch-ev { display:grid; grid-template-columns:54px 1fr; gap:8px; padding:7px 0; border-bottom:1px solid #ffffff0a; }
+.arch-ev .when { color:var(--muted); font-size:9.5px; font-variant-numeric:tabular-nums; }
+.arch-ev .title { color:var(--text); font-size:10.5px; font-weight:680; }
+.arch-ev .detail { margin-top:2px; color:var(--muted); font-size:9.5px; line-height:1.4; overflow-wrap:anywhere; }
+.arch-ev .kind { display:inline-block; margin-right:5px; padding:1px 4px; border-radius:4px; background:#2c4a36; color:var(--green);
+  font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+.arch-ev[data-kind="release"] .kind { color:var(--blue); background:#2b3f55; }.arch-ev[data-kind="canary"] .kind { color:var(--yellow); background:#4a412b; }
+.arch-ev[data-kind="order"] .kind { color:#c9a6ff; background:#3a2f4a; }.arch-ev[data-kind="finding"] .kind { color:#8fd8c0; background:#243a34; }
+.arch-ev .chg { margin-top:2px; font-size:9.5px; }.arch-ev .chg b { color:var(--green); }.arch-ev .chg i { color:var(--red); font-style:normal; }
+
+/* Compact HTML fallback used by tests and by any future non-SVG embedding. */
+div.arch-layer { border:1px solid var(--line); border-radius:12px; padding:11px 12px 12px; margin-bottom:9px; background:rgba(20,30,25,.55); }
+div.arch-layer > header { display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }
+div.arch-layer h3 { margin:0; font-size:11px; }.arch-layer .lnote { color:var(--muted); font-size:10px; }
+.arch-nodes { display:flex; flex-wrap:wrap; gap:7px; }
+button.arch-node,.arch-nodes span.arch-node { appearance:none; display:flex; flex-direction:column; gap:3px; min-width:104px; text-align:left;
+  border:1px solid var(--line); border-radius:9px; padding:7px 9px; background:var(--panel2); color:var(--text); font:650 11px/1.2 inherit; }
+button.arch-node { cursor:pointer; }.arch-node .nloc { color:var(--muted); font-size:9.5px; }.arch-node.protected { border-left:3px solid var(--yellow); }
+
+@media (max-width:1100px) {
+  .arch-workspace { grid-template-columns:minmax(0,1fr); }
+  .arch-detail { position:static; max-height:none; }
+  .arch-toolbar { grid-template-columns:auto minmax(180px,1fr); }
+  .arch-map-controls { grid-column:1/-1; width:max-content; }
+}
+@media (max-width:720px) {
+  .arch-head { flex-direction:column; }.arch-version { align-items:flex-start; text-align:left; }
+  .arch-stats { grid-template-columns:repeat(3,1fr); }
+  .arch-toolbar { grid-template-columns:1fr; align-items:stretch; }.arch-map-controls { grid-column:auto; }
+  .arch-view-switch button { flex:1; }.arch-map-stage { min-height:340px; }
+  .arch-map-svg .arch-layer-note { display:none; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .arch-edge,.arch-map-svg .arch-node,.arch-map-svg .arch-node rect { transition:none; }
+}
+
 /* Coop Rush styles. Inherits the dashboard's palette variables so the tab looks
  * native there, and the standalone export ships the same variables. */
+.cr-page-hero { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:22px;
+  overflow:hidden; background:radial-gradient(420px 170px at 84% 10%,#72e09a1a,transparent 72%),linear-gradient(115deg,#173425,#111e18 62%,#0d1713); }
+.cr-kicker { color:var(--green); font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.16em; }
+.cr-page-hero h2 { margin:5px 0; color:var(--text); font-size:25px; letter-spacing:-.035em; text-transform:none; }
+.cr-page-hero p { margin:0; max-width:70ch; color:var(--muted); font-size:12px; }
+.game-automation { display:grid; grid-template-columns:auto minmax(160px,1fr); gap:12px; align-items:center; min-width:280px; }
+.game-auto-ring { --pct:0%; width:58px; height:58px; display:grid; place-items:center; border-radius:50%;
+  background:radial-gradient(circle at center,#102019 57%,transparent 58%),conic-gradient(var(--green) var(--pct),#26382f 0); }
+.game-auto-ring b { font-size:12px; }
+.game-auto-copy b { display:block; color:var(--green); font-size:14px; }
+.game-auto-copy span { display:block; max-width:260px; color:var(--muted); font-size:10px; line-height:1.4; }
+.game-producers { grid-column:span 8; }
+.game-progress { grid-column:span 4; }
+.cr-section-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:11px; }
+.cr-section-head h2 { margin-bottom:2px; }
+.cr-section-head > div > span { color:var(--muted); font-size:10.5px; }
+.cr-section-badge { flex:0 0 auto; border:1px solid #41624f; border-radius:999px; padding:4px 8px; color:var(--green); font-size:9.5px; font-weight:700; }
+.game-events { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.game-event-list { display:flex; flex-direction:column; gap:6px; }
+.game-event { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; padding:7px 8px; border:1px solid var(--line); border-radius:8px; background:#0b1511; }
+.game-event time { color:#71877b; font-size:8px; }
+.game-event span { color:#a9bbb0; font-size:9.5px; line-height:1.35; }
+.cr-drawer { padding:0 !important; overflow:hidden; }
+.cr-drawer > summary { list-style:none; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:13px 16px; cursor:pointer; color:var(--text); font-size:12px; font-weight:700; }
+.cr-drawer > summary::-webkit-details-marker { display:none; }
+.cr-drawer > summary:after { content:"+"; display:grid; place-items:center; width:22px; height:22px; border:1px solid var(--line); border-radius:7px; color:var(--muted); font-size:15px; }
+.cr-drawer[open] > summary:after { content:"−"; }
+.cr-drawer > summary span { margin-left:auto; color:var(--muted); font-size:10px; font-weight:400; }
+.cr-drawer-body { padding:14px 16px 16px; border-top:1px solid #ffffff0d; }
+.cr-ach-record-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(250px,.75fr); gap:16px; }
 .cr-hud { display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap; align-items:flex-end; }
 .cr-hud-main { display:flex; gap:26px; flex-wrap:wrap; }
 .cr-stat label { display:block; color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.08em; }
@@ -643,7 +1095,14 @@ button.te-row.selected { box-shadow:inset 3px 0 #76d99c; }
 @keyframes crtoast { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 
 @media (max-width:900px) {
-  .cr-prod { grid-template-columns:48px 1fr; }
+  .cr-page-hero { grid-template-columns:1fr; }
+  .game-automation { min-width:0; }
+  .game-producers,.game-progress { grid-column:1/-1; }
+  .cr-ach-record-grid { grid-template-columns:1fr; }
+  .cr-prod { grid-template-columns:48px minmax(0,1fr); }
+  .cr-prod-meta { display:block; }
+  .cr-prod-meta > span:first-child { display:block; white-space:normal; overflow-wrap:anywhere; }
+  .cr-ups-wide { grid-template-columns:1fr; }
   .cr-prod-buy { grid-column:1/-1; flex-direction:row; }
   .cr-prod-buy .cr-btn { flex:1; }
   .cr-advice-card { grid-template-columns:26px 1fr; }
@@ -658,6 +1117,475 @@ button.te-row.selected { box-shadow:inset 3px 0 #76d99c; }
   .cr-spark { display:none; }
   .cr-prod-icon, .cr-track i, .cr-milestone i, .cr-prestige-track i { transition:none; }
 }
+
+/* Operator workspace ---------------------------------------------------------
+ * Shared visual system for every dashboard tab except Architecture. Architecture
+ * owns its renderer and CSS; only the universal app header/navigation surround it.
+ * The goal here is hierarchy rather than decoration: current state first, change
+ * second, autonomous decision third, raw evidence behind deliberate disclosure.
+ */
+
+:root {
+  --bg:#09110e;
+  --panel:#111c17;
+  --panel2:#17261f;
+  --panel3:#0c1511;
+  --line:#294036;
+  --line-strong:#3b5b4b;
+  --text:#f1f8f3;
+  --muted:#96aa9e;
+  --green:#70e19b;
+  --green-soft:#70e19b18;
+  --yellow:#f3c969;
+  --yellow-soft:#f3c96916;
+  --red:#ff887f;
+  --red-soft:#ff887f15;
+  --blue:#89c8ff;
+  --blue-soft:#89c8ff15;
+  --violet:#b7a6ff;
+  --shadow:0 18px 55px #0000002b;
+}
+
+body {
+  background:
+    radial-gradient(900px 440px at 12% -8%,#1c402d 0,transparent 68%),
+    radial-gradient(800px 420px at 96% 2%,#163026 0,transparent 70%),
+    var(--bg);
+}
+main { max-width:1500px; padding:22px clamp(16px,2.6vw,36px) 48px; }
+
+/* Universal shell ----------------------------------------------------------- */
+.app-header { display:flex; justify-content:space-between; align-items:center; gap:24px; margin:0 0 16px; }
+.app-brand { display:flex; align-items:center; gap:12px; min-width:0; }
+.brand-mark { width:42px; height:42px; flex:0 0 42px; display:grid; place-items:center; border:1px solid #4b735d;
+  border-radius:13px; background:linear-gradient(145deg,#224b34,#12261c); box-shadow:inset 0 1px #ffffff1a,0 10px 30px #0004;
+  font-size:22px; }
+.brand-copy { min-width:0; }
+.brand-kicker { color:var(--green); font-size:9px; font-weight:800; letter-spacing:.17em; text-transform:uppercase; }
+.app-header h1 { margin:1px 0 0; font-size:24px; line-height:1.05; letter-spacing:-.035em; }
+.app-header .subtitle { margin-top:4px; font-size:11.5px; }
+.header-meta { display:flex; align-items:center; justify-content:flex-end; gap:12px; min-width:0; }
+.system-state { display:inline-flex; align-items:center; gap:8px; border:1px solid var(--line-strong); border-radius:999px;
+  background:#13231b; color:var(--green); padding:7px 11px; font-size:11px; font-weight:750; white-space:nowrap; }
+.system-state:before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; box-shadow:0 0 11px currentColor; }
+.system-state.watch { color:var(--yellow); background:#2a2314; border-color:#665631; }
+.system-state.attention { color:var(--red); background:#2b1715; border-color:#6b3935; }
+.header-meta .refresh { max-width:410px; line-height:1.45; }
+
+.autonomy-ribbon { display:grid; grid-template-columns:minmax(220px,1.45fr) repeat(3,minmax(150px,1fr));
+  min-height:74px; margin-bottom:12px; border:1px solid var(--line); border-radius:15px; overflow:hidden;
+  background:linear-gradient(100deg,#12231a,#0e1814); box-shadow:0 10px 34px #0002; }
+.auto-cell { min-width:0; display:grid; grid-template-columns:30px minmax(0,1fr); gap:9px; align-items:center;
+  padding:11px 14px; border-right:1px solid var(--line); }
+.auto-cell:last-child { border-right:0; }
+.auto-icon { width:30px; height:30px; display:grid; place-items:center; border:1px solid #395746; border-radius:9px;
+  color:var(--green); background:#172a20; font-size:14px; }
+.auto-copy { min-width:0; }
+.auto-copy small { display:block; color:var(--muted); font-size:8.5px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
+.auto-copy b { display:block; margin-top:2px; font-size:12px; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.auto-copy span { display:block; color:var(--muted); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.auto-cell.primary { background:linear-gradient(105deg,#183325,#101b16); }
+.auto-cell.primary .auto-icon { color:#08120d; background:var(--green); border-color:var(--green); }
+.auto-cell.watch .auto-icon { color:var(--yellow); border-color:#67552e; background:#302711; }
+.auto-cell.attention .auto-icon { color:var(--red); border-color:#6f3933; background:#301817; }
+
+nav.tabs { position:sticky; top:0; z-index:30; display:grid; grid-template-columns:repeat(8,minmax(74px,1fr)); gap:4px;
+  margin:0 0 16px; padding:5px; border:1px solid var(--line); border-radius:13px; background:#0b1410e8;
+  box-shadow:0 8px 28px #0003; backdrop-filter:blur(16px); overflow:visible; }
+nav.tabs button { min-width:0; display:flex; justify-content:center; align-items:center; gap:7px; border:1px solid transparent;
+  border-radius:9px; padding:8px 8px; font-size:11.5px; line-height:1.1; }
+nav.tabs button:hover { background:#ffffff08; border-color:#ffffff0c; }
+nav.tabs button[aria-selected="true"] { color:var(--text); border-color:#3e654f; background:linear-gradient(180deg,#244331,#1a3024);
+  box-shadow:inset 0 1px #ffffff12,0 5px 16px #0002; }
+nav.tabs button[aria-selected="true"]:after { content:""; position:absolute; align-self:flex-end; margin-bottom:-10px; width:24px;
+  height:2px; border-radius:2px; background:var(--green); box-shadow:0 0 8px var(--green); }
+.tab-icon { font-size:13px; opacity:.9; }
+.tab-key { margin-left:2px; padding:1px 4px; border:0; background:#ffffff08; color:#789083; font-size:8px; }
+nav.tabs button[aria-selected="true"] .tab-key { color:#a9c9b6; }
+
+/* Operator primitives ------------------------------------------------------- */
+.operator-tab .grid { gap:12px; }
+.operator-tab .card { background:linear-gradient(180deg,#14211bfa,#101a16fa); border-color:var(--line); border-radius:15px;
+  padding:16px; box-shadow:0 10px 34px #00000020; }
+.operator-tab .card:hover { border-color:#345142; }
+.operator-tab .card h2 { margin-bottom:11px; color:#dce9e1; font-size:12px; text-transform:none; letter-spacing:.01em; }
+.operator-tab .card h2 small { color:var(--muted); }
+.operator-tab .subtitle,.operator-tab .method,.operator-tab .hint { color:var(--muted); }
+.operator-tab .big { font-size:36px; }
+.operator-tab .metrics { gap:9px; margin-top:12px; }
+.operator-tab .metric { min-width:0; }
+.operator-tab .metric label { color:#82988b; font-size:9px; letter-spacing:.08em; text-transform:uppercase; }
+.operator-tab .metric strong { font-size:18px; line-height:1.2; overflow-wrap:anywhere; }
+.operator-tab .kv { gap:6px 16px; }
+.operator-tab .kv div { min-width:0; padding:5px 0; }
+.operator-tab .kv span:last-child { overflow-wrap:anywhere; }
+
+.page-hero { grid-column:1/-1; position:relative; min-height:118px; display:grid; grid-template-columns:minmax(0,1fr) auto;
+  align-items:center; gap:24px; overflow:hidden; border:1px solid #335441; border-radius:17px; padding:20px 22px;
+  background:
+    radial-gradient(460px 180px at 82% 25%,#70e19b18,transparent 72%),
+    linear-gradient(115deg,#173425,#111e18 62%,#0d1713); box-shadow:var(--shadow); }
+.page-hero:before { content:""; position:absolute; inset:0; pointer-events:none; opacity:.13;
+  background:repeating-linear-gradient(118deg,transparent 0 42px,#ffffff08 43px,#ffffff08 44px); }
+.page-hero > * { position:relative; }
+.page-kicker { color:var(--green); font-size:9px; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }
+.page-hero h2 { margin:5px 0 5px; color:var(--text); font-size:25px; line-height:1.06; letter-spacing:-.035em; text-transform:none; }
+.page-hero p { max-width:76ch; margin:0; color:#a7bbb0; font-size:12px; line-height:1.55; }
+.hero-verdict { min-width:190px; text-align:right; }
+.hero-verdict b { display:block; color:var(--green); font-size:17px; }
+.hero-verdict span { display:block; color:var(--muted); font-size:10.5px; margin-top:3px; }
+.hero-verdict.watch b { color:var(--yellow); }
+.hero-verdict.attention b { color:var(--red); }
+
+.delta-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; }
+.delta { display:inline-flex; align-items:center; gap:6px; border:1px solid #355344; border-radius:999px; padding:4px 8px;
+  background:#0b1711a6; color:#adc1b5; font-size:10px; }
+.delta b { color:var(--text); font-variant-numeric:tabular-nums; }
+.delta.good b { color:var(--green); }
+.delta.watch b { color:var(--yellow); }
+.delta.bad b { color:var(--red); }
+
+.audit-drawer { grid-column:1/-1; padding:0 !important; overflow:hidden; }
+.audit-drawer > summary { list-style:none; display:flex; align-items:center; justify-content:space-between; gap:14px;
+  padding:13px 16px; cursor:pointer; color:#cddbd2; font-size:12px; font-weight:700; }
+.audit-drawer > summary::-webkit-details-marker { display:none; }
+.audit-drawer > summary:after { content:"+"; display:grid; place-items:center; width:22px; height:22px; border:1px solid var(--line);
+  border-radius:7px; color:var(--muted); font-size:15px; }
+.audit-drawer[open] > summary:after { content:"−"; }
+.audit-drawer > summary span { color:var(--muted); font-size:10px; font-weight:450; }
+.audit-drawer > .drawer-body { padding:0 16px 16px; border-top:1px solid #ffffff0b; }
+.audit-drawer > .drawer-body > :first-child { margin-top:14px; }
+
+.lifecycle { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+.life-step { position:relative; min-width:0; border:1px solid var(--line); border-radius:11px; padding:11px;
+  background:#0c1612; }
+.life-step:after { content:""; position:absolute; top:26px; left:100%; width:9px; border-top:1px dashed #456051; }
+.life-step:last-child:after { display:none; }
+.life-step small { display:block; color:#758b7e; font-size:8px; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
+.life-step b { display:block; margin:4px 0 3px; color:#dce8e0; font-size:11.5px; }
+.life-step span { display:block; color:var(--muted); font-size:9.5px; line-height:1.4; }
+.life-step.done { border-color:#356047; background:#11251a; }
+.life-step.done small,.life-step.done b { color:var(--green); }
+.life-step.active { border-color:#69572e; background:#282211; box-shadow:inset 0 0 18px #f3c9690c; }
+.life-step.active small,.life-step.active b { color:var(--yellow); }
+.life-step.failed { border-color:#6b3833; background:#281615; }
+.life-step.failed small,.life-step.failed b { color:var(--red); }
+
+/* Overview ----------------------------------------------------------------- */
+.operator-tab .hero { grid-template-columns:repeat(5,minmax(0,1fr)); border-radius:15px; border-color:var(--line); }
+.operator-tab .hero-cell { border-bottom:0; background:linear-gradient(180deg,#14231c,#101a16); padding:13px 14px; }
+.operator-tab .hero-cell:last-child { border-right:0; }
+.operator-tab .hero-cell label { color:#82998b; font-size:8.5px; font-weight:750; }
+.operator-tab .hero-cell strong { font-size:25px; }
+.operator-tab .hero-cell small { font-size:10px; }
+.operator-tab .spark { height:21px; }
+.overview-farm { grid-column:span 8 !important; }
+.cycle-story-card { grid-column:span 4; }
+.cycle-story-card .lifecycle { grid-template-columns:1fr; }
+.cycle-story-card .life-step:after { top:100%; left:25px; width:0; height:9px; border-top:0; border-left:1px dashed #456051; }
+.cycle-story-card .life-step { display:grid; grid-template-columns:54px minmax(0,1fr); gap:2px 9px; padding:9px 10px; }
+.cycle-story-card .life-step small { grid-row:1/3; align-self:center; }
+.cycle-story-card .life-step b { margin:0; }
+.overview-support { grid-column:span 4; }
+.operator-tab .scene { padding:12px; }
+.operator-tab .pens { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.operator-tab .pen { padding:8px 9px; }
+.operator-tab .herd { min-height:24px; }
+.operator-tab .scene-ground { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.operator-tab .grand-prix { padding:18px; }
+.competition-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:16px; align-items:stretch; }
+.operator-tab .gp-chart { height:235px; margin-top:8px; }
+.competition-side { min-width:0; border-left:1px solid var(--line); padding-left:15px; }
+.competition-side h3 { margin:0 0 9px; color:var(--muted); font-size:9px; letter-spacing:.1em; text-transform:uppercase; }
+.competition-side .race { gap:9px; }
+.gp-standings { margin-top:10px; border-top:1px solid #ffffff0c; }
+.gp-standings summary { cursor:pointer; padding:10px 0 0; color:var(--muted); font-size:10.5px; }
+.gp-standings .gp-legend { margin-top:9px; }
+.strategy-card { grid-column:span 4; }
+.trend-card { grid-column:span 8; }
+
+/* Pipeline ----------------------------------------------------------------- */
+.run-command { grid-column:1/-1; display:grid; grid-template-columns:1.25fr 1fr .85fr; gap:0; padding:0 !important; overflow:hidden; }
+.run-command > section { min-width:0; padding:15px 16px; border-right:1px solid var(--line); }
+.run-command > section:last-child { border-right:0; }
+.run-command .run-primary { background:linear-gradient(125deg,#173124,#101a16); }
+.run-command .metrics { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.run-command .metric strong { font-size:15px; }
+.run-command .budget { margin-top:12px; }
+.run-command h2 { margin:0 0 9px; }
+.pipeline-decision { grid-column:1/-1; display:grid; grid-template-columns:minmax(230px,.72fr) minmax(0,1.5fr); gap:16px; align-items:center; }
+.decision-copy h3 { margin:3px 0 5px; font-size:17px; letter-spacing:-.02em; }
+.decision-copy p { margin:0; color:var(--muted); font-size:11px; line-height:1.5; }
+.guardrail-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+.guardrail { border:1px solid var(--line); border-radius:10px; padding:9px 10px; background:#0b1511; }
+.guardrail small { display:block; color:#7f9588; font-size:8px; font-weight:750; letter-spacing:.09em; text-transform:uppercase; }
+.guardrail b { display:block; margin-top:3px; font-size:14px; }
+.guardrail span { display:block; color:var(--muted); font-size:9px; margin-top:2px; }
+.guardrail.good b { color:var(--green); }
+.guardrail.watch b { color:var(--yellow); }
+.guardrail.bad b { color:var(--red); }
+.operator-tab .trace { padding:14px; }
+.operator-tab .trace-sub { max-width:none; font-size:10.5px; }
+.trace-explain { margin-top:7px; }
+.trace-explain summary { color:var(--muted); cursor:pointer; font-size:10px; }
+.operator-tab .trace-explorer { margin-top:10px; }
+.judgement-card { grid-column:1/-1; }
+.operator-tab .signal-kv { display:none; }
+
+/* Healing ------------------------------------------------------------------ */
+.healing-outcomes { grid-column:1/-1; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); padding:0 !important; overflow:hidden; }
+.outcome { min-width:0; padding:14px 16px; border-right:1px solid var(--line); }
+.outcome:last-child { border-right:0; }
+.outcome small { display:block; color:#7f9588; font-size:8.5px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+.outcome b { display:block; margin:3px 0; font-size:25px; letter-spacing:-.035em; }
+.outcome span { display:block; color:var(--muted); font-size:9.5px; }
+.outcome.primary { background:linear-gradient(125deg,#173425,#101b16); }
+.outcome.primary b { color:var(--green); }
+.latest-remedy { grid-column:span 8; }
+.safeguards { grid-column:span 4; }
+.remedy-feature { display:grid; grid-template-columns:42px minmax(0,1fr); gap:12px; align-items:start; }
+.remedy-icon { width:42px; height:42px; display:grid; place-items:center; border:1px solid #42634f; border-radius:12px;
+  background:#183022; color:var(--green); font-size:19px; }
+.remedy-feature h3 { margin:0 0 4px; font-size:16px; }
+.remedy-feature p { margin:0; color:var(--muted); font-size:11px; line-height:1.5; }
+.remedy-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
+.healing-loop-card { grid-column:1/-1; }
+.healing-classes-card { grid-column:span 8; }
+.healing-runs-card { grid-column:span 4; }
+.operator-tab .healclass { display:block; padding:0; border-bottom:1px solid #ffffff0d; }
+.operator-tab details.healclass > summary { list-style:none; display:grid; grid-template-columns:minmax(145px,.65fr) minmax(0,1.5fr) 20px; gap:12px; align-items:center; padding:10px 2px; cursor:pointer; }
+.operator-tab details.healclass > summary::-webkit-details-marker { display:none; }
+.operator-tab details.healclass > summary:after { content:"+"; grid-column:3; grid-row:1; color:var(--muted); font-size:15px; }
+.operator-tab details.healclass[open] > summary:after { content:"−"; }
+.operator-tab .healclass .top { display:block; }
+.operator-tab .healclass .n { display:block; margin-top:2px; font-size:9.5px; }
+.operator-tab .healclass .what { display:block; margin:0; color:var(--muted); font-size:10.5px; }
+.operator-tab .heal-evidence { padding:0 2px 10px 157px; }
+.operator-tab .relax-row { display:grid; grid-template-columns:minmax(145px,.65fr) minmax(0,1.5fr); gap:12px; padding:10px 2px; }
+
+/* Cost history ------------------------------------------------------------- */
+.operator-tab .cost-hero { grid-template-columns:repeat(6,minmax(0,1fr)); }
+.history-chart-card { grid-column:1/-1; }
+.history-story { grid-column:span 8; }
+.history-method { grid-column:span 4; }
+.operator-tab .change-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.operator-tab .change-list:before { display:none; }
+.operator-tab .change-step { appearance:none; display:grid; grid-template-columns:34px minmax(0,1fr); gap:9px; padding:10px;
+  border:1px solid var(--line); border-radius:11px; background:#0b1511; color:var(--text); text-align:left; font:inherit; cursor:pointer; }
+.operator-tab .change-step:hover,.operator-tab .change-step.selected { border-color:#4c745d; background:#12241a; }
+.operator-tab .change-icon { width:32px; height:32px; border-width:1px; font-size:15px; }
+.operator-tab .change-head b { font-size:11.5px; }
+.operator-tab .change-head span { font-size:8px; }
+.operator-tab .change-body p,.operator-tab .change-copy { display:block; margin:4px 0; color:var(--muted); font-size:10px; line-height:1.4; }
+.operator-tab .change-impact { display:-webkit-box; margin-top:5px; overflow:hidden; color:var(--green); font-size:9px; line-height:1.4; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
+.operator-tab .change-code { display:none; font-size:9px; }
+.operator-tab .change-step .change-copy { display:none; }
+.operator-tab .change-step.selected .change-copy,.operator-tab .change-step.selected .change-code { display:block; }
+.operator-tab .monthly strong { font-size:28px; }
+.operator-tab .ledger-dots { gap:3px; margin:12px 0; }
+
+/* Findings ----------------------------------------------------------------- */
+.knowledge-flow { grid-column:1/-1; display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); padding:0 !important; overflow:hidden; }
+.knowledge-node { position:relative; min-width:0; padding:13px 14px; border-right:1px solid var(--line); }
+.knowledge-node:last-child { border-right:0; }
+.knowledge-node:after { content:"→"; position:absolute; right:-8px; top:25px; z-index:2; display:grid; place-items:center;
+  width:16px; height:16px; border:1px solid var(--line); border-radius:50%; background:#111c17; color:#60766a; font-size:9px; }
+.knowledge-node:last-child:after { display:none; }
+.knowledge-node small { color:#7f9588; font-size:8px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+.knowledge-node b { display:block; margin:3px 0; font-size:20px; }
+.knowledge-node span { display:block; color:var(--muted); font-size:9.5px; }
+.finding-model { grid-column:span 8 !important; }
+.claim-disclosure { margin:7px 0 0; }
+.claim-disclosure summary { cursor:pointer; color:var(--muted); font-size:10px; }
+.claim-disclosure .method { padding:8px 10px; border:1px solid var(--line); border-radius:9px; background:#0b1511; }
+.strategy-brief { grid-column:span 4; }
+.strategy-verdict { border:1px solid #365d46; border-radius:12px; padding:12px; background:#10241a; }
+.strategy-verdict strong { display:block; color:var(--green); font-size:17px; }
+.strategy-verdict p { margin:5px 0 0; color:#a9bdb1; font-size:11px; line-height:1.5; }
+.strategy-facts { margin-top:11px; }
+.sidebar-research { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.sidebar-research .activity-feed { grid-template-columns:1fr; }
+.sidebar-research .activity-item { grid-template-columns:27px minmax(0,1fr); }
+.sidebar-research .activity-phase { width:27px; height:27px; }
+.sidebar-research .activity-item time { grid-column:2; }
+.sidebar-research .activity-item:nth-child(n+4) { display:none; }
+.knowledge-control { grid-column:1/-1; }
+.knowledge-control #ev-knowledge-stats { grid-template-columns:repeat(4,minmax(0,1fr)); min-width:min(620px,100%); margin:0; }
+.knowledge-control #ev-knowledge-stats .metric strong { font-size:12px !important; }
+.knowledge-control .twoup { grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr); }
+.claim-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:0 0 9px; }
+.claim-toolbar .chips { margin:0; }
+.claim-list,.question-list { max-height:520px; overflow:auto; padding-right:3px; scrollbar-color:#345043 #0c1511; }
+.claim-list.filter-accepted [data-claim-status]:not([data-claim-status="accepted"]),
+.claim-list.filter-recheck [data-claim-status]:not([data-claim-status="recheck"]),
+.claim-list.filter-superseded [data-claim-status]:not([data-claim-status="superseded"]) { display:none; }
+.operator-tab .claim-card,.operator-tab .question-card { margin-bottom:7px !important; padding:10px 11px; }
+.operator-tab .claim-card b,.operator-tab .question-card b { font-size:11.5px; }
+.operator-tab .claim-card .method,.operator-tab .question-card .method { margin-top:3px; font-size:10px; }
+.question-list:not(.expanded) .question-card:nth-of-type(n+6) { display:none; }
+.question-toggle { width:100%; margin-top:7px; }
+.research-motion { grid-column:1/-1; }
+.activity-feed { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.activity-item { display:grid; grid-template-columns:31px minmax(0,1fr) auto; gap:9px; align-items:start; border:1px solid var(--line);
+  border-radius:11px; padding:9px 10px; background:#0b1511; }
+.activity-phase { width:31px; height:31px; display:grid; place-items:center; border:1px solid #3c5d49; border-radius:9px;
+  color:var(--green); background:#14281d; font-size:12px; }
+.activity-item.observe .activity-phase { color:var(--blue); border-color:#38536a; background:#112232; }
+.activity-item.research .activity-phase { color:var(--violet); border-color:#554c76; background:#201d35; }
+.activity-item.attention .activity-phase { color:var(--yellow); border-color:#69572e; background:#2a2312; }
+.activity-item b { display:block; font-size:11px; }
+.activity-item p { margin:3px 0 0; color:var(--muted); font-size:9.5px; line-height:1.4; }
+.activity-item time { color:#71877b; font-size:8.5px; white-space:nowrap; }
+.secondary-findings { grid-column:1/-1; }
+.operator-tab .timeline .tl:nth-child(n+8) { display:none; }
+
+/* Switchboard --------------------------------------------------------------- */
+.wire-brief { grid-column:1/-1; }
+.operator-tab .wire { padding:14px; }
+.wire-context { margin-top:5px; }
+.wire-context summary { cursor:pointer; color:var(--muted); font-size:10px; }
+.operator-tab .mcp-wire { margin-top:10px; }
+.operator-tab .mw-stats { grid-template-columns:repeat(6,minmax(0,1fr)); }
+.operator-tab .mw-stat { padding:10px 11px; }
+.operator-tab .mw-stat b { font-size:17px; }
+.operator-tab .mw-stage { padding-top:10px; }
+.operator-tab .mw-lane { padding-top:2px; padding-bottom:4px; }
+.mw-silent-group { margin:6px 8px 2px; border:1px dashed #31483b; border-radius:9px; overflow:hidden; }
+.mw-silent-group > summary { cursor:pointer; padding:8px 10px; color:var(--muted); font-size:10px; }
+.mw-silent-group .mw-lane { border-top:1px solid #ffffff08; border-radius:0; }
+
+/* Coop Rush ---------------------------------------------------------------- */
+.game-state { grid-column:1/-1; }
+.game-automation { display:grid; grid-template-columns:auto minmax(160px,1fr); gap:12px; align-items:center; min-width:260px; }
+.game-auto-ring { --pct:0%; width:58px; height:58px; display:grid; place-items:center; border-radius:50%;
+  background:radial-gradient(circle at center,#102019 57%,transparent 58%),conic-gradient(var(--green) var(--pct),#26382f 0); }
+.game-auto-ring b { font-size:12px; }
+.game-auto-copy { text-align:left; }
+.game-auto-copy b { display:block; color:var(--green); font-size:14px; }
+.game-auto-copy span { display:block; color:var(--muted); font-size:10px; }
+.operator-tab .cr-hud { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; padding:0 !important; }
+.operator-tab .cr-hud-main { display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)); gap:0; }
+.operator-tab .cr-stat { min-width:0; padding:14px 15px; border-right:1px solid var(--line); }
+.operator-tab .cr-stat strong,.operator-tab .cr-stat.big-stat strong { font-size:25px; }
+.operator-tab .cr-hud-buy { height:100%; justify-content:center; padding:13px 15px; background:#0c1612; }
+.operator-tab .cr-advice-card { border-color:#3c654e; background:linear-gradient(105deg,#173124,#111c17); }
+.operator-tab .cr-prods { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+.operator-tab .cr-prod { grid-template-columns:48px minmax(0,1fr); gap:10px; padding:10px; }
+.operator-tab .cr-prod-buy { grid-column:1/-1; flex-direction:row; }
+.operator-tab .cr-prod-buy .cr-btn { flex:1 1 0; }
+.operator-tab .cr-note { display:none; }
+.game-progress { grid-column:span 4; }
+.game-producers { grid-column:span 8; }
+.game-events { margin-top:14px; }
+.game-event-list { display:flex; flex-direction:column; gap:6px; }
+.game-event { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; padding:7px 8px; border:1px solid var(--line);
+  border-radius:8px; background:#0b1511; }
+.game-event time { color:#71877b; font-size:8px; }
+.game-event span { color:#a9bbb0; font-size:9.5px; }
+.game-lower { grid-column:1/-1; }
+
+/* Responsive --------------------------------------------------------------- */
+@media (max-width:1180px) {
+  .tab-key { display:none; }
+  .autonomy-ribbon { grid-template-columns:1.3fr repeat(3,1fr); }
+  .operator-tab .hero { grid-template-columns:repeat(6,minmax(0,1fr)); }
+  .operator-tab .hero-cell { grid-column:span 2; border-bottom:1px solid var(--line); }
+  .operator-tab .hero-cell:nth-last-child(-n+2) { grid-column:span 3; border-bottom:0; }
+  .competition-workspace { grid-template-columns:minmax(0,1fr) 220px; }
+  .run-command { grid-template-columns:1.15fr 1fr; }
+  .run-command > section:nth-child(2) { border-right:0; }
+  .run-command > section:last-child { grid-column:1/-1; border-top:1px solid var(--line); }
+  .operator-tab .cr-hud { grid-template-columns:1fr; }
+  .operator-tab .cr-hud-buy { align-items:flex-start; }
+}
+
+@media (max-width:930px) {
+  main { padding:16px; }
+  .app-header { display:flex; }
+  .header-meta .refresh { display:none; }
+  .autonomy-ribbon { grid-template-columns:1.2fr 1fr; }
+  .auto-cell:nth-child(2) { border-right:0; }
+  .auto-cell:nth-child(n+3) { border-top:1px solid var(--line); }
+  nav.tabs { grid-template-columns:repeat(8,minmax(68px,1fr)); }
+  nav.tabs button { padding:8px 5px; font-size:10px; gap:4px; }
+  .page-hero { grid-template-columns:minmax(0,1fr) auto; gap:16px; }
+  .hero-verdict { min-width:175px; }
+  .game-progress,.game-producers { grid-column:1/-1 !important; }
+  .competition-workspace { grid-template-columns:minmax(0,1fr) 220px; }
+  .run-command { grid-template-columns:1.15fr 1fr; }
+  .run-command > section { border-right:1px solid var(--line); border-bottom:0; }
+  .run-command > section:nth-child(2) { border-right:0; }
+  .run-command > section:last-child { grid-column:1/-1; border-top:1px solid var(--line); border-right:0; }
+  .pipeline-decision { grid-template-columns:1fr; }
+  .operator-tab .cost-hero { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .operator-tab .cost-hero .hero-cell { grid-column:auto; }
+  .operator-tab .change-list { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .knowledge-control .twoup { grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr); }
+  .claim-list,.question-list { max-height:420px; }
+  .operator-tab .mw-stats { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .operator-tab .cr-hud-main { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .operator-tab .cr-prods { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+@media (max-width:720px) {
+  .app-header { align-items:flex-start; }
+  .brand-kicker,.app-header .subtitle { display:none; }
+  .header-meta { align-self:center; }
+  .autonomy-ribbon { grid-template-columns:1fr; }
+  .auto-cell { border-right:0; border-top:1px solid var(--line); }
+  .auto-cell:first-child { border-top:0; }
+  nav.tabs { display:flex; overflow-x:auto; justify-content:flex-start; scrollbar-width:none; }
+  nav.tabs::-webkit-scrollbar { display:none; }
+  nav.tabs button { flex:0 0 auto; min-width:78px; }
+  .page-hero { grid-template-columns:1fr; padding:17px; }
+  .run-command { grid-template-columns:1fr; }
+  .run-command > section { border-right:0; border-bottom:1px solid var(--line); }
+  .run-command > section:last-child { grid-column:auto; border-top:0; border-bottom:0; }
+  .page-hero .hero-verdict { min-width:0; text-align:left; }
+  .overview-farm,.cycle-story-card,.overview-support,.strategy-card,.trend-card,
+  .latest-remedy,.safeguards,.healing-classes-card,.healing-runs-card,
+  .history-story,.history-method,.finding-model,.strategy-brief { grid-column:1/-1 !important; }
+  .competition-workspace { grid-template-columns:1fr; }
+  .competition-side { border-left:0; border-top:1px solid var(--line); padding:12px 0 0; }
+  .page-hero h2 { font-size:22px; }
+  .operator-tab .hero { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .operator-tab .hero-cell,.operator-tab .hero-cell:nth-last-child(-n+2) { grid-column:auto; border-bottom:1px solid var(--line); }
+  .operator-tab .hero-cell:first-child { grid-column:1/-1; }
+  .operator-tab .hero-cell:last-child { border-bottom:0; }
+  .operator-tab .pens { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .operator-tab .scene-ground { grid-template-columns:1fr; }
+  .lifecycle,.guardrail-grid { grid-template-columns:1fr 1fr; }
+  .life-step:nth-child(2):after { display:none; }
+  .run-command .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .healing-outcomes { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .outcome:nth-child(2) { border-right:0; }
+  .outcome:nth-child(-n+2) { border-bottom:1px solid var(--line); }
+  .operator-tab .cost-hero { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .operator-tab .change-list { grid-template-columns:1fr; }
+  .knowledge-control .twoup { grid-template-columns:1fr; }
+  .knowledge-control #ev-knowledge-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .knowledge-flow { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .knowledge-node { border-bottom:1px solid var(--line); }
+  .knowledge-node:nth-child(2n) { border-right:0; }
+  .knowledge-node:nth-child(2n):after { display:none; }
+  .knowledge-node:last-child { grid-column:1/-1; border-bottom:0; }
+  .activity-feed { grid-template-columns:1fr; }
+  .operator-tab .mw-stage { grid-template-columns:1fr; }
+  .operator-tab .mw-rail { display:grid; grid-template-columns:repeat(4,minmax(100px,1fr)); overflow:auto; border-right:0; border-bottom:1px dashed #2b4034; padding:8px; }
+  .operator-tab .mw-rail-head { grid-column:1/-1; }
+  .operator-tab .mw-server { display:none; }
+  .operator-tab .mw-lane { grid-template-columns:140px minmax(180px,1fr); }
+  .operator-tab .mw-lane-meter { left:148px; }
+  .operator-tab .mw-lanes { overflow-x:auto; }
+  .operator-tab .cr-hud-main { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .operator-tab .cr-prods { grid-template-columns:1fr; }
+  .operator-tab .cr-stat { border-bottom:1px solid var(--line); }
+  .game-automation { min-width:0; }
+}
+
+@media (prefers-reduced-motion:reduce) {
+  nav.tabs,.operator-tab .card { transition:none; }
+}
 body { padding-bottom:20px; }
 main { max-width:1400px; }
 .tab { display:block !important; }
@@ -671,111 +1599,63 @@ main { max-width:1400px; }
   </div>
   <div class="refresh">Standalone build &middot; no server, no network<br>Progress saves in this browser</div>
 </header>
-<div class="tab" id="tab-game">
+<div class="tab operator-tab" id="tab-game">
 <section class="grid">
+  <div class="card cr-page-hero full">
+    <div>
+      <div class="cr-kicker">Idle farm · automation is the progression</div>
+      <h2>Build it once. Let it run.</h2>
+      <p>Start cycles by hand, hire managers, then optimize a farm that keeps producing without you.</p>
+    </div>
+    <div class="game-automation">
+      <div class="game-auto-ring" id="cr-auto-ring"><b id="cr-auto-pct">0%</b></div>
+      <div class="game-auto-copy"><b id="cr-auto-state">Manual setup</b><span id="cr-auto-detail">Hire your first manager to begin autonomous production.</span></div>
+    </div>
+  </div>
+
   <div class="card cr-hud full">
     <div class="cr-hud-main">
-      <div class="cr-stat big-stat">
-        <label>Produce this run</label>
-        <strong id="cr-units">0</strong>
-        <small><span id="cr-ups">0/s</span> &middot; multiplier <span id="cr-mult">x1</span></small>
-      </div>
-      <div class="cr-stat big-stat">
-        <label>Coins</label>
-        <strong id="cr-coins">0</strong>
-        <small>produce sells at 2c, as it does on the real farm</small>
-      </div>
-      <div class="cr-stat">
-        <label>Heirloom hens &#128035;</label>
-        <strong id="cr-heirlooms">0</strong>
-        <small><span id="cr-rate">2%</span> produce each &middot; <span id="cr-rebuilds">0</span> rebuilds</small>
-      </div>
-      <div class="cr-stat">
-        <label>All-time produce</label>
-        <strong id="cr-alltime">0</strong>
-        <small>best single run <span id="cr-best">0</span></small>
-      </div>
-      <div class="cr-stat cr-stat-vs">
-        <label>Versus the real farm</label>
-        <strong id="cr-vs-real">0x</strong>
-        <small>the real one plateaued at 1,550 per <b>minute</b></small>
-      </div>
+      <div class="cr-stat big-stat"><label>Produce this run</label><strong id="cr-units">0</strong><small><span id="cr-ups">0/s</span> &middot; multiplier <span id="cr-mult">x1</span></small></div>
+      <div class="cr-stat big-stat"><label>Coins</label><strong id="cr-coins">0</strong><small>2 coins per produce in this game economy</small></div>
+      <div class="cr-stat"><label>Heirloom hens &#128035;</label><strong id="cr-heirlooms">0</strong><small><span id="cr-rate">2%</span> each &middot; <span id="cr-rebuilds">0</span> rebuilds</small></div>
+      <div class="cr-stat"><label>All-time produce</label><strong id="cr-alltime">0</strong><small>best run <span id="cr-best">0</span></small></div>
+      <div class="cr-stat cr-stat-vs"><label>Versus run-46 proxy</label><strong id="cr-vs-real">0x</strong><small>historical collection proxy, later superseded</small></div>
     </div>
-    <div class="cr-hud-buy">
-      <span class="cr-hud-label">Buy amount</span>
-      <div id="cr-buymode">
-        <button data-act="mode" data-mode="1" class="on">x1</button>
-        <button data-act="mode" data-mode="10">x10</button>
-        <button data-act="mode" data-mode="100">x100</button>
-        <button data-act="mode" data-mode="max">Max</button>
-      </div>
-      <span class="cr-hint">keys <b>1-4</b> amount &middot; <b>space</b> collect &middot; <b>B</b> best buy &middot; <b>M</b> manager</span>
-    </div>
+    <div class="cr-hud-buy"><span class="cr-hud-label">Buy amount</span><div id="cr-buymode"><button data-act="mode" data-mode="1" class="on">x1</button><button data-act="mode" data-mode="10">x10</button><button data-act="mode" data-mode="100">x100</button><button data-act="mode" data-mode="max">Max</button></div><span class="cr-hint"><b>1-4</b> amount &middot; <b>space</b> collect &middot; <b>B</b> best buy &middot; <b>M</b> manager</span></div>
   </div>
 
   <div class="card full cr-advice-card">
-    <span class="cr-advice-icon">&#129504;</span>
-    <div>
-      <div class="cr-advice-label">What to buy next</div>
-      <div class="cr-advice-text" id="cr-advice">&mdash;</div>
-    </div>
-    <div class="cr-advice-note">Ranked by payback time, the same arithmetic the real operator moved out of a
-      prompt and into <code>rules.py</code>. Seven compounding cost curves is not a decision worth making by hand.</div>
+    <span class="cr-advice-icon">&#129504;</span><div><div class="cr-advice-label">Best next move</div><div class="cr-advice-text" id="cr-advice">&mdash;</div></div>
+    <div class="cr-advice-note">Ranked by payback time using the same principle as the operator: deterministic arithmetic handles repeatable choices so attention stays on strategy.</div>
   </div>
 
-  <div class="card wide">
-    <h2>Producers</h2>
+  <div class="card game-producers">
+    <div class="cr-section-head"><div><h2>Producer board</h2><span id="cr-next-auto">Manual producers need a click to start each cycle.</span></div><span class="cr-section-badge" id="cr-managed-count">0 / 7 managed</span></div>
     <div id="cr-producers" class="cr-prods"></div>
-    <div class="cr-legend">Click an animal to collect a cycle by hand. Buy a <b>manager</b> and it runs itself &mdash; that is the whole point of an idle farm. Milestones at 25 / 50 / 100 / 200 / 300 / 400 double produce or halve the cycle. The <b>green outline</b> marks the best-value purchase right now.</div>
+    <div class="cr-legend">Click an animal to start a cycle. A manager makes that producer continuous. The green outline marks the best current payback.</div>
   </div>
 
-  <div class="card side">
-    <h2>Rebuild for heirlooms</h2>
-    <div class="cr-prestige">
-      <div class="cr-gain"><strong id="cr-gain">0</strong><span>heirloom hens on rebuild</span></div>
-      <div class="cr-prestige-track"><i id="cr-prestige-bar" style="width:0%"></i></div>
-      <button class="cr-big-btn" id="cr-rebuild" data-act="rebuild" disabled>Rebuild needs 1M produce</button>
-      <p class="cr-fine">A rebuild wipes producers, coins and one-off upgrades. It keeps every heirloom and everything bought with them, and heirlooms you spend still count toward what you have earned &mdash; so spending them never shrinks a future rebuild.</p>
-    </div>
-    <h2 style="margin-top:18px">Heirloom upgrades <small>permanent</small></h2>
-    <div id="cr-perks" class="cr-ups"></div>
+  <div class="card game-progress">
+    <h2>Rebuild progression</h2>
+    <div class="cr-prestige"><div class="cr-gain"><strong id="cr-gain">0</strong><span>heirloom hens on rebuild</span></div><div class="cr-prestige-track"><i id="cr-prestige-bar" style="width:0%"></i></div><button class="cr-big-btn" id="cr-rebuild" data-act="rebuild" disabled>Rebuild needs 1M produce</button><p class="cr-fine">Rebuild resets this run and keeps heirlooms, permanent perks, achievements and records.</p></div>
+    <h2 style="margin-top:18px">Permanent heirloom upgrades</h2><div id="cr-perks" class="cr-ups"></div>
+    <div class="game-events"><h2>Recent farm events</h2><div class="game-event-list" id="cr-event-feed"><div class="game-event"><time>now</time><span>Farm ready. Begin manually, then automate.</span></div></div></div>
   </div>
 
-  <div class="card full">
-    <h2>One-off upgrades <small>coins &middot; reset on rebuild</small></h2>
-    <div id="cr-oneoff" class="cr-ups cr-ups-wide"></div>
-  </div>
+  <details class="card full cr-drawer">
+    <summary>Run upgrades <span>Coin purchases · reset on rebuild</span></summary>
+    <div class="cr-drawer-body"><div id="cr-oneoff" class="cr-ups cr-ups-wide"></div></div>
+  </details>
 
-  <div class="card wide">
-    <h2>Achievements <small>each one is worth +1% produce, forever</small></h2>
-    <div id="cr-achievements" class="cr-achs"></div>
-  </div>
+  <details class="card full cr-drawer">
+    <summary>Achievements & permanent records <span>Every achievement adds +1% produce forever</span></summary>
+    <div class="cr-drawer-body"><div class="cr-ach-record-grid"><div><h2>Achievements</h2><div id="cr-achievements" class="cr-achs"></div></div><div><h2>Records</h2><div class="cr-records"><div><span>achievements</span><span id="cr-ach-count">0 / 18</span></div><div><span>achievement bonus</span><span id="cr-ach-bonus">x1.00</span></div><div><span>hand collects</span><span id="cr-clicks">0</span></div><div><span>collected by hand</span><span id="cr-hand">0</span></div><div><span>peak rate</span><span id="cr-peak">0/s</span></div><div><span>banked offline</span><span id="cr-banked">0</span></div><div><span>time played</span><span id="cr-playtime">0s</span></div></div><p class="cr-fine">These numbers describe the player rather than the current run.</p></div></div></div>
+  </details>
 
-  <div class="card side">
-    <h2>Records</h2>
-    <div class="cr-records">
-      <div><span>achievements</span><span id="cr-ach-count">0 / 18</span></div>
-      <div><span>achievement bonus</span><span id="cr-ach-bonus">x1.00</span></div>
-      <div><span>hand collects</span><span id="cr-clicks">0</span></div>
-      <div><span>collected by hand</span><span id="cr-hand">0</span></div>
-      <div><span>peak rate</span><span id="cr-peak">0/s</span></div>
-      <div><span>banked offline</span><span id="cr-banked">0</span></div>
-      <div><span>time played</span><span id="cr-playtime">0s</span></div>
-    </div>
-    <p class="cr-fine">Records and achievements survive a rebuild. They are the only numbers here that
-      describe the player rather than the run.</p>
-  </div>
-
-  <div class="card full">
-    <h2>Why this game is an epistemic time capsule</h2>
-    <ul class="rules">
-      <li><b>Everything here scales.</b> The real farm ultimately did too. A short run-46 cohort falsely looked capped, froze growth for 246 runs, and was later superseded by the full leaderboard fit.</li>
-      <li><b>Wheat grows here.</b> Real wheat, corn and pumpkin stayed at <code>0% grown</code> for 27 minutes in one historical server regime. That negative result is scoped and overdue for revalidation.</li>
-      <li><b>Ceiling Lift I and II</b> are named after the ceiling we mistakenly promoted from a hypothesis into permanent policy.</li>
-      <li><b>Produce sells at 2 coins</b> and a manager costs 20x a producer's base, because the real prices are still worth learning.</li>
-      <li><b>The achievements preserve the wrong turns.</b> <i>Wool, At Last</i> and <i>Milk, At Last</i> remember species that were negligible in collected output without claiming they can never score.</li>
-    </ul>
-  </div>
+  <details class="card full cr-drawer">
+    <summary>Why these mechanics exist <span>The game as an epistemic time capsule</span></summary>
+    <div class="cr-drawer-body"><ul class="rules"><li><b>This game is designed to keep scaling.</b> The real farm currently supports output increasing with herd size over the observed range; it does not prove unlimited scaling.</li><li><b>Wheat grows here.</b> A historical real-server regime held crops at <code>0% grown</code>; that negative result remains scoped and overdue for revalidation.</li><li><b>Ceiling Lift I and II</b> remember how the short collection cohort appeared capped at run 46 before it was later superseded.</li><li><b>The economy is deliberately abstract.</b> Prices are inspired by selected real-farm values, not a model of its full economy.</li><li><b>Achievements preserve wrong turns.</b> <i>Wool, At Last</i> and <i>Milk, At Last</i> remember the run-50 collection cohort without claiming that species evidence remains universally true.</li></ul></div>
+  </details>
   <div id="cr-toast" class="cr-toast"></div>
 </section>
 
@@ -791,10 +1671,11 @@ main { max-width:1400px; }
  * a prestige currency drawn from a square root of lifetime earnings that grants a
  * small percentage each and stacks multiplicatively with prestige-bought upgrades.
  *
- * The theme is an epistemic time capsule. A short run-46 cohort looked capped at
- * ~1,550 units/min and was promoted into policy; the full leaderboard ledger later
- * falsified it and a scaled herd retook first place. The upgrades preserve that
- * wrong turn without presenting it as current game mechanics.
+ * The theme is an epistemic time capsule. A short run-46 collection cohort appeared
+ * capped at ~1,550 units/min and was promoted into policy; later leaderboard evidence
+ * superseded that cap and supports herd-size scaling over the observed range. It does
+ * not establish unlimited scaling. The upgrades preserve that wrong turn without
+ * presenting it as current game mechanics.
  *
  * Self-contained: no imports, no network, no framework. State lives in one object,
  * persists to localStorage, and the whole simulation is pure enough to run
@@ -806,18 +1687,22 @@ const CR = (function () {
   const SAVE_KEY = "coopRush.v2";
   const SAVE_EVERY = 4;          // seconds between autosaves
   const OFFLINE_CAP_H = 4;       // hours of idle production credited on return
-  const SELL_PRICE = 2;          // an egg sells for 2 coins on the real farm
+  // Game-economy exchange rate: inspired by an observed 2-coin egg price, but one
+  // abstract "produce" unit here can represent eggs, crops, wool, or market output.
+  const SELL_PRICE = 2;
+  const RUN46_COLLECTION_PER_MIN = 1550;
+  const RUN46_COLLECTION_PER_SEC = RUN46_COLLECTION_PER_MIN / 60;
 
   // Cost coefficients rise down the list: early producers stay cheap to stack,
   // late ones are bought for their milestone multipliers rather than their price.
   const PRODUCERS = [
-    { id: "coop",   name: "Chicken Coop",   icon: "\u{1F414}", cost: 4,        coeff: 1.07, cycle: 0.8,  yield: 1,     note: "the measured primary engine" },
+    { id: "coop",   name: "Chicken Coop",   icon: "\u{1F414}", cost: 4,        coeff: 1.07, cycle: 0.8,  yield: 1,     note: "the primary engine in the run-50 collection cohort" },
     { id: "pig",    name: "Truffle Pigs",   icon: "\u{1F437}", cost: 60,       coeff: 1.08, cycle: 3,    yield: 6,     note: "100 of them produced 2 truffles a run" },
     { id: "hive",   name: "Beehive Row",    icon: "\u{1F41D}", cost: 720,      coeff: 1.09, cycle: 6,    yield: 30,    note: "the wildflowers finally pay off" },
-    { id: "wool",   name: "Wool Shed",      icon: "\u{1F411}", cost: 8640,     coeff: 1.10, cycle: 12,   yield: 140,   note: "historically negligible collected wool" },
-    { id: "dairy",  name: "Dairy Barn",     icon: "\u{1F404}", cost: 103680,   coeff: 1.11, cycle: 24,   yield: 700,   note: "historically negligible collected milk" },
+    { id: "wool",   name: "Wool Shed",      icon: "\u{1F411}", cost: 8640,     coeff: 1.10, cycle: 12,   yield: 140,   note: "negligible collected wool in the run-50 cohort" },
+    { id: "dairy",  name: "Dairy Barn",     icon: "\u{1F404}", cost: 103680,   coeff: 1.11, cycle: 24,   yield: 700,   note: "negligible collected milk in the run-50 cohort" },
     { id: "wheat",  name: "Wheat Field",    icon: "\u{1F33E}", cost: 1244160,  coeff: 1.12, cycle: 48,   yield: 3600,  note: "here the crop timers actually advance" },
-    { id: "market", name: "Farmers Market", icon: "\u{1F3EA}", cost: 14929920, coeff: 1.13, cycle: 96,   yield: 20000, note: "sell it yourself, skip the 2c ceiling" },
+    { id: "market", name: "Farmers Market", icon: "\u{1F3EA}", cost: 14929920, coeff: 1.13, cycle: 96,   yield: 20000, note: "late-game output beyond the 2-coin exchange abstraction" },
   ];
 
   // Alternating milestones: more per cycle, then faster cycles. Same thresholds
@@ -841,7 +1726,7 @@ const CR = (function () {
     { id: "pig3",     name: "Truffle Map",        cost: 20000,      icon: "\u{1F437}", target: "pig",    kind: "yield", mult: 3,   desc: "Truffle Pigs x3 produce" },
     { id: "bulk",     name: "Bulk Feeder",        cost: 45000,      icon: "\u{1F6B0}", target: "all",    kind: "speed", mult: 1.15,desc: "all cycles 15% faster" },
     { id: "hive3",    name: "Queen Excluder",     cost: 160000,     icon: "\u{1F41D}", target: "hive",   kind: "yield", mult: 3,   desc: "Beehive Row x3 produce" },
-    { id: "lift1",    name: "Ceiling Lift I",     cost: 750000,     icon: "\u{1F4C8}", target: "all",    kind: "yield", mult: 2,   desc: "the per-farm ceiling was never real: all x2" },
+    { id: "lift1",    name: "Ceiling Lift I",     cost: 750000,     icon: "\u{1F4C8}", target: "all",    kind: "yield", mult: 2,   desc: "the run-46 collection cap was superseded: all x2" },
     { id: "wool3",    name: "Shearing Rig",       cost: 2400000,    icon: "\u{1F411}", target: "wool",   kind: "yield", mult: 3,   desc: "Wool Shed x3 produce" },
     { id: "night",    name: "Night Shift",        cost: 9000000,    icon: "\u{1F319}", target: "all",    kind: "speed", mult: 1.25,desc: "all cycles 25% faster" },
     { id: "dairy3",   name: "Milking Parlour",    cost: 32000000,   icon: "\u{1F404}", target: "dairy",  kind: "yield", mult: 3,   desc: "Dairy Barn x3 produce" },
@@ -883,7 +1768,7 @@ const CR = (function () {
     { id: "clicks",   icon: "\u{1F44B}", name: "Manual Labour",        desc: "collect 250 cycles by hand",
       hint: "before the managers took over",     test: s => (s.clicks || 0) >= 250 },
     { id: "seven",    icon: "\u{1F69C}", name: "Full Roster",          desc: "own all seven producers",
-      hint: "including historically negligible species", test: s => ownedKinds(s) >= PRODUCERS.length },
+      hint: "including species negligible in the run-50 collection cohort", test: s => ownedKinds(s) >= PRODUCERS.length },
     { id: "auto",     icon: "\u{2699}",  name: "Hands Off",            desc: "every producer has a manager",
       hint: "the farm runs itself now",          test: s => managerCount(s) >= PRODUCERS.length },
     { id: "wool",     icon: "\u{1F411}", name: "Wool, At Last",        desc: "own 100 of the Wool Shed",
@@ -893,9 +1778,9 @@ const CR = (function () {
     { id: "wheat",    icon: "\u{1F33E}", name: "The Timer Advanced",   desc: "own a Wheat Field",
       hint: "one historical crop probe stayed at 0% for 27 minutes", test: s => s.producers.wheat.owned >= 1 },
     { id: "ceiling",  icon: "\u{1F4C8}", name: "Ceiling Lifted",       desc: "buy Ceiling Lift I",
-      hint: "the promoted per-farm ceiling was false", test: s => !!s.oneoff.lift1 },
-    { id: "rate1k",   icon: "\u{1F680}", name: "Past the False Plateau", desc: "produce 1,550/s",
-      hint: "the short run-46 cohort looked capped at 1,550 per minute", test: s => (s.peakUps || 0) >= 1550 },
+      hint: "the promoted run-46 collection cap was superseded", test: s => !!s.oneoff.lift1 },
+    { id: "rate1k",   icon: "\u{1F680}", name: "Past the False Plateau", desc: "produce 1,550/min",
+      hint: "the short run-46 collection cohort appeared capped at this rate", test: s => (s.peakUps || 0) >= RUN46_COLLECTION_PER_SEC },
     { id: "million",  icon: "\u{1F4B0}", name: "Seven Figures",        desc: "1M produce in one run",
       hint: "the rebuild gate",                  test: s => s.bestRun >= 1e6 || s.lifetime >= 1e6 },
     { id: "rebuild",  icon: "\u{1F504}", name: "Heirloom Keeper",      desc: "rebuild the farm once",
@@ -1386,7 +2271,8 @@ const CR = (function () {
 
   return {
     PRODUCERS, ONEOFF, HEIRLOOM_UPGRADES, MILESTONES, ACHIEVEMENTS,
-    SELL_PRICE, OFFLINE_CAP_H, ACHIEVEMENT_BONUS,
+    SELL_PRICE, RUN46_COLLECTION_PER_MIN, RUN46_COLLECTION_PER_SEC,
+    OFFLINE_CAP_H, ACHIEVEMENT_BONUS,
     state: () => S,
     blank, load, save, wipe,
     buy, hireManager, collect, buyOneoff, buyPerk,
@@ -1451,6 +2337,7 @@ const CR = (function () {
 
   const el = id => document.getElementById(id);
   const refs = {};   // per-card element cache, rebuilt with the structure
+  const EVENTS = []; // bounded, in-memory explanation of what changed this session
 
   // The harness's DOM stub implements only what the UI actually uses, and effects
   // need createElement/removeChild which a read-only stub has no reason to have.
@@ -1666,9 +2553,29 @@ const CR = (function () {
   const TOAST_MS = 4200;
   let toastHTML = "";
 
+  function eventClock(ms) {
+    const d = new Date(ms), pad = n => String(n).padStart(2, "0");
+    return pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function recordEvent(message, kind) {
+    EVENTS.unshift({ text: String(message), kind: kind || "", at: Date.now() });
+    while (EVENTS.length > 6) EVENTS.pop();
+    paintEvents();
+  }
+
+  function paintEvents() {
+    const host = el("cr-event-feed");
+    if (!host) return;
+    host.innerHTML = EVENTS.length ? EVENTS.map(item =>
+      `<div class="game-event${item.kind ? " " + esc(item.kind) : ""}"><time>${eventClock(item.at)}</time><span>${esc(item.text)}</span></div>`
+    ).join("") : `<div class="game-event"><time>now</time><span>Farm ready. Begin manually, then automate.</span></div>`;
+  }
+
   function toast(message, kind) {
     TOASTS.push({ text: String(message), kind: kind || "", until: Date.now() + TOAST_MS });
     while (TOASTS.length > 4) TOASTS.shift();
+    recordEvent(message, kind);
     paintToasts();
   }
 
@@ -1693,6 +2600,28 @@ const CR = (function () {
   function paint() {
     const s = CR.state();
     const ups = CR.unitsPerSec();
+    const activeLines = CR.PRODUCERS.filter(def => s.producers[def.id].owned > 0);
+    const managedLines = activeLines.filter(def => s.producers[def.id].manager);
+    const autoPct = activeLines.length ? managedLines.length / activeLines.length * 100 : 0;
+    const autoState = !managedLines.length ? "Manual setup"
+      : managedLines.length === activeLines.length ? "Running hands-free" : "Partially automated";
+    setText("cr-auto-pct", Math.round(autoPct) + "%");
+    setText("cr-auto-state", autoState);
+    setText("cr-auto-detail", activeLines.length
+      ? managedLines.length + " of " + activeLines.length + " active producer lines run themselves."
+      : "Buy a producer, then hire its manager to begin autonomous production.");
+    setText("cr-managed-count", managedLines.length + " / " + activeLines.length + " active lines managed");
+    const ring = el("cr-auto-ring");
+    if (ring && ring.style) ring.style["--pct"] = autoPct.toFixed(1) + "%";
+    const nextManager = CR.bestManager();
+    if (nextManager) {
+      const nextDef = CR.PRODUCERS.find(def => def.id === nextManager);
+      setText("cr-next-auto", "Next automation: hire the " + nextDef.name + " manager for " + fmt(CR.managerCost(nextDef)) + "c.");
+    } else if (activeLines.length && managedLines.length === activeLines.length) {
+      setText("cr-next-auto", "Every active producer is automated. Unlock the next tier or optimize payback.");
+    } else {
+      setText("cr-next-auto", "Manual producers need a click to start each cycle.");
+    }
     setText("cr-units", fmt(s.lifetime));
     setText("cr-coins", fmt(s.coins));
     setText("cr-ups", fmt(ups) + "/s");
@@ -1712,10 +2641,10 @@ const CR = (function () {
     setText("cr-playtime", secs(s.playSeconds || 0));
     setText("cr-hand", fmt(s.handCollected || 0));
     setText("cr-banked", fmt(s.offlineBanked || 0));
-    // Against the measured real-farm plateau of 1,550 units per MINUTE. This is
-    // the single comparison the whole tab exists to make.
-    const realFarm = 1550 / 60;
-    setText("cr-vs-real", ups > 0 ? fmt(ups / realFarm) + "x" : "0x");
+    // Compare like-for-like per-second rates against the superseded run-46
+    // collection proxy. The evidence was 1,550 per minute, not per second.
+    const run46Proxy = CR.RUN46_COLLECTION_PER_SEC;
+    setText("cr-vs-real", ups > 0 ? fmt(ups / run46Proxy) + "x" : "0x");
 
     const gain = CR.prestigeGain();
     setText("cr-gain", fmt(gain));
@@ -1872,7 +2801,12 @@ const CR = (function () {
     if (!target) return;
     const id = target.dataset.id;
     switch (target.dataset.act) {
-      case "buy": CR.buy(id); break;
+      case "buy": {
+        const def = CR.PRODUCERS.find(x => x.id === id);
+        const amount = def ? CR.buyCount(def) : 0;
+        if (CR.buy(id) && def) recordEvent(`Bought ${amount} ${def.name}${amount === 1 ? "" : "s"}.`, "buy");
+        break;
+      }
       case "manager":
         if (CR.hireManager(id)) toast("Manager hired \u2014 it runs itself now.", "ms");
         break;
@@ -1921,7 +2855,11 @@ const CR = (function () {
     // loop, which is the point: the interesting decision is when to rebuild.
     if (key === "b") {
       const best = CR.bestBuy();
-      if (best) { CR.buy(best); after(); }
+      if (best) {
+        const def = CR.PRODUCERS.find(d => d.id === best), amount = def ? CR.buyCount(def) : 0;
+        if (CR.buy(best) && def) recordEvent(`Bought ${amount} ${def.name}${amount === 1 ? "" : "s"} on advisor recommendation.`, "buy");
+        after();
+      }
       return;
     }
     if (key === "m") {
@@ -1980,6 +2918,7 @@ const CR = (function () {
     if (!loaded) CR.applyStartPerks();
     const offline = loaded ? CR.offlineCatchUp() : 0;
     buildAll();
+    recordEvent(loaded ? "Save restored; simulation resumed from persisted state." : "New farm started in manual mode.", loaded ? "ms" : "");
     paint();
     if (document.addEventListener) document.addEventListener("click", onClick);
     if (window.addEventListener) {
@@ -1999,7 +2938,7 @@ const CR = (function () {
     init();
   }
 
-  window.CRUI = { fmt, secs, paint, buildAll, toast, adviceText };
+  window.CRUI = { fmt, secs, paint, buildAll, toast, adviceText, recordEvent };
 })();
 </script>
 </body></html>

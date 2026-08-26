@@ -43,6 +43,7 @@
 
   const el = id => document.getElementById(id);
   const refs = {};   // per-card element cache, rebuilt with the structure
+  const EVENTS = []; // bounded, in-memory explanation of what changed this session
 
   // The harness's DOM stub implements only what the UI actually uses, and effects
   // need createElement/removeChild which a read-only stub has no reason to have.
@@ -258,9 +259,29 @@
   const TOAST_MS = 4200;
   let toastHTML = "";
 
+  function eventClock(ms) {
+    const d = new Date(ms), pad = n => String(n).padStart(2, "0");
+    return pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function recordEvent(message, kind) {
+    EVENTS.unshift({ text: String(message), kind: kind || "", at: Date.now() });
+    while (EVENTS.length > 6) EVENTS.pop();
+    paintEvents();
+  }
+
+  function paintEvents() {
+    const host = el("cr-event-feed");
+    if (!host) return;
+    host.innerHTML = EVENTS.length ? EVENTS.map(item =>
+      `<div class="game-event${item.kind ? " " + esc(item.kind) : ""}"><time>${eventClock(item.at)}</time><span>${esc(item.text)}</span></div>`
+    ).join("") : `<div class="game-event"><time>now</time><span>Farm ready. Begin manually, then automate.</span></div>`;
+  }
+
   function toast(message, kind) {
     TOASTS.push({ text: String(message), kind: kind || "", until: Date.now() + TOAST_MS });
     while (TOASTS.length > 4) TOASTS.shift();
+    recordEvent(message, kind);
     paintToasts();
   }
 
@@ -285,6 +306,28 @@
   function paint() {
     const s = CR.state();
     const ups = CR.unitsPerSec();
+    const activeLines = CR.PRODUCERS.filter(def => s.producers[def.id].owned > 0);
+    const managedLines = activeLines.filter(def => s.producers[def.id].manager);
+    const autoPct = activeLines.length ? managedLines.length / activeLines.length * 100 : 0;
+    const autoState = !managedLines.length ? "Manual setup"
+      : managedLines.length === activeLines.length ? "Running hands-free" : "Partially automated";
+    setText("cr-auto-pct", Math.round(autoPct) + "%");
+    setText("cr-auto-state", autoState);
+    setText("cr-auto-detail", activeLines.length
+      ? managedLines.length + " of " + activeLines.length + " active producer lines run themselves."
+      : "Buy a producer, then hire its manager to begin autonomous production.");
+    setText("cr-managed-count", managedLines.length + " / " + activeLines.length + " active lines managed");
+    const ring = el("cr-auto-ring");
+    if (ring && ring.style) ring.style["--pct"] = autoPct.toFixed(1) + "%";
+    const nextManager = CR.bestManager();
+    if (nextManager) {
+      const nextDef = CR.PRODUCERS.find(def => def.id === nextManager);
+      setText("cr-next-auto", "Next automation: hire the " + nextDef.name + " manager for " + fmt(CR.managerCost(nextDef)) + "c.");
+    } else if (activeLines.length && managedLines.length === activeLines.length) {
+      setText("cr-next-auto", "Every active producer is automated. Unlock the next tier or optimize payback.");
+    } else {
+      setText("cr-next-auto", "Manual producers need a click to start each cycle.");
+    }
     setText("cr-units", fmt(s.lifetime));
     setText("cr-coins", fmt(s.coins));
     setText("cr-ups", fmt(ups) + "/s");
@@ -464,7 +507,12 @@
     if (!target) return;
     const id = target.dataset.id;
     switch (target.dataset.act) {
-      case "buy": CR.buy(id); break;
+      case "buy": {
+        const def = CR.PRODUCERS.find(x => x.id === id);
+        const amount = def ? CR.buyCount(def) : 0;
+        if (CR.buy(id) && def) recordEvent(`Bought ${amount} ${def.name}${amount === 1 ? "" : "s"}.`, "buy");
+        break;
+      }
       case "manager":
         if (CR.hireManager(id)) toast("Manager hired \u2014 it runs itself now.", "ms");
         break;
@@ -513,7 +561,11 @@
     // loop, which is the point: the interesting decision is when to rebuild.
     if (key === "b") {
       const best = CR.bestBuy();
-      if (best) { CR.buy(best); after(); }
+      if (best) {
+        const def = CR.PRODUCERS.find(d => d.id === best), amount = def ? CR.buyCount(def) : 0;
+        if (CR.buy(best) && def) recordEvent(`Bought ${amount} ${def.name}${amount === 1 ? "" : "s"} on advisor recommendation.`, "buy");
+        after();
+      }
       return;
     }
     if (key === "m") {
@@ -572,6 +624,7 @@
     if (!loaded) CR.applyStartPerks();
     const offline = loaded ? CR.offlineCatchUp() : 0;
     buildAll();
+    recordEvent(loaded ? "Save restored; simulation resumed from persisted state." : "New farm started in manual mode.", loaded ? "ms" : "");
     paint();
     if (document.addEventListener) document.addEventListener("click", onClick);
     if (window.addEventListener) {
@@ -591,5 +644,5 @@
     init();
   }
 
-  window.CRUI = { fmt, secs, paint, buildAll, toast, adviceText };
+  window.CRUI = { fmt, secs, paint, buildAll, toast, adviceText, recordEvent };
 })();

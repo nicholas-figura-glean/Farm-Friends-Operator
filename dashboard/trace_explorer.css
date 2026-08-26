@@ -201,6 +201,7 @@ button.te-row.selected { box-shadow:inset 3px 0 #76d99c; }
   .te-workspace { grid-template-columns:minmax(0,1fr); }
   .te-main { border-right:0; }
   .te-inspector { border-top:1px solid var(--line); max-height:none; }
+  .te-inspector.empty { display:none; }
 }
 @media (max-width:700px) {
   .te-summary { grid-template-columns:1fr 1fr; }

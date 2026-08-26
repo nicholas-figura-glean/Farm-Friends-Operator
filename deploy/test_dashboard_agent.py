@@ -140,7 +140,7 @@ check("the immutable author process receives the editable checkout explicitly",
 section("the autonomy view degrades instead of collapsing")
 
 report = autonomy.report()
-for key in ("agents", "canary", "orders", "contract", "vcs", "research", "llm"):
+for key in ("agents", "canary", "orders", "contract", "vcs", "research", "llm", "activity"):
     check("section %s is present" % key, key in report)
     check("section %s has no error" % key,
           not (report.get(key) or {}).get("error"),
@@ -153,6 +153,17 @@ def _boom():
 
 
 guarded = autonomy._guard(_boom)
+activity_view = report.get("activity") or {}
+activity_rows = activity_view.get("events") or []
+check("autonomy activity projects the existing ledgers", activity_view.get("sources") == 5,
+      str(activity_view.get("sources")))
+check("autonomy activity is newest-first",
+      all(activity_rows[i].get("ts", "") >= activity_rows[i + 1].get("ts", "")
+          for i in range(max(0, len(activity_rows) - 1))))
+check("autonomy activity retains actor, phase, source and status",
+      not activity_rows or all(all(key in row for key in ("actor", "phase", "source", "status"))
+                               for row in activity_rows))
+
 check("a failing section becomes an error string", "error" in guarded)
 check("the error names the exception type", "RuntimeError" in guarded["error"])
 check("a failed section is surfaced as a blocker",
@@ -571,8 +582,8 @@ check("architecture code is outside the Switchboard block",
 check("the served panel is never statically empty", "data-arch-loading" in composed)
 check("tab activation checks the global async loader",
       'typeof loader!=="function"' in composed and "window.loadArchitecture" in composed)
-check("loader failure becomes visible content",
-      "Architecture renderer failed to initialize" in composed)
+check("loader failure becomes visible operator guidance",
+      "Renderer unavailable" in composed and "Architecture control plane" in composed)
 check("an open Findings or History tab refreshes on its own",
       "EVIDENCE_REFRESH_MS = 60000" in composed and "EVIDENCE_LAST_FETCH_MS" in composed)
 check("an open Architecture tab refreshes its model and liveness overlay",

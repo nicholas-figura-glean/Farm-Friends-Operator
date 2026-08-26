@@ -88,7 +88,11 @@ var PAYLOAD = {
 var HEALTH_DOWN = {agents:{agents:[
   {label:"com.nickfigura.farmfriends.author",loaded:false,state:"unknown",role:"writes repairs"},
   {label:"com.nickfigura.farmfriends.research",loaded:true,state:"waiting",role:"finds strategy"}
-]}};
+]},vcs:{dirty_source_paths:[]},canary:{status:"resolved"},activity:{events:[]}};
+var HEALTH_OK = {agents:{agents:[
+  {label:"com.nickfigura.farmfriends.author",loaded:true,state:"waiting",role:"writes repairs"},
+  {label:"com.nickfigura.farmfriends.research",loaded:true,state:"waiting",role:"finds strategy"}
+]},vcs:{dirty_source_paths:[]},canary:{status:"resolved"},activity:{events:[]}};
 
 /* ---- compact fallback and protected-file truth ------------------------- */
 var layers = archLayersHtml(CURRENT);
@@ -109,6 +113,33 @@ ok(healthyById.author_agent.down === true && !healthyById.research_agent.down, "
 ok(archNodeClass(healthyById.author_agent).indexOf("down") !== -1, "down state reaches node styling");
 ok(archNodeClass({kind:"module",down:true}).indexOf("down") === -1, "a library module is never claimed down");
 ok(Object.keys(archAgentHealth(null)).length === 0, "missing autonomy yields no health claims");
+
+/* ---- operator posture and architecture change summary ------------------ */
+var cleanCurrent = archApplyHealth(CURRENT, HEALTH_OK);
+var cleanPosture = archPosture(PAYLOAD, cleanCurrent, HEALTH_OK);
+ok(cleanPosture.tone === "good" && cleanPosture.loadedAgents === 2, "coherent topology with loaded services requires no action");
+ok(cleanPosture.liveTitle.indexOf("matches recorded v2") !== -1, "posture states live-to-recorded alignment");
+var downPosture = archPosture(PAYLOAD, healthyCurrent, HEALTH_DOWN);
+ok(downPosture.tone === "attention" && downPosture.intervention.indexOf("Restore 1 unloaded service") !== -1,
+   "an unloaded service becomes explicit operator intervention");
+var WATCH_VIEW = clone(HEALTH_OK);
+WATCH_VIEW.vcs.dirty_source_paths = ["dashboard/architecture.js", "dashboard/architecture.css"];
+WATCH_VIEW.canary = {status:"watching"};
+WATCH_VIEW.activity.events = [{ts:"2026-08-26T16:00:00Z",phase:"act",actor:"Author agent",status:"published",title:"Published bounded architecture repair"}];
+var watchPosture = archPosture(PAYLOAD, archApplyHealth(CURRENT,WATCH_VIEW), WATCH_VIEW);
+ok(watchPosture.tone === "watch" && watchPosture.intervention.indexOf("2 changed source files") !== -1,
+   "pending source changes are review guidance rather than a topology failure");
+var situation = archSituationHtml(PAYLOAD, cleanCurrent, WATCH_VIEW, watchPosture);
+ok(count(situation,'class="arch-situation-cell ') === 4, "summary answers now, changed, autonomous action, and operator action");
+ok(situation.indexOf("Happening now") !== -1 && situation.indexOf("What changed") !== -1 &&
+   situation.indexOf("Autonomous action") !== -1 && situation.indexOf("Operator action") !== -1,
+   "operator questions are named explicitly");
+ok(situation.indexOf("Published bounded architecture repair") !== -1, "latest autonomous action is projected without inventing activity");
+var UNCHANGED_VERSION = {events:[{ts:"2026-08-26T15:00:00Z",kind:"version",structural:true,title:"architecture v3",detail:"scheduled scan",added:[],removed:[]}]};
+ok(archSituationHtml(UNCHANGED_VERSION,cleanCurrent,HEALTH_OK,cleanPosture).indexOf("no component additions or removals") !== -1,
+   "a recorded version with unchanged component membership says so explicitly");
+var DRIFT_PAYLOAD = clone(PAYLOAD); DRIFT_PAYLOAD.live_matches_recorded = false;
+ok(archPosture(DRIFT_PAYLOAD,cleanCurrent,HEALTH_OK).tone === "attention", "unrecorded topology drift requires attention");
 
 /* ---- separate runtime and structure lenses ----------------------------- */
 var runtime = archGraphModel(CURRENT, "runtime", "all", null, "");
@@ -192,9 +223,10 @@ ok(archEventHtml({ts:"x",kind:"canary",title:"kept",ok:true}).indexOf("✓") !==
 HOST = {innerHTML:"",className:""};
 ARCH_VIEW = "runtime"; ARCH_STEP = "all"; ARCH_SELECTED = null; ARCH_QUERY = ""; ARCH_FILTER = "all"; archResetCamera();
 renderArchitecture(PAYLOAD, HEALTH_DOWN);
-ok(HOST.innerHTML.indexOf("Explore how Farm Friends works") !== -1, "full render leads with an explanatory architecture workspace");
+ok(HOST.innerHTML.indexOf("Architecture control plane") !== -1 && HOST.innerHTML.indexOf("Happening now") !== -1,
+   "full render leads with an operator architecture summary");
 ok(HOST.innerHTML.indexOf('id="arch-map-svg"') !== -1, "full render includes the interactive graph");
-ok(HOST.innerHTML.indexOf("Architecture change history") !== -1, "history remains available as secondary detail");
+ok(HOST.innerHTML.indexOf("Architecture audit trail") !== -1, "history remains available as secondary detail");
 ok(typeof HOST.onclick === "function" && typeof HOST.onwheel === "function", "render binds click, pan, zoom, and wheel interaction");
 function targetWith(attribute, value) {
   return {parentNode:HOST,getAttribute:function (name) { return name === attribute ? value : null; }};
@@ -206,7 +238,7 @@ ok(ARCH_QUERY === "cycle" && ARCH_SELECTED === null && HOST.innerHTML.indexOf("s
    "typing a search immediately replaces node focus with search focus");
 ARCH_QUERY = "";
 HOST.onclick({target:targetWith("data-arch-view","structure")});
-ok(ARCH_VIEW === "structure" && HOST.innerHTML.indexOf("Dependency lens") !== -1, "lens switch rerenders without a fetch");
+ok(ARCH_VIEW === "structure" && HOST.innerHTML.indexOf("Whole system") !== -1, "lens switch rerenders without a fetch");
 HOST.onclick({target:targetWith("data-arch-step","verify")});
 ok(ARCH_VIEW === "runtime" && ARCH_STEP === "verify" && HOST.innerHTML.indexOf("Run stage") !== -1, "stage selection drills into execution");
 HOST.onclick({target:targetWith("data-arch-zoom","in")});
@@ -215,10 +247,10 @@ HOST.onclick({target:targetWith("data-arch-filter","canary")});
 ok(ARCH_FILTER === "canary" && count(HOST.innerHTML,'class="arch-ev"') === 1, "history filtering remains interactive");
 
 /* ---- stats and escaping ------------------------------------------------ */
-var stats = archStatsHtml(CURRENT);
-ok(count(stats,'class="arch-stat"') === 6, "all headline stats render");
-ok(stats.indexOf("3,340") !== -1, "large values are thousands-separated");
-ok(archStatsHtml({stats:{}}).indexOf("-") !== -1, "missing stats show a dash, not NaN");
+var stats = archStatsHtml(CURRENT, cleanPosture);
+ok(count(stats,'class="delta ') === 6, "all headline posture facts render");
+ok(archStatsHtml({stats:{modules:3340}},cleanPosture).indexOf("3,340") !== -1, "large values are thousands-separated");
+ok(archStatsHtml({stats:{}},cleanPosture).indexOf("-") !== -1, "missing stats show a dash, not NaN");
 ok(archEscape('<script>x</script>') === "&lt;script&gt;x&lt;/script&gt;", "markup is escaped");
 ok(archEscape(null) === "", "null escapes to empty");
 var hostileCurrent = clone(CURRENT);

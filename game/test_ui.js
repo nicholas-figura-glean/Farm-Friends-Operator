@@ -121,6 +121,8 @@ ok(markup.indexOf("over the observed range; it does not prove unlimited scaling"
 ok(!!document.getElementById("cr-producers"), "markup provides the producer host");
 ok(!!document.getElementById("cr-rebuild"), "markup provides the rebuild button");
 ok(!!document.getElementById("cr-oneoff") && !!document.getElementById("cr-perks"), "markup provides both upgrade panels");
+ok(!!document.getElementById("cr-auto-state") && !!document.getElementById("cr-event-feed"),
+   "markup exposes automation state and a recent-change feed");
 
 /* ---- load engine + UI with the stubs ---- */
 var engine = slurp("game/coop_rush.js");
@@ -156,6 +158,12 @@ clickOn(mgrBtn);
 ok(CR.state().producers.coop.manager === true, "clicking Manager hires one");
 ok(CR.unitsPerSec() > 0, "hiring a manager starts idle income", CRUI.fmt(CR.unitsPerSec()) + "/s");
 CRUI.paint();
+ok(document.getElementById("cr-auto-state").textContent === "Running hands-free",
+   "automation state changes when every active line is managed", document.getElementById("cr-auto-state").textContent);
+ok(/1 \/ 1 active lines managed/.test(document.getElementById("cr-managed-count").textContent),
+   "automation coverage is explicit", document.getElementById("cr-managed-count").textContent);
+ok(/Manager hired/.test(document.getElementById("cr-event-feed").innerHTML),
+   "manager hiring is retained in the recent-change feed", document.getElementById("cr-event-feed").innerHTML);
 var expectedVsRun46 = CRUI.fmt(CR.unitsPerSec() / CR.RUN46_COLLECTION_PER_SEC) + "x";
 ok(document.getElementById("cr-vs-real").textContent === expectedVsRun46,
    "HUD compares per-second output with the 1,550/min run-46 proxy",

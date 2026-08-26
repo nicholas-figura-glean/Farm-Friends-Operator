@@ -309,6 +309,110 @@ def llm_state() -> Dict[str, Any]:
     }
 
 
+def activity_state(limit: int = 18) -> Dict[str, Any]:
+    """Normalize the append-only control-plane ledgers into one operator story.
+
+    These rows are deliberately a projection, not new instrumentation. The source
+    ledgers remain authoritative and every event retains its source and reference.
+    Keeping this in the slow autonomy endpoint lets every operational tab explain
+    observe -> decide -> act -> verify without bloating the two-second farm poll.
+    """
+    events: List[Dict[str, Any]] = []
+
+    def add(ts: Any, phase: str, actor: str, title: str, detail: Any,
+            status: str = "recorded", source: str = "", ref: Any = None) -> None:
+        if not isinstance(ts, str) or not ts:
+            return
+        events.append({
+            "ts": ts,
+            "phase": phase,
+            "actor": actor,
+            "title": str(title or "activity")[:180],
+            "detail": str(detail or "")[:320],
+            "status": status,
+            "source": source,
+            "ref": ref,
+        })
+
+    for row in _tail(PROJECT / "state" / "heal.ndjson", 12):
+        cls = str(row.get("class") or "remedy")
+        relaxing = cls == "relax"
+        add(
+            row.get("ts"), "verify" if relaxing else "act", "Supervisor",
+            "Safeguard relaxed toward default" if relaxing else "Bounded %s remedy applied" % cls,
+            row.get("action") or row.get("alert"),
+            "verified" if relaxing else "handled", "state/heal.ndjson", row.get("run"),
+        )
+
+    for row in _tail(PROJECT / "state" / "canary.ndjson", 8):
+        event = str(row.get("event") or row.get("status") or "canary")
+        watching = event == "armed" or row.get("status") == "watching"
+        add(
+            row.get("ts") or row.get("armed_ts"), "verify", "Canary agent",
+            "Release %s entered probation" % (row.get("revision") or "unknown")
+            if watching else "Release %s canary resolved" % (row.get("revision") or "unknown"),
+            row.get("reason") or row.get("resolution") or row.get("order_id"),
+            "watching" if watching else str(row.get("status") or "resolved"),
+            "state/canary.ndjson", row.get("revision"),
+        )
+
+    for row in _tail(PROJECT / "state" / "workorders.ndjson", 16):
+        status = str(row.get("status") or "open")
+        phase = "decide" if status == "open" else ("act" if status == "claimed" else "verify")
+        actor = str(row.get("actor") or row.get("source") or "Work-order queue").replace("_", " ").title()
+        add(
+            row.get("ts"), phase, actor,
+            "Work order %s: %s" % (status, row.get("summary") or row.get("id") or "untitled"),
+            row.get("note") or row.get("intent") or row.get("kind"),
+            status, "state/workorders.ndjson", row.get("id"),
+        )
+
+    for row in _tail(PROJECT / "state" / "contract.ndjson", 8):
+        changes = int(row.get("changes") or 0)
+        absorbed = int(row.get("absorbed") or 0)
+        actionable = int(row.get("actionable") or 0)
+        if not changes and not absorbed:
+            continue
+        detail = row.get("detail") if isinstance(row.get("detail"), list) else []
+        summary = (detail[0].get("summary") if detail and isinstance(detail[0], dict) else None)
+        add(
+            row.get("ts"), "observe", "Contract watcher",
+            "Boundary scan classified %d change%s" % (changes, "" if changes == 1 else "s"),
+            summary or "%d actionable · %d absorbed · %d work orders filed" % (
+                actionable, absorbed, int(row.get("orders_filed") or 0)),
+            "attention" if actionable else "verified", "state/contract.ndjson",
+            (row.get("fingerprint") or "")[:12],
+        )
+
+    for row in _tail(PROJECT / "state" / "research_findings.ndjson", 8):
+        event = str(row.get("event") or "finding")
+        item = row.get("item") if isinstance(row.get("item"), dict) else {}
+        title = item.get("title") or row.get("subject") or row.get("finding") or event.replace("_", " ")
+        detail = row.get("outcome") or row.get("answer") or row.get("verdict") or item.get("hypothesis")
+        add(
+            row.get("ts"), "research", "Research agent",
+            "%s: %s" % (event.replace("_", " ").title(), title), detail,
+            "attention" if row.get("errors_found") else "recorded",
+            "state/research_findings.ndjson", row.get("question_id") or row.get("subject"),
+        )
+
+    # ISO-8601 UTC timestamps sort lexicographically. Dedupe repeated queue states
+    # by the full visible identity; transitions with a new timestamp remain visible.
+    events.sort(key=lambda item: item["ts"], reverse=True)
+    seen = set()
+    unique: List[Dict[str, Any]] = []
+    for event in events:
+        identity = (event["ts"], event["phase"], event["title"], event.get("ref"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(event)
+    counts: Dict[str, int] = {}
+    for event in unique:
+        counts[event["phase"]] = counts.get(event["phase"], 0) + 1
+    return {"events": unique[:limit], "counts": counts, "sources": 5}
+
+
 def report() -> Dict[str, Any]:
     """The whole autonomy view. Each section independently guarded."""
     return {
@@ -320,6 +424,7 @@ def report() -> Dict[str, Any]:
         "vcs": _guard(vcs_state),
         "research": _guard(research_state),
         "llm": _guard(llm_state),
+        "activity": _guard(activity_state),
     }
 
 

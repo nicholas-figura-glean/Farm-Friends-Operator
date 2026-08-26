@@ -15,7 +15,7 @@ fail=0
 echo "=== syntax ==="
 for f in dashboard/trace_explorer.js dashboard/test_trace_explorer.js dashboard/preview_trace_explorer.js \
          dashboard/mcp_wire.js dashboard/test_mcp_wire.js dashboard/preview_mcp_wire.js \
-         dashboard/architecture.js dashboard/test_architecture.js; do
+         dashboard/architecture.js dashboard/test_architecture.js dashboard/operator.js; do
   if osascript -l JavaScript -e "ObjC.import('Foundation'); \
      var s = \$.NSString.stringWithContentsOfFileEncodingError('$f', \$.NSUTF8StringEncoding, null).js; \
      try { new Function(s); 'ok' } catch (e) { throw new Error('$f: ' + e.message) }" >/dev/null 2>&1; then

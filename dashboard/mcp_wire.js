@@ -573,12 +573,22 @@
       return !!lane.steps[step];
     });
     if (!visible.length) visible = model.lanes;
+    var active = visible.filter(function (lane) { return !lane.silent; });
+    var silent = visible.filter(function (lane) { return lane.silent; });
+    // Silence is evidence too, but eleven empty lanes should not push the useful
+    // traffic below the fold. Keep every reachable tool inspectable in one honest,
+    // collapsed group; focus opens it automatically when a silent tool is selected.
+    var silentHtml = silent.length
+      ? '<details class="mw-silent-group"' + (model.focus && model.focus.indexOf("tool:") === 0 ? ' open' : '') + '>'
+        + '<summary>\uD83D\uDD07 ' + silent.length + ' reachable tool' + (silent.length === 1 ? '' : 's')
+        + ' not called this run</summary>' + silent.map(function (lane) { return laneRowHtml(model, lane); }).join('')
+        + '</details>' : '';
     return '<div class="mw-stage' + (model.paused ? " paused" : "") + '" id="mw-stage"'
       + ' style="--loop:' + model.loop.toFixed(2) + 's">'
       + railHtml(model)
-      + '<div class="mw-lanes" id="mw-lanes">' + visible.map(function (lane) {
+      + '<div class="mw-lanes" id="mw-lanes">' + active.map(function (lane) {
         return laneRowHtml(model, lane);
-      }).join("") + '</div>'
+      }).join("") + silentHtml + '</div>'
       + '<div class="mw-server"><div class="mw-server-tower' + (model.stats.inFlight ? " busy" : "") + '">'
         + '<b>\uD83C\uDFE1</b><span>Farm Friends</span><small>MCP server</small>'
         + '<span class="mw-server-pulse"></span></div>'

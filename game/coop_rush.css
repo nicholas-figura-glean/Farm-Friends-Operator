@@ -1,5 +1,35 @@
 /* Coop Rush styles. Inherits the dashboard's palette variables so the tab looks
  * native there, and the standalone export ships the same variables. */
+.cr-page-hero { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:22px;
+  overflow:hidden; background:radial-gradient(420px 170px at 84% 10%,#72e09a1a,transparent 72%),linear-gradient(115deg,#173425,#111e18 62%,#0d1713); }
+.cr-kicker { color:var(--green); font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.16em; }
+.cr-page-hero h2 { margin:5px 0; color:var(--text); font-size:25px; letter-spacing:-.035em; text-transform:none; }
+.cr-page-hero p { margin:0; max-width:70ch; color:var(--muted); font-size:12px; }
+.game-automation { display:grid; grid-template-columns:auto minmax(160px,1fr); gap:12px; align-items:center; min-width:280px; }
+.game-auto-ring { --pct:0%; width:58px; height:58px; display:grid; place-items:center; border-radius:50%;
+  background:radial-gradient(circle at center,#102019 57%,transparent 58%),conic-gradient(var(--green) var(--pct),#26382f 0); }
+.game-auto-ring b { font-size:12px; }
+.game-auto-copy b { display:block; color:var(--green); font-size:14px; }
+.game-auto-copy span { display:block; max-width:260px; color:var(--muted); font-size:10px; line-height:1.4; }
+.game-producers { grid-column:span 8; }
+.game-progress { grid-column:span 4; }
+.cr-section-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:11px; }
+.cr-section-head h2 { margin-bottom:2px; }
+.cr-section-head > div > span { color:var(--muted); font-size:10.5px; }
+.cr-section-badge { flex:0 0 auto; border:1px solid #41624f; border-radius:999px; padding:4px 8px; color:var(--green); font-size:9.5px; font-weight:700; }
+.game-events { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.game-event-list { display:flex; flex-direction:column; gap:6px; }
+.game-event { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; padding:7px 8px; border:1px solid var(--line); border-radius:8px; background:#0b1511; }
+.game-event time { color:#71877b; font-size:8px; }
+.game-event span { color:#a9bbb0; font-size:9.5px; line-height:1.35; }
+.cr-drawer { padding:0 !important; overflow:hidden; }
+.cr-drawer > summary { list-style:none; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:13px 16px; cursor:pointer; color:var(--text); font-size:12px; font-weight:700; }
+.cr-drawer > summary::-webkit-details-marker { display:none; }
+.cr-drawer > summary:after { content:"+"; display:grid; place-items:center; width:22px; height:22px; border:1px solid var(--line); border-radius:7px; color:var(--muted); font-size:15px; }
+.cr-drawer[open] > summary:after { content:"−"; }
+.cr-drawer > summary span { margin-left:auto; color:var(--muted); font-size:10px; font-weight:400; }
+.cr-drawer-body { padding:14px 16px 16px; border-top:1px solid #ffffff0d; }
+.cr-ach-record-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(250px,.75fr); gap:16px; }
 .cr-hud { display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap; align-items:flex-end; }
 .cr-hud-main { display:flex; gap:26px; flex-wrap:wrap; }
 .cr-stat label { display:block; color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.08em; }
@@ -163,7 +193,14 @@
 @keyframes crtoast { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 
 @media (max-width:900px) {
-  .cr-prod { grid-template-columns:48px 1fr; }
+  .cr-page-hero { grid-template-columns:1fr; }
+  .game-automation { min-width:0; }
+  .game-producers,.game-progress { grid-column:1/-1; }
+  .cr-ach-record-grid { grid-template-columns:1fr; }
+  .cr-prod { grid-template-columns:48px minmax(0,1fr); }
+  .cr-prod-meta { display:block; }
+  .cr-prod-meta > span:first-child { display:block; white-space:normal; overflow-wrap:anywhere; }
+  .cr-ups-wide { grid-template-columns:1fr; }
   .cr-prod-buy { grid-column:1/-1; flex-direction:row; }
   .cr-prod-buy .cr-btn { flex:1; }
   .cr-advice-card { grid-template-columns:26px 1fr; }

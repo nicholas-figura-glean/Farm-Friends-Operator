@@ -185,6 +185,12 @@ var RESULT = (function () {
   ok("live run: chart painted", (html("chart") || "").indexOf("<svg") >= 0);
   ok("live run: signals painted", (html("signals") || "").length > 20);
   ok("live run: overview painted", txt("last-run") === "#216", "got " + txt("last-run"));
+  ok("operator shell: healthy routine operation reads autonomous", txt("global-status") === "Autonomous", txt("global-status"));
+  ok("operator shell: overview explains what changed", (html("overview-deltas") || "").indexOf("Produce") >= 0 && (html("overview-deltas") || "").indexOf("Routine tokens") >= 0);
+  ok("operator shell: latest cycle shows observe through verify", (html("cycle-story") || "").indexOf("Observe") >= 0 && (html("cycle-story") || "").indexOf("Verify") >= 0);
+  ok("operator shell: pipeline surfaces its decision and guardrails", (txt("pipe-decision-title") || "").length > 10 && (html("pipe-guardrails") || "").indexOf("Production") >= 0);
+  ok("operator shell: healing remains a closed loop when quiet", (html("healing-loop") || "").indexOf("Defaults preserved") >= 0);
+  ok("operator shell: boundary health is summarized outside the animation", (txt("wire-hero-state") || "").indexOf("Boundary") >= 0);
   ok("live run: hero paints the live estimate", (txt("hero-produce") || "").indexOf("1,410,000") >= 0,
      txt("hero-produce"));
   ok("live run: hero carries recent sparklines", (html("spark-produce") || "").indexOf("<svg") >= 0);
@@ -272,6 +278,9 @@ var RESULT = (function () {
   try { renderEvidence(TEST_EVIDENCE); } catch (e) { evThrew = e.message || String(e); }
   ok("findings render does not throw", evThrew === null, evThrew || "");
   ok("findings: ceiling evidence is visual", (html("ev-ceiling-chart") || "").indexOf("<svg") >= 0);
+  ok("findings: the scientific claim has a plain-language lead", (txt("ev-ceiling-summary") || "").indexOf("Growth is") === 0, txt("ev-ceiling-summary"));
+  ok("findings: the strategy card selects the growth claim", (html("ev-strategy-brief") || "").indexOf("scaling") >= 0, html("ev-strategy-brief"));
+  ok("findings: knowledge lifecycle is visible", (html("knowledge-flow") || "").indexOf("Questions") >= 0 && (html("knowledge-flow") || "").indexOf("Runtime") >= 0);
   ok("findings: measured sample count is shown", (html("ev-ceiling-stats") || "").indexOf("samples") >= 0);
   // The growth decision rests on the exponent, so it must be visible on the tab and
   // not merely present in the payload.
@@ -451,11 +460,23 @@ def main() -> int:
         ("local redraw ticker is installed", "setInterval(tick, 1000)" in html),
         ("game bundle is wrapped in try/catch", re.search(r"try\s*\{\s*/\*GAME_JS_START\*/", html) is not None),
         ("no unsubstituted template markers",
-         not re.search(r"__(GAME|TRACE|WIRE)_(JS|CSS|MARKUP)__", html)),
+         not re.search(r"__(GAME|TRACE|WIRE|ARCH|OPERATOR)_(JS|CSS|MARKUP)__", html)),
         # A placeholder token mentioned anywhere in the template (even inside a
         # comment) is substituted textually, which silently injects a second copy
         # of the whole game bundle and breaks the page.
         ("game bundle is embedded exactly once", html.count(monitor.GAME_JS) == 1),
+        ("operator bundle is embedded exactly once", html.count(monitor.OPERATOR_JS) == 1),
+        ("operator stylesheet is embedded", ".autonomy-ribbon" in html and ".knowledge-flow" in html),
+        ("seven standard tabs retain the scoped operator system", html.count('class="tab operator-tab"') == 7),
+        ("architecture composes the shared hierarchy through its specialized tab", 'class="tab architecture-tab" id="tab-architecture"' in html),
+        ("architecture bundle is embedded exactly once", html.count(monitor.ARCH_JS) == 1),
+        ("architecture stylesheet includes operator summary and inspector posture",
+         ".arch-situation" in html and ".arch-component-posture" in html),
+        ("architecture answers the four operator questions before the graph",
+         all(text in monitor.ARCH_JS for text in ("Happening now", "What changed", "Autonomous action", "Operator action"))),
+        ("architecture history defaults to progressive disclosure", 'arch-history audit-drawer' in monitor.ARCH_JS),
+        ("autonomy loads outside Architecture on its own cadence", "loadOperatorAutonomy" in html and "OP_AUTONOMY_REFRESH_MS" in html),
+        ("raw audit walls default to progressive disclosure", html.count("audit-drawer") >= 8),
         ("trace bundle is embedded exactly once", html.count(monitor.TRACE_JS) == 1),
         ("trace engine and panel are both embedded",
          "TraceExplorer" in html and "TracePanel" in html),
@@ -480,8 +501,8 @@ def main() -> int:
         ("trace explains measured spans versus static reachability",
          "never as invented runtime spans" in html),
         ("findings have a dedicated non-polled endpoint", 'path == "/api/evidence"' in open(monitor.__file__, encoding="utf-8").read()),
-        ("hash routes every top-level experience", '"overview","pipeline","cost","history","findings","game","wire"' in html),
-        ("keyboard shortcuts route all seven tabs", 'o:"overview",p:"pipeline",c:"cost",t:"history",f:"findings",g:"game",w:"wire"' in html),
+        ("hash routes every top-level experience", '"overview","pipeline","cost","history","findings","game","wire","architecture"' in html),
+        ("keyboard shortcuts route all eight tabs", 'o:"overview",p:"pipeline",c:"cost",t:"history",f:"findings",g:"game",w:"wire",a:"architecture"' in html),
         # The switchboard is the only animated panel, and it is mounted next to the
         # trace: same isolation contract, same before-the-poll ordering.
         ("switchboard bundle is embedded exactly once", html.count(monitor.WIRE_JS) == 1),

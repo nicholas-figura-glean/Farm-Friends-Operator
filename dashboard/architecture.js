@@ -57,6 +57,124 @@ function archUnique(list) {
 }
 function archResetCamera() { ARCH_CAMERA = {scale: 1, x: 0, y: 0}; }
 
+function archAge(timestamp) {
+  var ms = Date.now() - Date.parse(String(timestamp || ""));
+  if (!isFinite(ms) || ms < 0) return "";
+  var minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return minutes + "m ago";
+  var hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function archActivityEvents(autonomyView) {
+  return archList((((autonomyView || {}).activity || {}).events));
+}
+
+function archLatest(items, predicate) {
+  var list = archList(items);
+  for (var i = 0; i < list.length; i++) if (!predicate || predicate(list[i] || {})) return list[i] || null;
+  return null;
+}
+
+/* Architecture posture is deliberately narrower than overall farm health. A sleeping
+ * scheduled service remains healthy architecture when it is loaded; topology drift,
+ * unmapped code, path derivation failures, or an unloaded service are real defects. */
+function archPosture(payload, current, autonomyView) {
+  payload = payload || {};
+  current = current || {};
+  var stats = current.stats || {};
+  var agents = archList(current.nodes).filter(function (node) { return node.kind === "agent"; });
+  var knownAgents = agents.filter(function (node) { return !!node.agent_health; });
+  var loadedAgents = knownAgents.filter(function (node) { return node.agent_health.loaded; }).length;
+  var downAgents = agents.filter(function (node) { return !!node.down; }).length;
+  var agentTotal = agents.length || Number(stats.launch_agents) || 0;
+  var unmapped = archList(current.unmapped).length;
+  var runtimeErrors = archList(current.runtime_errors).length;
+  var drift = payload.live_matches_recorded === false;
+  var vcs = (autonomyView || {}).vcs || {};
+  var dirtySources = archList(vcs.dirty_source_paths).length;
+  var canary = (autonomyView || {}).canary || {};
+  var canaryStatus = String(canary.status || "").toLowerCase();
+  var canaryBad = ["failed", "reverted", "unhealthy", "rollback"].indexOf(canaryStatus) !== -1;
+  var canaryWatching = canaryStatus === "watching" || canaryStatus === "probation";
+  var tone = drift || downAgents || unmapped || runtimeErrors || canaryBad ? "attention" :
+    (dirtySources || canaryWatching ? "watch" : "good");
+  var intervention = "No operator action required";
+  if (drift) intervention = "Record the live topology before relying on change impact";
+  else if (downAgents) intervention = "Restore " + downAgents + " unloaded service" + (downAgents === 1 ? "" : "s");
+  else if (unmapped) intervention = "Classify " + unmapped + " unmapped module" + (unmapped === 1 ? "" : "s");
+  else if (runtimeErrors) intervention = "Inspect " + runtimeErrors + " path derivation error" + (runtimeErrors === 1 ? "" : "s");
+  else if (canaryBad) intervention = "Review the failed architecture canary outcome";
+  else if (dirtySources) intervention = "Review " + dirtySources + " changed source file" + (dirtySources === 1 ? "" : "s") + " before release";
+  else if (canaryWatching) intervention = "No action unless the active canary degrades";
+  var version = Number(payload.versions) || 0;
+  var liveTitle = drift ? "Live tree differs from recorded v" + version : "Live tree matches recorded v" + version;
+  var generatedAge = archAge(current.generated_at);
+  return {
+    tone: tone,
+    label: tone === "attention" ? "Architecture needs attention" :
+      (tone === "watch" ? "Architecture coherent · review pending" : "Architecture coherent"),
+    intervention: intervention,
+    liveTitle: liveTitle,
+    liveDetail: (generatedAge ? "Derived " + generatedAge : "Derived from the current source tree") +
+      (current.short ? " · shape " + current.short : ""),
+    version: version,
+    drift: drift,
+    unmapped: unmapped,
+    runtimeErrors: runtimeErrors,
+    dirtySources: dirtySources,
+    canaryStatus: canaryStatus,
+    agentTotal: agentTotal,
+    loadedAgents: knownAgents.length ? loadedAgents : null,
+    downAgents: downAgents,
+    protectedCount: Number(stats.protected) || 0
+  };
+}
+
+function archSituationHtml(payload, current, autonomyView, posture) {
+  var structural = archLatest((payload || {}).events, function (event) {
+    return !!event.structural || event.kind === "version";
+  });
+  var activity = archLatest(archActivityEvents(autonomyView), function (event) {
+    return ["decide", "act", "verify"].indexOf(String(event.phase || "")) !== -1;
+  });
+  var changeBits = [];
+  if (structural) {
+    if (archList(structural.added).length) changeBits.push("+" + archList(structural.added).length + " components");
+    if (archList(structural.removed).length) changeBits.push("−" + archList(structural.removed).length + " components");
+    if (!archList(structural.added).length && !archList(structural.removed).length) {
+      if (structural.detail) changeBits.push(structural.detail);
+      changeBits.push("no component additions or removals");
+    }
+    if (archAge(structural.ts)) changeBits.push(archAge(structural.ts));
+  }
+  var activityBits = [];
+  if (activity) {
+    if (activity.actor) activityBits.push(activity.actor);
+    if (activity.status) activityBits.push(activity.status);
+    if (archAge(activity.ts)) activityBits.push(archAge(activity.ts));
+  }
+  function cell(kind, icon, label, title, detail) {
+    return '<article class="arch-situation-cell ' + kind + '"><span class="arch-situation-icon" aria-hidden="true">' + icon +
+      '</span><div><small>' + archEscape(label) + '</small><b>' + archEscape(archTruncate(title, 130)) +
+      '</b><p>' + archEscape(archTruncate(detail, 180)) + '</p></div></article>';
+  }
+  return '<section class="arch-situation" aria-label="Architecture operating summary">' +
+    cell(posture.drift ? "attention" : "good", "◎", "Happening now", posture.liveTitle, posture.liveDetail) +
+    cell(structural ? "good" : "neutral", "↗", "What changed",
+      structural ? (structural.title || "Structural version recorded") : "No structural version recorded",
+      structural ? changeBits.join(" · ") : "The architecture ledger has no structural event yet") +
+    cell(activity && activity.status === "failed" ? "attention" : "watch", "◇", "Autonomous action",
+      activity ? (activity.title || "Autonomous decision recorded") : "No recent autonomous decision available",
+      activity ? activityBits.join(" · ") : "Activity telemetry is unavailable") +
+    cell(posture.tone, posture.tone === "attention" ? "!" : "✓", "Operator action", posture.intervention,
+      posture.tone === "attention" ? "Intervention required" :
+        (posture.tone === "watch" ? "Review before promotion; runtime may continue" : "No intervention required")) +
+    '</section>';
+}
+
 /* Health is an overlay, not architecture. A missing liveness payload makes no claim. */
 function archAgentHealth(autonomyView) {
   var health = {};
@@ -480,8 +598,8 @@ function archDetailHtml(current, id, model) {
     return '<div class="arch-detail-empty"><span class="arch-kicker">Explore the live model</span>' +
       '<h3>Select any component or relationship</h3><p>' +
       (model.view === "runtime" ?
-        'Choose a run stage to narrow the graph, then select a module or tool to follow calls in both directions.' :
-        'Select a module to reveal what it uses, what depends on it, and the full transitive blast radius of a change.') +
+        'Choose a stage or component to follow the source-derived route to the game boundary.' :
+        'Select a component to expose direct dependencies, reverse dependencies, and change radius.') +
       '</p><div class="arch-starts">' + startButtons + '</div></div>';
   }
 
@@ -509,15 +627,23 @@ function archDetailHtml(current, id, model) {
     ' in the transitive change radius</span></div>' : "";
   var editable = node.kind === "tool" ? "outside this repository" :
     (node.protected ? "agents may not edit this file" : "author agent may patch this file");
+  var postureTitle = node.kind === "tool" ? "External boundary" :
+    (node.down ? "Service unavailable" : (node.protected ? "Protected control surface" : "Autonomous edits permitted"));
+  var postureTone = node.down ? "attention" : (node.protected || node.kind === "tool" ? "watch" : "good");
+  function relation(title, ids) {
+    return '<details class="arch-relation"><summary><span>' + archEscape(title) + '</span><b>' + ids.length +
+      '</b></summary><div>' + archRelationButtons(ids, model) + '</div></details>';
+  }
 
   return '<div class="arch-detail-head"><span class="arch-kicker">' + archEscape(archLayerName(current, node.layer)) +
     '</span><h3>' + archEscape(label) + '</h3><div class="arch-badges">' + type + locked + health + '</div></div>' +
+    '<div class="arch-component-posture ' + postureTone + '"><small>Change posture</small><b>' + postureTitle +
+    '</b><span>' + editable + '</span></div>' +
     '<div class="dpath">' + archEscape(node.path || "derived component") + '</div>' +
     (node.doc ? '<p class="ddoc">' + archEscape(node.doc) + '</p>' : "") + impactHtml +
     '<dl><dt>size</dt><dd>' + (node.loc ? archEscape(node.loc) + " lines" : "not local code") +
-    '</dd><dt>change policy</dt><dd>' + editable + '</dd></dl>' +
-    '<section><h5>' + relationOut + '</h5><div>' + archRelationButtons(outgoing, model) + '</div></section>' +
-    '<section><h5>' + relationIn + '</h5><div>' + archRelationButtons(incoming, model) + '</div></section>' + stepHtml;
+    '</dd><dt>relationship lens</dt><dd>' + (model.view === "runtime" ? "source-derived calls" : "parsed local dependencies") + '</dd></dl>' +
+    '<div class="arch-relations">' + relation(relationOut, outgoing) + relation(relationIn, incoming) + '</div>' + stepHtml;
 }
 
 function archEventHtml(event) {
@@ -547,13 +673,24 @@ function archEventsHtml(events, filter) {
   return rows.length ? rows.map(archEventHtml).join("") : '<p class="arch-note">No events recorded yet.</p>';
 }
 
-function archStatsHtml(current) {
+function archStatsHtml(current, posture) {
   var stats = (current || {}).stats || {};
-  var cells = [["modules", stats.modules], ["agents", stats.launch_agents],
-    ["locked", stats.protected], ["edges", stats.edges], ["tools", stats.tools], ["lines", stats.loc]];
+  posture = posture || archPosture({}, current || {}, null);
+  var services = posture.loadedAgents == null ?
+    (posture.agentTotal ? posture.agentTotal + " defined" : "-") :
+    posture.loadedAgents + "/" + posture.agentTotal + " loaded";
+  var cells = [
+    ["recorded shape", posture.version ? "v" + posture.version : "-", posture.drift ? "bad" : "good"],
+    ["modules", stats.modules, ""],
+    ["services", services, posture.downAgents ? "bad" : "good"],
+    ["dependencies", stats.edges, ""],
+    ["boundary tools", stats.tools, ""],
+    ["protected", stats.protected, "watch"]
+  ];
   return cells.map(function (cell) {
-    var shown = typeof cell[1] === "number" ? cell[1].toLocaleString() : "-";
-    return '<div class="arch-stat"><b>' + shown + '</b><span>' + archEscape(cell[0]) + '</span></div>';
+    var shown = typeof cell[1] === "number" ? cell[1].toLocaleString() : String(cell[1] == null ? "-" : cell[1]);
+    return '<span class="delta ' + cell[2] + '"><span>' + archEscape(cell[0]) + '</span><b>' +
+      archEscape(shown) + '</b></span>';
   }).join("");
 }
 
@@ -571,65 +708,82 @@ function archStepRailHtml(current) {
 
 function archToolbarHtml(current, model) {
   var relation = model.view === "runtime" ?
-    '<b>Calls</b> are source-derived paths; arrows point toward the next module or external tool.' :
-    '<b>Uses</b> arrows point from a module to what it imports. Select one to expose its change radius.';
+    '<b>Calls</b> are source-derived paths, never invented timings.' :
+    '<b>Uses</b> means a parsed local dependency, never observed execution.';
   return '<div class="arch-toolbar"><div class="arch-view-switch" role="group" aria-label="Architecture lens">' +
-    '<button data-arch-view="runtime" aria-pressed="' + (model.view === "runtime") + '"><span>▶</span> How it runs</button>' +
-    '<button data-arch-view="structure" aria-pressed="' + (model.view === "structure") + '"><span>◇</span> System map</button></div>' +
-    '<label class="arch-search"><span>Search architecture</span><input type="search" data-arch-search value="' +
+    '<button data-arch-view="runtime" aria-pressed="' + (model.view === "runtime") + '"><span>▶</span><b>Runtime flow</b><small>How it runs</small></button>' +
+    '<button data-arch-view="structure" aria-pressed="' + (model.view === "structure") + '"><span>◇</span><b>Change impact</b><small>System map</small></button></div>' +
+    '<label class="arch-search"><span>Find a component</span><input type="search" data-arch-search value="' +
       archEscape(ARCH_QUERY) + '" placeholder="module, path, layer…" autocomplete="off"></label>' +
     '<div class="arch-map-controls" role="group" aria-label="Map zoom"><button data-arch-zoom="out" aria-label="Zoom out">−</button>' +
       '<span id="arch-zoom-label">' + Math.round(ARCH_CAMERA.scale * 100) + '%</span>' +
       '<button data-arch-zoom="in" aria-label="Zoom in">+</button><button data-arch-zoom="fit">Fit</button></div>' +
-    '<div class="arch-relation-note">' + relation + '</div></div>' +
-    (model.view === "runtime" ? '<div class="arch-step-rail" aria-label="Run stages">' + archStepRailHtml(current) + '</div>' : "");
+    '<div class="arch-relation-note"><span>' + relation + '</span><strong>' + model.nodes.length +
+      ' components · ' + model.edges.length + ' relationships</strong></div></div>' +
+    (model.view === "runtime" ? '<div class="arch-stage-browser"><div class="arch-stage-label"><b>Follow one run stage</b><span>Whole run or one source-derived slice</span></div><div class="arch-step-rail" aria-label="Run stages">' +
+      archStepRailHtml(current) + '</div></div>' : "");
 }
 
 function renderArchitecture(payload, autonomyView) {
   var host = document.getElementById("tab-architecture");
   if (!host) return;
   if (!payload || payload.error) {
-    host.innerHTML = '<div class="card full"><h2>Architecture</h2><p class="arch-note">Could not build the architecture view: ' +
-      archEscape((payload || {}).error || "no data") + '</p></div>';
+    host.innerHTML = '<div class="arch-shell"><section class="page-hero arch-hero"><div><span class="page-kicker">Architecture telemetry unavailable</span>' +
+      '<h2>Architecture control plane</h2><p>The source-derived model could not be built. The rest of the dashboard remains read-only and available.</p></div>' +
+      '<div class="hero-verdict attention"><b>Model unavailable</b><span>' +
+      archEscape((payload || {}).error || "No architecture data returned") + '</span></div></section></div>';
     return;
   }
 
   var current = archApplyHealth(payload.current || {}, autonomyView);
   var model = archGraphModel(current, ARCH_VIEW, ARCH_STEP, ARCH_SELECTED, ARCH_QUERY);
   var selected = model.selected;
-  var drift = payload.live_matches_recorded === false ? '<div class="arch-warn">The live tree’s shape does not match the newest recorded version. The next architecture scan will record this drift.</div>' : "";
-  var unmapped = archList(current.unmapped).length ? '<div class="arch-warn">Unclassified modules: ' +
-    archEscape(archList(current.unmapped).join(", ")) + '. They are temporarily shown in Observation &amp; evidence.</div>' : "";
-  var runtimeWarning = model.view === "runtime" && archList(current.runtime_errors).length ?
-    '<div class="arch-warn">Some runtime paths could not be derived: ' + archEscape(archList(current.runtime_errors).join("; ")) + '</div>' : "";
+  var posture = archPosture(payload, current, autonomyView);
+  var drift = posture.drift ? '<div class="arch-warn attention">The live tree’s shape does not match the newest recorded version. Change-impact claims remain provisional until the next architecture scan records it.</div>' : "";
+  var unmapped = posture.unmapped ? '<div class="arch-warn attention">Unclassified modules: ' +
+    archEscape(archList(current.unmapped).join(", ")) + '. They remain visible in Observation &amp; evidence until classified.</div>' : "";
+  var runtimeWarning = model.view === "runtime" && posture.runtimeErrors ?
+    '<div class="arch-warn attention">Some runtime paths could not be derived: ' + archEscape(archList(current.runtime_errors).join("; ")) + '</div>' : "";
   var filters = ["all", "structural", "release", "canary", "order", "finding"];
   var filterHtml = filters.map(function (name) {
     return '<button data-arch-filter="' + name + '" aria-pressed="' + (ARCH_FILTER === name) + '">' + name + '</button>';
   }).join("");
   var step = model.view === "runtime" && ARCH_STEP !== "all" ? archRuntimeStep(current, ARCH_STEP) : null;
-  var context = step ? '<div class="arch-map-context"><span>Run stage</span><b>' + archEscape(step.name) +
-    '</b><small>' + archList(step.modules).length + ' reachable modules · ' + archList(step.tools).length +
-    ' external tools</small><button data-arch-step="all">Show whole run</button></div>' :
-    '<div class="arch-map-context"><span>' + (model.view === "runtime" ? "Execution lens" : "Dependency lens") +
-    '</span><b>' + model.nodes.length + ' visible components</b><small>' + model.edges.length +
-    ' directional relationships</small></div>';
+  var focusedNode = selected ? model.byId[selected] : null;
+  var contextTitle = focusedNode ? (focusedNode.label || focusedNode.id) :
+    (step ? step.name : (model.view === "runtime" ? "Whole run" : "Whole system"));
+  var contextDetail = step ? archList(step.modules).length + ' reachable modules · ' + archList(step.tools).length + ' external tools' :
+    model.nodes.length + ' visible components · ' + model.edges.length + ' directional relationships';
+  var contextAction = selected ? '<button data-arch-node="' + archEscape(selected) + '">Clear focus</button>' :
+    (step ? '<button data-arch-step="all">Show whole run</button>' : "");
+  var context = '<div class="arch-map-context"><span>' +
+    (step ? "Run stage" : (model.view === "runtime" ? "Runtime flow" : "Change impact")) + '</span><b>' +
+    archEscape(contextTitle) + '</b><small>' + archEscape(contextDetail) + '</small>' + contextAction + '</div>';
+  var outgoingLabel = model.view === "runtime" ? "selected calls" : "selected uses";
+  var incomingLabel = model.view === "runtime" ? "calls selected" : "depends on selected";
+  var latestEvent = archLatest(payload.events);
+  var historyNote = archList(payload.events).length + ' recorded events';
+  if (latestEvent && archAge(latestEvent.ts)) historyNote += ' · latest ' + archAge(latestEvent.ts);
+  var revision = archEscape(current.branch || "?") + '@' + archEscape(current.commit || "?");
 
   host.innerHTML = '<div class="arch-shell">' +
-    '<section class="arch-hero"><div class="arch-head"><div><span class="arch-kicker">Live-derived system model</span>' +
-      '<h2>Explore how Farm Friends works</h2><p>Trace a real cycle to the MCP boundary, or switch to the system map to inspect dependencies and change impact.</p></div>' +
-      '<div class="arch-version"><code>' + archEscape(current.short || "") + '</code><span>' +
-      archEscape(payload.versions || 0) + ' versions · ' + archEscape(current.branch || "?") + '@' +
-      archEscape(current.commit || "?") + '</span></div></div>' +
-      '<div class="arch-stats">' + archStatsHtml(current) + '</div></section>' +
-    drift + unmapped + runtimeWarning + archToolbarHtml(current, model) +
-    '<div class="arch-workspace"><section class="arch-map-card">' + context +
-      '<div class="arch-map-legend"><span><i class="module"></i>module</span><span><i class="agent"></i>agent</span>' +
+    '<section class="page-hero arch-hero"><div><span class="page-kicker">Source-derived control plane</span>' +
+      '<h2>Architecture control plane</h2><p>See the current shape, what changed, how autonomous changes are governed, and where operator review is required. Current source <code>' +
+      revision + '</code>.</p><div class="delta-row">' + archStatsHtml(current, posture) + '</div></div>' +
+      '<div class="hero-verdict ' + posture.tone + '"><b>' + archEscape(posture.label) + '</b><span>' +
+      archEscape(posture.intervention) + '</span></div></section>' +
+    archSituationHtml(payload, current, autonomyView, posture) + drift + unmapped + runtimeWarning +
+    archToolbarHtml(current, model) +
+    '<div class="arch-workspace"><section class="arch-map-card" aria-label="Interactive architecture map">' + context +
+      '<div class="arch-map-legend"><span><i class="module"></i>module</span><span><i class="agent"></i>service</span>' +
       '<span><i class="tool"></i>external tool</span><span><i class="locked"></i>protected</span>' +
-      '<span><i class="incoming"></i>depends on selected</span><span><i class="outgoing"></i>selected uses</span></div>' +
-      archGraphHtml(model) + '<div class="arch-map-help">Scroll to zoom · drag the canvas to pan · select a node to trace relationships</div></section>' +
-      '<aside class="card arch-detail" id="arch-detail">' + archDetailHtml(current, selected, model) + '</aside></div>' +
-    '<details class="card arch-history"><summary><span><b>Architecture change history</b><small>Structural versions plus the releases, canaries, findings and work orders around them</small></span><em>' +
-      archEscape(payload.versions || 0) + ' versions</em></summary><div class="arch-history-body"><div class="arch-filter">' +
+      '<span><i class="incoming"></i>' + incomingLabel + '</span><span><i class="outgoing"></i>' + outgoingLabel + '</span></div>' +
+      archGraphHtml(model) + '<div class="arch-map-help">Scroll to zoom · drag to pan · select a component to inspect its route and change posture</div></section>' +
+      '<aside class="card arch-detail" id="arch-detail" aria-label="Component inspector" aria-live="polite">' +
+      archDetailHtml(current, selected, model) + '</aside></div>' +
+    '<details class="card arch-history audit-drawer"><summary><span><b>Architecture audit trail</b><small>' +
+      archEscape(historyNote) + ' · structural versions, releases, canaries, findings and work orders</small></span><em>' +
+      archEscape(payload.versions || 0) + ' structural versions</em></summary><div class="drawer-body arch-history-body"><div class="arch-filter">' +
       filterHtml + '</div><div class="arch-timeline" id="arch-timeline">' + archEventsHtml(payload.events, ARCH_FILTER) +
       '</div></div></details></div>';
 

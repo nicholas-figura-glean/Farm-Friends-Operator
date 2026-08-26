@@ -168,59 +168,61 @@ Two port details, both learned the hard way on this machine:
   the `app: farmfriends-monitor` marker in `/api/state`, which is why running it
   twice reuses one server instead of starting a second.
 
-The monitor is local and read-only, with six tabs. Use the tabs or the keyboard:
-`O` overview, `P` pipeline, `C` cost, `T` token history, `F` findings, `G` game.
+The monitor is local and read-only, with eight tabs. Use the tabs or the keyboard:
+`O` overview, `P` pipeline, `C` healing, `T` cost history, `F` findings, `G` game,
+`W` MCP traffic, `A` architecture.
 
-- **Overview** - a live-estimated hero counter with sparklines; a farm scene whose
-  pens, silo, hunger pressure and barn are all real telemetry; current standings;
-  and the **Produce Grand Prix**, a zero-extra-call multi-racer chart over 20, 50,
-  or 100 recorded runs with total-score and window-gain views. It also shows six
-  switchable farm trends, launchd status, current intent, growth policy, and
-  expandable recent runs with phase timing, actions, and decision evidence.
-- **Pipeline** - opens with a two-part **execution trace**, using the same model
-  as production tracing tools instead of asking one spatial graph to explain
-  everything. **Run trace** is a nested waterfall: the fourteen measured step
-  spans share one clock, and every observed MCP call is grouped beneath its
-  parent step. Repeated calls (for example 40 adoptions) occupy one lane with 40
-  individually inspectable ticks, not 40 noisy rows. **Tool matrix** is the whole
-  system at a glance: pipeline steps are rows, the 11 external MCP tools are
-  columns, a hollow cell means the code can reach that tool, and a numbered green
-  cell is how many calls this run actually made. A blank is meaningful: `plan`
-  and `finish` have no server path. Selecting a step, call lane or matrix cell
-  opens its measured start/duration/status, arguments, bounded result or error,
-  and the source-derived Python path. Functions are explicitly labelled **static
-  reachability, not measured time**; the UI never invents function spans.
-- Below it, the same run step by step: status per step
-  (pending / active / done / skipped / failed), duration against the recent
-  median for that step, what each step found (units collected, revenue, adopted
-  vs requested, rank), the reason any step was skipped, and elapsed time against
-  the cycle budget and hard timeout. A run occupies ~80s of every ~260s, so
-  between runs the tab counts down to the next expected start (last finish +
-  cadence) and flags it when that is overdue; a run whose progress writes have
-  stopped reads **stalled** rather than ticking forever, which is what a
-  hard-killed process leaves behind. Plus **what the run is judged on**: the score
-  rate against its floor, whether the previous window was also low (escalation
-  needs two), hunger against the production stop, and feed against the reserve.
-- **Cost & healing** - all-time LLM cost, tokens and wake-ups; how many runs were
-  charged versus recorded at zero; the last 5 runs broken out (tokens in/out,
-  cost, wake-ups, alerts healed, and the alerts each run raised); the cost avoided
-  by healing; **what is being self-healed**, grouped by alert class with the last
-  remedy and the alert text behind it; the active knobs with healed ones marked;
-  and the full remedy log.
-- **Token & cost history** - the longitudinal before/after story: actual cumulative
-  ledger cost against the measured LLM-era low/mid/high counterfactual, switchable
-  cost/token/per-run/healing views, 50/100/all-run ranges, the token composition of
-  the old loop, projected monthly impact, a run-by-run zero-cost proof strip, and
-  the six Python changes that moved the line to zero. Green is booked data; amber
-  is explicitly labelled as the 46-run historical estimate rather than an invoice.
-- **Findings** - the depth behind the operator: a ledger-derived herd/output curve,
-  the run-50 species experiment, retired crop and collection hypotheses, a live
-  old-loop cost counterfactual, detector redesigns, and the run-by-run timeline of
-  how the model changed. It comes from `/api/evidence`, fetched once rather than
-  repeated on the 2-second state poll.
-- **Coop Rush** - a playable incremental farm game (see below).
+A shared autonomy ribbon stays above every view. It reports overall operating mode,
+loaded control loops, the live/last cycle, and the latest normalized change from the
+healing, contract, work-order, canary, and research ledgers. Every operator tab leads
+with four answers: what is happening, what changed, what the system decided and did,
+and whether a person needs to intervene. Raw tables and logs remain available through
+explicit audit drawers instead of competing with the current verdict.
 
-It reads `state/` only and never calls the farm API.
+- **Overview** is the autonomous command center: live objective metrics, a telemetry-
+  backed farm scene, the latest Observe → Decide → Act → Verify cycle, guardrails,
+  scheduler/release state, compact top-five standings, the zero-extra-call Produce
+  Grand Prix, growth policy, and switchable farm trends. Full inventory, run history,
+  intent, and logs are progressively disclosed.
+- **Pipeline** is a focused run workspace. A live command bar shows status, budget,
+  next cadence slot, and the latest completed outcome; the decision rail explains why
+  the plan was selected; four guardrails expose production, hunger, feed, and timeout
+  headroom. **Run Trace** and **Tool Matrix** retain measured spans, observed MCP calls,
+  source-derived reachability, and an on-demand inspector. Recorded step rows are an
+  audit drawer rather than a duplicate primary view.
+- **Healing** shows the closed loop: Detect → Diagnose → Remedy → Verify. It leads with
+  explicit zero-cost runs, local dispositions, model wake-ups, the latest intervention,
+  and active clamped safeguards. Historical alert examples and the full remedy ledger
+  are expandable; the per-alert avoided-cost figure is clearly demoted as an upper-
+  bound methodology estimate, not booked savings.
+- **Cost history** tells the measured before/after story: actual exception ledger
+  against the 46-run LLM-era range, switchable cost/token/per-run/healing curves,
+  synchronized selectable milestones, monthly counterfactual, token composition, and
+  a run-by-run zero-cost proof strip.
+- **Findings** is a knowledge control plane: Questions → Probes → Claims → Policy →
+  Runtime. The current growth verdict is stated in plain language, the full scientific
+  claim remains available, accepted/recheck/superseded claims are filterable, only the
+  highest-priority questions lead, and current autonomous research/work-order activity
+  sits beside the strategy verdict. Species evidence, retired hypotheses, detector
+  redesigns, and model history remain auditable drawers. It comes from `/api/evidence`,
+  fetched outside the 2-second poll.
+- **Coop Rush** is an automation-first incremental farm game. Its HUD now shows manual,
+  partial, or hands-free state; the producer board exposes manager coverage and next
+  automation; the advisor gives one payback-ranked action; recent purchases, managers,
+  milestones, rebuilds, and offline recovery stay in a compact event feed.
+- **MCP traffic** leads with boundary health, clean-call coverage, concurrency, overlap,
+  and the slowest dependency. Every packet remains one recorded call; active lanes lead
+  while reachable-but-silent tools live in one collapsed group. Replay and static
+  diagnostics remain synchronized.
+- **Architecture** is the source-derived change control plane. It leads with live-to-
+  recorded topology alignment, service coverage, the latest structural version, the
+  latest autonomous decision, and explicit pre-release/operator guidance. **Runtime
+  flow** preserves source-derived call paths to the MCP boundary; **Change impact**
+  preserves parsed dependency and transitive blast-radius semantics. Search, stage
+  slicing, pan/zoom, protected-boundary posture, component inspection, and the complete
+  architecture audit trail remain available through progressive drill-down.
+
+The monitor reads existing local state only and never calls or mutates the farm API.
 
 The pipeline view is fed by `farm/progress.py`, which the loop updates as it
 runs. Progress writes are atomic and best-effort: monitoring costs visibility
@@ -263,8 +265,9 @@ visible:
   contracts; `dashboard/test_mcp_wire.js` verifies 71 switchboard contracts;
   `deploy/test_tool_trace.py` verifies 21 telemetry, pairing, error and
   redaction contracts; `deploy/test_dashboard.py` runs the real page script and
-  snapshot against a DOM stub for 122 checks; topology adds 61. Run all 325 with
-  `deploy/test_dashboard.sh`. Render the current real run without opening a
+  snapshot against a DOM stub for 144 checks; topology and the architecture payload
+  have their own suites. Run the complete gate with `deploy/test_dashboard.sh`.
+  Render the current real run without opening a
   browser using `python3 deploy/preview_trace_explorer.py --check` (or
   `--view matrix`). `run.py --self-test` additionally blocks a release whose
   topology no longer matches `progress.STEPS` or has lost a server call.

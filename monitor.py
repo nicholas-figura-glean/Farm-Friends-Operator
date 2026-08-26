@@ -892,6 +892,10 @@ WIRE_JS = _dashboard_asset("mcp_wire.js")
 # the diagram must not take the rest of the page down.
 ARCH_CSS = _dashboard_asset("architecture.css")
 ARCH_JS = _dashboard_asset("architecture.js")
+# Shared operator hierarchy for the dashboard shell and seven standard tabs. The
+# Architecture tab uses the same hierarchy through its specialized source-map assets.
+OPERATOR_CSS = _dashboard_asset("operator.css")
+OPERATOR_JS = _dashboard_asset("operator.js")
 
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -1192,133 +1196,146 @@ __TRACE_CSS__
 __WIRE_CSS__
 __ARCH_CSS__
 __GAME_CSS__
+__OPERATOR_CSS__
 </style>
 </head>
 <body><main>
-<header><div><h1>🌱 Nick's Farm Friends</h1><div class="subtitle">Read-only live monitor · no farm actions from this page</div></div><div class="refresh" id="updated">Connecting…<br>Auto-refresh: 2s</div></header>
-<nav class="tabs" role="tablist">
-  <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
-  <button role="tab" data-tab="pipeline" aria-selected="false">Pipeline</button>
-  <button role="tab" data-tab="cost" aria-selected="false">Cost &amp; healing</button>
-  <button role="tab" data-tab="history" aria-selected="false">📊 Token &amp; cost history</button>
-  <button role="tab" data-tab="findings" aria-selected="false">🔬 Findings</button>
-  <button role="tab" data-tab="game" aria-selected="false">🥚 Coop Rush</button>
-  <button role="tab" data-tab="wire" aria-selected="false">🛰️ MCP Switchboard</button>
-  <button role="tab" data-tab="architecture" aria-selected="false">🏗️ Architecture</button>
+<header class="app-header">
+  <div class="app-brand"><span class="brand-mark" aria-hidden="true">🌱</span><div class="brand-copy"><div class="brand-kicker">Autonomous farm operations</div><h1>Farm Friends</h1><div class="subtitle">Read-only control room · every claim links back to measured state</div></div></div>
+  <div class="header-meta"><span class="system-state watch" id="global-status">Connecting</span><div class="refresh" id="updated">Connecting…<br>State refresh: 2s</div></div>
+</header>
+<section class="autonomy-ribbon" aria-label="Autonomous system status">
+  <div class="auto-cell primary watch" id="autonomy-primary"><span class="auto-icon">●</span><div class="auto-copy"><small>Operating mode</small><b id="autonomy-state-title">Connecting</b><span id="autonomy-state-detail">Loading control-plane evidence</span></div></div>
+  <div class="auto-cell" id="autonomy-services"><span class="auto-icon">◫</span><div class="auto-copy"><small>Control loops</small><b id="autonomy-agents">Loading services</b><span id="autonomy-agents-detail">Checking launchd state</span></div></div>
+  <div class="auto-cell" id="autonomy-cycle-cell"><span class="auto-icon">↻</span><div class="auto-copy"><small>Execution</small><b id="autonomy-cycle">Waiting for run state</b><span id="autonomy-cycle-detail">Deterministic cadence</span></div></div>
+  <div class="auto-cell" id="autonomy-action-cell"><span class="auto-icon">✓</span><div class="auto-copy"><small>Latest autonomous change</small><b id="autonomy-action">Loading activity ledger</b><span id="autonomy-action-detail">Observe · decide · act · verify</span></div></div>
+</section>
+<nav class="tabs" role="tablist" aria-label="Monitor views">
+  <button role="tab" data-tab="overview" aria-selected="true"><span class="tab-icon">⌂</span><span>Overview</span><kbd class="tab-key">O</kbd></button>
+  <button role="tab" data-tab="pipeline" aria-selected="false"><span class="tab-icon">↳</span><span>Pipeline</span><kbd class="tab-key">P</kbd></button>
+  <button role="tab" data-tab="cost" aria-selected="false"><span class="tab-icon">↻</span><span>Healing</span><kbd class="tab-key">C</kbd></button>
+  <button role="tab" data-tab="history" aria-selected="false"><span class="tab-icon">◒</span><span>Cost history</span><kbd class="tab-key">T</kbd></button>
+  <button role="tab" data-tab="findings" aria-selected="false"><span class="tab-icon">⌕</span><span>Findings</span><kbd class="tab-key">F</kbd></button>
+  <button role="tab" data-tab="game" aria-selected="false"><span class="tab-icon">◉</span><span>Coop Rush</span><kbd class="tab-key">G</kbd></button>
+  <button role="tab" data-tab="wire" aria-selected="false"><span class="tab-icon">⌁</span><span>MCP traffic</span><kbd class="tab-key">W</kbd></button>
+  <button role="tab" data-tab="architecture" aria-selected="false"><span class="tab-icon">◇</span><span>Architecture</span><kbd class="tab-key">A</kbd></button>
 </nav>
-<div class="tab" id="tab-overview">
+<div class="tab operator-tab" id="tab-overview">
 <section class="grid">
-<div class="hero" aria-label="Live farm summary">
-  <div class="hero-cell lead"><label>Lifetime produce · live estimate</label><strong id="hero-produce">—</strong><small id="hero-produce-sub">waiting for a measured rate</small><span class="spark" id="spark-produce"></span></div>
-  <div class="hero-cell"><label>Production rate</label><strong id="hero-rate">—</strong><small id="hero-rate-sub">score delta over the real interval</small><span class="spark" id="spark-rate"></span></div>
-  <div class="hero-cell"><label>Leaderboard</label><strong id="hero-rank">—</strong><small id="hero-gap">waiting for rivals</small><span class="spark" id="spark-rank"></span></div>
-  <div class="hero-cell"><label>Herd</label><strong id="hero-animals">—</strong><small id="hero-herd-sub">growth policy loading</small><span class="spark" id="spark-animals"></span></div>
-  <div class="hero-cell"><label>Hunger</label><strong id="hero-hunger">—</strong><small id="hero-hunger-sub">production stops at 70</small><span class="spark" id="spark-hunger"></span></div>
-</div>
-<div class="card farmview"><h2>Live farm <small style="text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400">every object below is telemetry</small></h2><div class="scene" id="farm-scene"><div class="empty">Waiting for farm state…</div></div></div>
-<div class="card status"><h2>Loop status</h2><div id="health"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Last run</label><strong id="last-run">—</strong></div><div class="metric"><label>Run age</label><strong id="run-age">—</strong></div><div class="metric"><label>Stage</label><strong id="stage">—</strong></div><div class="metric"><label>Cadence</label><strong id="cadence">—</strong></div></div></div>
-<div class="card blockers"><h2>Blockers & alerts</h2><ul id="blockers"><li class="empty">Loading…</li></ul></div>
-<div class="card release"><h2>Scheduler & release</h2><div class="kv" id="system"></div></div>
-<div class="card wide"><h2>Farm state</h2><div class="kv" id="farm"></div></div>
-<div class="card side"><h2>Leaderboard</h2><div id="leaderboard"></div></div>
-<div class="card full grand-prix">
-  <div class="gp-head"><div><div class="gp-kicker">Live leaderboard telemetry</div><h2>🏁 Produce Grand Prix</h2><div class="subtitle">Every recorded racer, every measured run. Hover any line or point for the score.</div></div>
-  <div class="gp-controls"><div class="chips" id="gp-modes" aria-label="Leaderboard chart mode"><button class="chip" data-gpmode="absolute" aria-pressed="true">Total score</button><button class="chip" data-gpmode="gain" aria-pressed="false">Window gain</button></div><div class="chips" id="gp-ranges" aria-label="Leaderboard chart range"><button class="chip" data-gprange="20" aria-pressed="false">20 runs</button><button class="chip" data-gprange="50" aria-pressed="false">50</button><button class="chip" data-gprange="100" aria-pressed="true">100</button></div></div></div>
-  <div class="gp-chart" id="gp-chart"><div class="empty">Waiting for leaderboard history…</div></div>
-  <div class="gp-legend" id="gp-legend"></div><div class="gp-note" id="gp-note">Scores are read from the existing run ledger—this visualization makes zero additional farm calls.</div>
-</div>
-<div class="card wide"><h2 id="chart-title">Farm trend</h2><div class="chips" id="chart-metrics" aria-label="Chart metric">
-  <button class="chip" data-metric="produce" aria-pressed="true">Produce</button>
-  <button class="chip" data-metric="produce_per_min" aria-pressed="false">Rate</button>
-  <button class="chip" data-metric="animals" aria-pressed="false">Animals</button>
-  <button class="chip" data-metric="max_hunger" aria-pressed="false">Hunger</button>
-  <button class="chip" data-metric="feed" aria-pressed="false">Feed</button>
-  <button class="chip" data-metric="coins" aria-pressed="false">Coins</button>
-</div><div class="chart" id="chart"></div><div class="hint" id="chart-note">Choose a metric · hover a point for the run</div></div>
-<div class="card side"><h2>Current intent</h2><div class="kv" id="intent"></div></div>
-<div class="card full"><h2>Growth policy</h2><div id="growth-verdict"></div><div class="kv" id="growth" style="margin-top:12px"></div></div>
-<div class="card full"><h2>Recent runs</h2><div id="runs"></div></div>
-<div class="card full"><h2>Launchd log tail</h2><div class="log" id="log">Loading…</div></div>
+  <div class="page-hero">
+    <div><div class="page-kicker">Live autonomous operation</div><h2>Farm command center</h2><p>One view of the objective, the latest measured change, the decision the system made, and the evidence that the result was verified.</p><div class="delta-row" id="overview-deltas"></div></div>
+    <div class="hero-verdict watch" id="overview-verdict-box"><b id="overview-verdict">Connecting</b><span id="overview-verdict-detail">Waiting for the first measured cycle</span></div>
+  </div>
+  <div class="hero" aria-label="Live farm summary">
+    <div class="hero-cell lead"><label>Lifetime produce · live estimate</label><strong id="hero-produce">—</strong><small id="hero-produce-sub">waiting for a measured rate</small><span class="spark" id="spark-produce"></span></div>
+    <div class="hero-cell"><label>Production rate</label><strong id="hero-rate">—</strong><small id="hero-rate-sub">score delta over the real interval</small><span class="spark" id="spark-rate"></span></div>
+    <div class="hero-cell"><label>Leaderboard</label><strong id="hero-rank">—</strong><small id="hero-gap">waiting for rivals</small><span class="spark" id="spark-rank"></span></div>
+    <div class="hero-cell"><label>Herd</label><strong id="hero-animals">—</strong><small id="hero-herd-sub">growth policy loading</small><span class="spark" id="spark-animals"></span></div>
+    <div class="hero-cell"><label>Safety headroom</label><strong id="hero-hunger">—</strong><small id="hero-hunger-sub">production stops at 70 hunger</small><span class="spark" id="spark-hunger"></span></div>
+  </div>
+  <div class="card farmview overview-farm"><h2>Live farm <small>Every object is measured telemetry</small></h2><div class="scene" id="farm-scene"><div class="empty">Waiting for farm state…</div></div></div>
+  <div class="card cycle-story-card"><h2><span id="cycle-story-summary">Latest cycle</span> <small>Observe → decide → act → verify</small></h2><div id="cycle-story"><div class="empty">Loading decision evidence…</div></div></div>
+  <div class="card overview-support"><h2>Loop status</h2><div id="health"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Last run</label><strong id="last-run">—</strong></div><div class="metric"><label>Run age</label><strong id="run-age">—</strong></div><div class="metric"><label>Stage</label><strong id="stage">—</strong></div><div class="metric"><label>Cadence</label><strong id="cadence">—</strong></div></div></div>
+  <div class="card overview-support"><h2>Attention queue</h2><ul id="blockers"><li class="empty">Loading guardrails…</li></ul></div>
+  <div class="card overview-support"><h2>Scheduler & release</h2><div class="kv" id="system"></div></div>
+  <div class="card full grand-prix">
+    <div class="gp-head"><div><div class="gp-kicker">Measured competition</div><h2>Produce Grand Prix</h2><div class="subtitle">The same recorded leaderboard snapshots, with no additional farm calls.</div></div>
+      <div class="gp-controls"><div class="chips" id="gp-modes" aria-label="Leaderboard chart mode"><button class="chip" data-gpmode="absolute" aria-pressed="true">Total score</button><button class="chip" data-gpmode="gain" aria-pressed="false">Window gain</button></div><div class="chips" id="gp-ranges" aria-label="Leaderboard chart range"><button class="chip" data-gprange="20" aria-pressed="false">20 runs</button><button class="chip" data-gprange="50" aria-pressed="false">50</button><button class="chip" data-gprange="100" aria-pressed="true">100</button></div></div></div>
+    <div class="competition-workspace"><div class="gp-chart" id="gp-chart"><div class="empty">Waiting for leaderboard history…</div></div><aside class="competition-side"><h3>Live standings</h3><div id="leaderboard"></div></aside></div>
+    <details class="gp-standings"><summary>Show every recorded racer</summary><div class="gp-legend" id="gp-legend"></div></details><div class="gp-note" id="gp-note">Scores come directly from the run ledger.</div>
+  </div>
+  <div class="card trend-card"><h2 id="chart-title">Farm trend</h2><div class="chips" id="chart-metrics" aria-label="Chart metric">
+    <button class="chip" data-metric="produce" aria-pressed="true">Produce</button><button class="chip" data-metric="produce_per_min" aria-pressed="false">Rate</button><button class="chip" data-metric="animals" aria-pressed="false">Animals</button><button class="chip" data-metric="max_hunger" aria-pressed="false">Hunger</button><button class="chip" data-metric="feed" aria-pressed="false">Feed</button><button class="chip" data-metric="coins" aria-pressed="false">Coins</button>
+    </div><div class="chart" id="chart"></div><div class="hint" id="chart-note">Choose a metric · hover a point for the run</div></div>
+  <div class="card strategy-card"><h2>Growth decision</h2><div id="growth-verdict"></div><div class="kv" id="growth" style="margin-top:12px"></div></div>
+  <details class="card audit-drawer"><summary>Farm inventory & current intent <span>Raw state and the in-flight mutation intent</span></summary><div class="drawer-body"><div class="twoup"><div><h2>Farm state</h2><div class="kv" id="farm"></div></div><div><h2>Current intent</h2><div class="kv" id="intent"></div></div></div></div></details>
+  <details class="card audit-drawer"><summary>Recent run ledger <span>Phase timing, actions, decision evidence and token rows</span></summary><div class="drawer-body"><div id="runs"></div></div></details>
+  <details class="card audit-drawer"><summary>Launchd log tail <span>Raw local scheduler output</span></summary><div class="drawer-body"><div class="log" id="log">Loading…</div></div></details>
 </section>
 </div>
-<div class="tab" id="tab-pipeline" hidden>
+<div class="tab operator-tab" id="tab-pipeline" hidden>
 <section class="grid">
-  <div class="card status"><h2>Run</h2><div id="pipe-status"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Run</label><strong id="pipe-run">—</strong></div><div class="metric"><label>Elapsed</label><strong id="pipe-elapsed">—</strong></div><div class="metric"><label>Active step</label><strong id="pipe-active">—</strong></div><div class="metric"><label>Steps done</label><strong id="pipe-count">—</strong></div><div class="metric"><label>Next run</label><strong id="pipe-next">—</strong></div></div><div class="subtitle" id="pipe-heartbeat" style="margin-top:10px;font-size:12px">—</div></div>
-  <div class="card blockers"><h2>Cycle budget</h2><div class="kv" id="pipe-budget"></div><div class="budget" id="pipe-budget-bar"><i style="width:0%"></i></div><div class="subtitle" style="margin-top:9px;font-size:12px">Adoption stops at the budget; the process self-kills at the hard timeout so it never blocks the next slot.</div></div>
-  <div class="card release"><h2>Last completed</h2><div class="kv" id="pipe-summary"></div></div>
+  <div class="page-hero"><div><div class="page-kicker">Measured live execution</div><h2>Run workspace</h2><p>Follow one deterministic cycle from observation through verification. Deviations, budget pressure and boundary failures are promoted automatically.</p></div><div class="hero-verdict watch" id="pipeline-hero-verdict"><b id="pipeline-hero-state">Connecting</b><span id="pipeline-hero-detail">Waiting for progress telemetry</span></div></div>
+  <div class="card run-command">
+    <section class="run-primary"><h2>Current run</h2><div id="pipe-status"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Run</label><strong id="pipe-run">—</strong></div><div class="metric"><label>Elapsed</label><strong id="pipe-elapsed">—</strong></div><div class="metric"><label>Active step</label><strong id="pipe-active">—</strong></div><div class="metric"><label>Progress</label><strong id="pipe-count">—</strong></div><div class="metric"><label>Next run</label><strong id="pipe-next">—</strong></div></div><div class="subtitle" id="pipe-heartbeat" style="margin-top:9px;font-size:10px">—</div></section>
+    <section><h2>Bounded execution budget</h2><div class="kv" id="pipe-budget"></div><div class="budget" id="pipe-budget-bar"><i style="width:0%"></i></div><div class="subtitle" style="margin-top:8px;font-size:10px">Adoption yields at the soft budget; the hard timeout protects the next cadence slot.</div></section>
+    <section><h2>Last completed outcome</h2><div class="kv" id="pipe-summary"></div></section>
+  </div>
+  <div class="card pipeline-decision"><div class="decision-copy"><div class="page-kicker">Current autonomous decision</div><h3 id="pipe-decision-title">Compiling plan…</h3><p id="pipe-decision-body">Waiting for decision evidence.</p></div><div id="pipe-lifecycle"></div></div>
   <div class="card trace">
-    <div class="head">
-      <div>
-        <h2>Execution trace <small style="text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400">measured spans + source-derived paths</small></h2>
-        <div class="trace-sub">The run trace answers <b>what happened when</b>: real step durations and every observed MCP boundary call share one clock. The tool matrix answers <b>how the whole system is wired</b>: rows are pipeline steps, columns are external tools, hollow cells are reachable code paths and numbered cells are calls observed in this run. Select anything for arguments, result, source and call path. Python functions are shown as static reachability, never as invented runtime spans.</div>
-      </div>
-    </div>
+    <div class="head"><div><h2>Execution trace <small>Measured spans + source-derived reachability</small></h2><div class="trace-sub">Run Trace shows what happened when. Tool Matrix shows which pipeline steps can reach each external MCP tool. Select a span or cell for measured arguments, result, source and call path.</div><details class="trace-explain"><summary>How to interpret measured time versus static code</summary><div class="trace-sub">Step and MCP spans share one measured clock. Python functions are static reachability only, never as invented runtime spans.</div></details></div></div>
     <div id="trace-explorer" class="trace-explorer" aria-live="polite" aria-label="Pipeline execution trace and MCP tool matrix"><div class="te-empty">Loading execution trace…</div></div>
   </div>
-  <div class="card full"><h2>What the run is judged on</h2><div id="signal-verdict"></div><div class="kv" id="signals" style="margin-top:12px"></div><div class="subtitle" style="margin-top:10px;font-size:12px">Lifetime produce accrues as animals produce, and <code>collect_produce</code> returns nothing while the herd is hungry — the produce banks during the feed call instead. So the score rate leads, and collection counts trail it.</div></div>
-  <div class="card full"><h2>Step timings, as recorded</h2><div class="pipe" id="pipe-steps"><div class="empty">Loading…</div></div></div>
+  <div class="card judgement-card"><h2>Guardrails deciding whether the run is healthy</h2><div id="signal-verdict"></div><div class="guardrail-grid" id="pipe-guardrails" style="margin-top:12px"></div><div class="kv signal-kv" id="signals"></div></div>
+  <details class="card audit-drawer"><summary>Recorded step timings <span>Every step, including skipped paths and recent medians</span></summary><div class="drawer-body"><div class="pipe" id="pipe-steps"><div class="empty">Loading…</div></div></div></details>
 </section>
 </div>
-<div class="tab" id="tab-cost" hidden>
+<div class="tab operator-tab" id="tab-cost" hidden>
 <section class="grid">
-  <div class="card status"><h2>All-time estimated/booked LLM cost</h2><div class="big" id="cost-total">—</div><div class="subtitle" id="cost-total-sub">—</div><div class="metrics"><div class="metric"><label>Tokens (all time)</label><strong id="cost-total-tokens">—</strong></div><div class="metric"><label>Wake-ups (all time)</label><strong id="cost-total-esc">—</strong></div><div class="metric"><label>Runs charged</label><strong id="cost-charged">—</strong></div><div class="metric"><label>Runs at zero</label><strong id="cost-free">—</strong></div></div></div>
-  <div class="card blockers"><h2>Last 5 runs</h2><div id="cost-recent"></div><div class="subtitle" style="margin-top:10px;font-size:12px">Every cycle writes an explicit zero to <code>state/tokens.ndjson</code>, so “routine runs cost nothing” is a measurement, not a claim. A row only carries a cost when an alert survived healing and woke a model.</div></div>
-  <div class="card release"><h2>Per-alert upper-bound estimate</h2><div class="big" id="cost-avoided">—</div><div class="subtitle">Not a billed saving: alert batching means this deliberately overstates avoided wake-ups</div><div class="kv" id="cost-detail" style="margin-top:14px"></div></div>
-  <div class="card cost"><h2>What is being self-healed</h2><div id="heal-classes"></div></div>
-  <div class="card healing"><h2>Active knobs</h2><div class="kv" id="knobs"></div><div class="subtitle" style="margin-top:10px;font-size:12px">No knob can spend coins, adopt, sell, trade or gift. The worst a bad healing decision can do is slow the farm down, and every knob is clamped on read.</div></div>
-  <div class="card full"><h2>Remedy log</h2><ul id="heal-log"></ul></div>
-</section>
-</div>
-<div class="tab" id="tab-history" hidden>
-<section class="grid">
-  <div class="hero cost-hero" aria-label="Token and cost history summary">
-    <div class="hero-cell lead"><label>Ledger-estimated exception cost</label><strong id="hist-actual-cost">—</strong><small id="hist-actual-cost-sub">modeled, not provider billing</small></div>
-    <div class="hero-cell"><label>Estimated tokens</label><strong id="hist-actual-tokens">—</strong><small>input + assumed output booked after cutover</small></div>
-    <div class="hero-cell"><label>Audited runs</label><strong id="hist-runs">—</strong><small id="hist-runs-sub">every zero is an explicit row</small></div>
-    <div class="hero-cell warnish"><label>Old-loop cost avoided</label><strong id="hist-avoided">—</strong><small id="hist-avoided-sub">measured counterfactual range</small></div>
-    <div class="hero-cell"><label>Cost reduction</label><strong id="hist-reduction">—</strong><small>routine execution, like for like</small></div>
-    <div class="hero-cell"><label>Model wake-ups</label><strong id="hist-wakeups">—</strong><small id="hist-wakeups-sub">after deterministic healing</small></div>
+  <div class="page-hero"><div><div class="page-kicker">Exception-only intelligence</div><h2>Healing control room</h2><p>See what the supervisor detected, which bounded safeguard it changed, how the result is verified, and whether a model ever had to wake up.</p></div><div class="hero-verdict" id="healing-hero-verdict"><b id="healing-verdict">Loading healing state</b><span id="healing-verdict-detail">Reading the remedy ledger</span></div></div>
+  <div class="card healing-outcomes">
+    <div class="outcome primary"><small>Estimated exception cost</small><b id="cost-total">—</b><span id="cost-total-sub">Ledger loading</span></div>
+    <div class="outcome"><small>Explicit zero-cost runs</small><b id="cost-free">—</b><span><span id="cost-charged">—</span> runs carried a charge</span></div>
+    <div class="outcome"><small>Handled locally</small><b id="heal-local-count">—</b><span><span id="cost-total-tokens">—</span> estimated tokens all time</span></div>
+    <div class="outcome"><small>Model wake-ups</small><b id="cost-total-esc">—</b><span><span id="heal-active-count">—</span> active safeguard overrides · <span id="heal-active-detail">loading</span></span></div>
   </div>
-  <div class="card full"><div class="history-title"><div><h2 id="hist-chart-title">Cumulative cost over audited runs</h2><p class="method">Green is the estimated exception ledger. Amber is what the same cycles would have cost at the measured pre-Python run profile.</p></div><div class="history-controls"><div class="chips" id="hist-metrics"><button class="chip" data-hmetric="cost" aria-pressed="true">Cumulative cost</button><button class="chip" data-hmetric="tokens" aria-pressed="false">Cumulative tokens</button><button class="chip" data-hmetric="per_run" aria-pressed="false">Per-run cost</button><button class="chip" data-hmetric="healing" aria-pressed="false">Healing</button></div><div class="chips" id="hist-range"><button class="chip" data-hrange="all" aria-pressed="true">All</button><button class="chip" data-hrange="100" aria-pressed="false">100 runs</button><button class="chip" data-hrange="50" aria-pressed="false">50 runs</button></div></div></div><div class="costcurve" id="hist-chart"><div class="empty">Loading ledger…</div></div><div class="cost-legend" id="hist-legend"></div><p class="method" id="hist-chart-note"></p></div>
-  <div class="card wide"><h2>What changed the curve</h2><div class="change-list" id="hist-changes"><div class="empty">Loading execution history…</div></div></div>
-  <div class="card side"><h2>At operating cadence</h2><div class="monthly"><label>Old LLM loop · projected monthly</label><strong id="hist-old-monthly">—</strong><small id="hist-old-monthly-range">—</small><i></i><label>Python exception estimate · all time</label><strong class="good" id="hist-new-monthly">$0</strong><small>Routine cycles are zero-token; this is cumulative exception spend, not a monthly rate.</small></div><h2 style="margin-top:22px">Where the tokens went before</h2><div class="source-bars" id="hist-sources"></div></div>
-  <div class="card full"><h2>The zero-cost run</h2><p class="claim">A zero is only evidence if you write it down. Every square is a Python-era run in <code>state/tokens.ndjson</code>: green cost $0, amber healed an alert locally, red woke a model.</p><div class="ledger-dots" id="hist-ledger"></div><div class="metrics" id="hist-ledger-stats"></div><p class="method" id="hist-disclosure"></p></div>
+  <div class="card latest-remedy"><h2>Latest intervention</h2><div id="healing-latest"><div class="empty">Loading the latest remedy…</div></div></div>
+  <div class="card safeguards"><h2>Active safeguards</h2><div class="kv" id="knobs"></div><div class="subtitle" style="margin-top:9px;font-size:10px">Every value is clamped. Healing can slow work down; it cannot spend coins, adopt, sell, trade or gift.</div></div>
+  <div class="card healing-loop-card"><h2>Closed-loop response</h2><div id="healing-loop"><div class="empty">Loading detect → diagnose → remedy → verify…</div></div></div>
+  <div class="card healing-classes-card"><h2>Conditions the supervisor has learned to handle</h2><div id="heal-classes"></div></div>
+  <div class="card healing-runs-card"><h2>Last five cost rows</h2><div id="cost-recent"></div><div class="subtitle" style="margin-top:9px;font-size:10px">Every routine cycle writes an explicit zero. A cost appears only when a surviving alert wakes a model.</div></div>
+  <details class="card audit-drawer"><summary>Upper-bound avoided wake-up estimate <span>Methodology, not booked or billed savings</span></summary><div class="drawer-body"><div class="big" id="cost-avoided">—</div><p class="method">Alert batching means this deliberately overstates avoided model wake-ups.</p><div class="kv" id="cost-detail"></div></div></details>
+  <details class="card audit-drawer"><summary>Full remedy ledger <span>Every bounded adjustment and relaxation event</span></summary><div class="drawer-body"><ul id="heal-log"></ul></div></details>
 </section>
 </div>
-<div class="tab" id="tab-findings" hidden>
+<div class="tab operator-tab" id="tab-history" hidden>
 <section class="grid">
-  <div class="card finding"><h2>Authoritative herd/output model</h2><p class="claim" id="ev-ceiling-claim">Loading measured evidence…</p><div class="scatter" id="ev-ceiling-chart"></div><div class="metrics" id="ev-ceiling-stats"></div><p class="method" id="ev-ceiling-method"></p></div>
-  <div class="card full"><h2>Knowledge control plane</h2><div class="metrics" id="ev-knowledge-stats"></div><div class="twoup" style="margin-top:14px"><div><h2>Claims</h2><div id="ev-claims"><div class="empty">Loading claims…</div></div></div><div><h2>Open questions and policy</h2><div id="ev-questions"><div class="empty">Loading questions…</div></div><p class="method" id="ev-policy"></p></div></div></div>
-  <div class="card wide"><h2>Species evidence <small style="text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400">composition · recent per-animal rate · bounded probe</small></h2><div class="bars" id="ev-species"></div><p class="method" id="ev-species-note"></p></div>
-  <div class="card side"><h2>Dead ends we retired</h2><div id="ev-dead-ends"><div class="empty">Loading…</div></div></div>
-  <div class="card wide"><h2>The cost of leaving strategy in a prompt</h2><p class="claim">The old loop re-read a growing farm state across ~21 turns. The current loop executes the same decisions as arithmetic in <code>rules.py</code>.</p><label class="method" for="ev-runs-slider">Counterfactual LLM runs per day: <b id="ev-runs-label">288</b></label><input class="slider" id="ev-runs-slider" type="range" min="1" max="480" value="288"><div class="twoup"><div><label class="method">Old loop · estimated monthly cost</label><div class="counter" id="ev-old-cost">—</div></div><div><label class="method">Current loop · measured monthly cost</label><div class="counter saved" id="ev-new-cost">$0.00</div></div></div><p class="method" id="ev-cost-note"></p></div>
-  <div class="card side"><h2>Detector redesigns</h2><div id="ev-detectors"><div class="empty">Loading…</div></div></div>
-  <div class="card finding"><h2>How the model changed</h2><div class="timeline" id="ev-timeline"><div class="empty">Loading evidence…</div></div></div>
+  <div class="page-hero"><div><div class="page-kicker">Measured before / after</div><h2>The economics of autonomy</h2><p>Booked exception estimates stay separate from the measured old-loop counterfactual. Every zero and every model wake-up is an explicit ledger row.</p><div class="delta-row" id="history-impact-deltas"></div></div><div class="hero-verdict" id="history-hero-verdict"><b id="history-verdict">Loading audited history</b><span id="history-verdict-detail">Reading token and healing ledgers</span></div></div>
+  <div class="hero cost-hero" aria-label="Token and cost history summary">
+    <div class="hero-cell lead"><label>Exception cost estimate</label><strong id="hist-actual-cost">—</strong><small id="hist-actual-cost-sub">modeled, not provider billing</small></div>
+    <div class="hero-cell"><label>Estimated tokens</label><strong id="hist-actual-tokens">—</strong><small>input + assumed output after cutover</small></div>
+    <div class="hero-cell"><label>Audited runs</label><strong id="hist-runs">—</strong><small id="hist-runs-sub">every zero is explicit</small></div>
+    <div class="hero-cell warnish"><label>Old-loop cost avoided</label><strong id="hist-avoided">—</strong><small id="hist-avoided-sub">measured range</small></div>
+    <div class="hero-cell"><label>Cost reduction</label><strong id="hist-reduction">—</strong><small>routine execution, like for like</small></div>
+    <div class="hero-cell"><label>Model wake-ups</label><strong id="hist-wakeups">—</strong><small id="hist-wakeups-sub">after local healing</small></div>
+  </div>
+  <div class="card history-chart-card"><div class="history-title"><div><h2 id="hist-chart-title">Cumulative cost over audited runs</h2><p class="method">Green is the exception ledger. Amber is the measured pre-Python counterfactual—not an invoice.</p></div><div class="history-controls"><div class="chips" id="hist-metrics"><button class="chip" data-hmetric="cost" aria-pressed="true">Cumulative cost</button><button class="chip" data-hmetric="tokens" aria-pressed="false">Cumulative tokens</button><button class="chip" data-hmetric="per_run" aria-pressed="false">Per run</button><button class="chip" data-hmetric="healing" aria-pressed="false">Healing</button></div><div class="chips" id="hist-range"><button class="chip" data-hrange="all" aria-pressed="true">All</button><button class="chip" data-hrange="100" aria-pressed="false">100 runs</button><button class="chip" data-hrange="50" aria-pressed="false">50 runs</button></div></div></div><div class="costcurve" id="hist-chart"><div class="empty">Loading ledger…</div></div><div class="cost-legend" id="hist-legend"></div><p class="method" id="hist-chart-note"></p></div>
+  <div class="card history-story"><h2>Changes that moved the curve <small>Select a milestone to locate it on the chart</small></h2><div class="change-list" id="hist-changes"><div class="empty">Loading execution history…</div></div></div>
+  <div class="card history-method"><h2>At operating cadence</h2><div class="monthly"><label>Old LLM loop · projected monthly</label><strong id="hist-old-monthly">—</strong><small id="hist-old-monthly-range">—</small><i></i><label>Python exception estimate · all time</label><strong class="good" id="hist-new-monthly">$0</strong><small>Routine cycles are zero-token; this is cumulative exception spend, not a monthly rate.</small></div><h2 style="margin-top:20px">Where tokens went before</h2><div class="source-bars" id="hist-sources"></div></div>
+  <div class="card full"><h2>Run-by-run zero-cost proof</h2><p class="claim">Every square is a row in <code>state/tokens.ndjson</code>: green cost $0, amber handled locally, red woke a model.</p><div class="ledger-dots" id="hist-ledger"></div><div class="metrics" id="hist-ledger-stats"></div></div>
+  <details class="card audit-drawer"><summary>Counterfactual methodology & disclosure <span>Assumptions, token composition and uncertainty</span></summary><div class="drawer-body"><p class="method" id="hist-disclosure"></p></div></details>
+</section>
+</div>
+<div class="tab operator-tab" id="tab-findings" hidden>
+<section class="grid">
+  <div class="page-hero"><div><div class="page-kicker">Strategy as a living evidence system</div><h2>Knowledge control plane</h2><p>Current conclusions, their confidence and freshness, open uncertainties, and the autonomous work moving questions toward policy.</p></div><div class="hero-verdict watch" id="findings-hero-verdict"><b id="findings-verdict">Loading strategy evidence</b><span id="findings-verdict-detail">Fetching the immutable ledger projection</span></div></div>
+  <div class="card knowledge-flow" id="knowledge-flow"><div class="knowledge-node"><small>Questions</small><b>—</b><span>loading</span></div></div>
+  <div class="card finding finding-model"><h2>Authoritative herd / output model <small>The finding currently steering growth</small></h2><p class="claim" id="ev-ceiling-summary">Loading measured evidence…</p><details class="claim-disclosure"><summary>Read the full scientific claim</summary><p class="method" id="ev-ceiling-claim">Loading claim text…</p></details><div class="scatter" id="ev-ceiling-chart"></div><div class="metrics" id="ev-ceiling-stats"></div><p class="method" id="ev-ceiling-method"></p></div>
+  <div class="card strategy-brief"><h2>Current strategy verdict</h2><div id="ev-strategy-brief"><div class="empty">Compiling accepted claims…</div></div><div class="sidebar-research"><h2>Research in motion <small>Autonomous scans and work orders</small></h2><div id="research-activity"><div class="empty">Loading activity…</div></div></div></div>
+  <div class="card knowledge-control"><div class="history-title"><div><h2>Claims, questions & runtime policy</h2><p class="method">Accepted evidence is the default view. Superseded claims remain auditable without dominating the page.</p></div><div class="metrics" id="ev-knowledge-stats"></div></div><div class="twoup" style="margin-top:14px"><div><div class="claim-toolbar"><h2>Claims</h2><div class="chips"><button class="chip" data-claim-filter="accepted" aria-pressed="true">Accepted</button><button class="chip" data-claim-filter="recheck" aria-pressed="false">Needs recheck</button><button class="chip" data-claim-filter="superseded" aria-pressed="false">Superseded</button><button class="chip" data-claim-filter="all" aria-pressed="false">All</button></div></div><div class="claim-list filter-accepted" id="ev-claims"><div class="empty">Loading claims…</div></div></div><div><h2>Highest-priority open questions</h2><div class="question-list" id="ev-questions"><div class="empty">Loading questions…</div></div><button class="btn question-toggle" id="question-toggle" data-question-toggle="1">Show every open question</button><p class="method" id="ev-policy"></p></div></div></div>
+  <details class="card audit-drawer secondary-findings"><summary>Species evidence & retired dead ends <span>Composition, bounded probes and scoped negative results</span></summary><div class="drawer-body"><div class="twoup"><div><h2>Species evidence</h2><div class="bars" id="ev-species"></div><p class="method" id="ev-species-note"></p></div><div><h2>Dead ends retired</h2><div id="ev-dead-ends"><div class="empty">Loading…</div></div></div></div></div></details>
+  <details class="card audit-drawer secondary-findings"><summary>Counterfactual prompt cost <span>Why strategy moved into executable rules</span></summary><div class="drawer-body"><p class="claim">The old loop re-read a growing farm state across ~21 turns. The current loop executes the same decisions as arithmetic in <code>rules.py</code>.</p><label class="method" for="ev-runs-slider">Counterfactual LLM runs per day: <b id="ev-runs-label">288</b></label><input class="slider" id="ev-runs-slider" type="range" min="1" max="480" value="288"><div class="twoup"><div><label class="method">Old loop · estimated monthly cost</label><div class="counter" id="ev-old-cost">—</div></div><div><label class="method">Current loop · measured exception cost</label><div class="counter saved" id="ev-new-cost">$0.00</div></div></div><p class="method" id="ev-cost-note"></p></div></details>
+  <details class="card audit-drawer secondary-findings"><summary>Detector redesigns & model history <span>What was wrong, what replaced it, and every evidence transition</span></summary><div class="drawer-body"><div class="twoup"><div><h2>Detector redesigns</h2><div id="ev-detectors"><div class="empty">Loading…</div></div></div><div><h2>How the model changed</h2><div class="timeline" id="ev-timeline"><div class="empty">Loading evidence…</div></div></div></div></div></details>
 </section>
 </div>
 <!--GAME_MARKUP_START-->
-<div class="tab" id="tab-game" hidden>
+<div class="tab operator-tab" id="tab-game" hidden>
 __GAME_MARKUP__
 </div>
 <!--GAME_MARKUP_END-->
 <!-- Replaced entirely by renderArchitecture from /api/architecture. Keep a visible
      initial state: an empty container hid the block-scope loader bug by presenting a
      blank tab with no explanation. Derived content still has no hand-maintained copy. -->
-<div class="tab" id="tab-architecture" hidden>
-  <div class="card full" data-arch-loading><h2>Architecture</h2>
-    <p class="arch-note">Loading the live system map and version history…</p></div>
+<div class="tab architecture-tab" id="tab-architecture" hidden>
+  <div class="arch-shell" data-arch-loading><section class="page-hero arch-hero"><div>
+    <span class="page-kicker">Source-derived control plane</span><h2>Architecture control plane</h2>
+    <p>Deriving the current system shape, service posture, change history, and execution paths…</p>
+  </div><div class="hero-verdict watch"><b>Building live model</b><span>Reading local source and append-only state</span></div></section></div>
 </div>
-<div class="tab" id="tab-wire" hidden>
+<div class="tab operator-tab" id="tab-wire" hidden>
 <section class="grid">
-  <div class="card wire">
-    <div class="head">
-      <div>
-        <h2>MCP switchboard <small style="text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400">every packet is one recorded call</small></h2>
-        <div class="wire-sub">The trace tab answers <b>what happened when</b>. This one answers <b>what the boundary feels like</b>: each dot is a single row of <code>state/tool_calls.ndjson</code> flying from the pipeline step that issued it to the Farm Friends MCP server, taking its own measured <code>duration_ms</code> at the replay speed you pick. Colour is the issuing step, lanes are server tools, in-flight calls pulse instead of landing, and tools that were reachable but never called stay visible as silent lanes. Nothing here is synthesised to look busy.</div>
-      </div>
-    </div>
-    <div id="mcp-wire" class="mcp-wire" aria-live="polite" aria-label="Live MCP call switchboard"><div class="mw-empty">Waiting for MCP boundary telemetry…</div></div>
-  </div>
+  <div class="page-hero wire-brief"><div><div class="page-kicker">Measured process boundary</div><h2>MCP traffic</h2><p>Every packet is one recorded JSON-RPC call. The view makes concurrency, latency, call mix and silence visible without inventing activity.</p><div class="delta-row" id="wire-deltas"></div></div><div class="hero-verdict watch" id="wire-hero-verdict"><b id="wire-hero-state">Waiting for boundary traffic</b><span id="wire-hero-detail">Loading measured call spans</span></div></div>
+  <div class="card wire"><div class="head"><div><h2>Live boundary replay <small>Traffic view + static diagnostics</small></h2><details class="wire-context"><summary>How to read this view</summary><div class="wire-sub">Colour identifies the issuing pipeline step. Flight time is measured <code>duration_ms</code> at the selected replay speed. In-flight calls pulse, and reachable tools not used by this run remain available in the collapsed silent-tool group.</div></details></div></div><div id="mcp-wire" class="mcp-wire" aria-live="polite" aria-label="Live MCP call switchboard"><div class="mw-empty">Waiting for MCP boundary telemetry…</div></div></div>
 </section>
 </div>
 </main>
@@ -1379,6 +1396,7 @@ function render(data) {
   safe("signals", () => renderSignals(data.signals || {}, data.growth || {}));
   safe("chart", () => renderChart(data.trend || []));
   safe("log", () => { $("log").textContent = (data.log_tail || []).join("\n") || "No launchd log yet"; });
+  safe("operator narrative", () => renderOperator(data, OP_AUTONOMY));
   renderHeartbeat();
 }
 // Re-render the time-dependent panels on a local 1s tick, not only when a poll
@@ -1390,6 +1408,7 @@ function tick() {
   safe("pipeline", () => renderPipeline(LAST.pipeline || {}, LAST.signals || {}, LAST.cadence_seconds));
   safe("trace", () => { if (window.TracePanel) window.TracePanel.paint(); });
   safe("switchboard", () => { if (window.MCPWirePanel) window.MCPWirePanel.paint(); });
+  safe("operator clocks", () => renderOperatorTick(LAST));
   safe("run-age", () => {
     const ts = LAST.latest && LAST.latest.ts ? new Date(LAST.latest.ts).getTime() : null;
     $("run-age").textContent = age(ts ? Math.max(0, Math.floor((Date.now() - ts) / 1000)) : null);
@@ -1405,7 +1424,10 @@ function renderHeartbeat() {
     const dataAge = Math.max(0, Math.round((Date.now() - LAST_FETCH_MS) / 1000));
     bits.push(`Updated ${new Date(LAST_FETCH_MS).toLocaleTimeString()} (${dataAge}s ago)`);
   }
-  bits.push("Auto-refresh: state 2s, active findings 60s, active architecture 30s, redraw 1s");
+  bits.push("Refresh: state 2s · autonomy 30s · findings 60s · redraw 1s");
+  if (typeof OP_AUTONOMY_LAST_FETCH_MS!=="undefined" && OP_AUTONOMY_LAST_FETCH_MS) {
+    bits.push(`Autonomy refreshed ${Math.max(0,Math.round((Date.now()-OP_AUTONOMY_LAST_FETCH_MS)/1000))}s ago`);
+  }
   if ((ACTIVE_TAB==="findings"||ACTIVE_TAB==="history") && EVIDENCE_LAST_FETCH_MS) {
     bits.push(`Findings refreshed ${Math.max(0,Math.round((Date.now()-EVIDENCE_LAST_FETCH_MS)/1000))}s ago`);
   }
@@ -1483,7 +1505,9 @@ function renderOverview(data) {
   renderHero(data);
   renderScene(data.scene || {}, data.trend || []);
 
-  $("blockers").innerHTML = (data.blockers || []).map(b => `<li class="alert ${esc(b.level)}"><span class="alert-dot"></span><span>${esc(b.text)}</span></li>`).join("");
+  const blockers=data.blockers || [];
+  $("blockers").innerHTML = blockers.length ? blockers.map(b => `<li class="alert ${esc(b.level)}"><span class="alert-dot"></span><span>${esc(b.text)}</span></li>`).join("")
+    : `<li class="alert ok"><span class="alert-dot"></span><span>No operator action required</span></li>`;
   $("system").innerHTML = kv([
     ["cycle agent", ld.loaded ? `${esc(ld.state)}${ld.pid ? ` · pid ${ld.pid}` : ""}` : "not loaded"],
     ["supervisor", ld.supervisor?.loaded ? `${esc(ld.supervisor.state)}` : "not loaded"],
@@ -1515,7 +1539,8 @@ function renderOverview(data) {
   const board = Array.isArray(data.leaderboard) ? data.leaderboard : [];
   const racers=[{name:"Nick",produce:Number(r.produce)||0,gap:0,self:true},...board]
     .sort((a,b)=>b.produce-a.produce), top=Math.max(1,...racers.map(x=>x.produce));
-  $("leaderboard").innerHTML = racers.length ? `<div class="race">${racers.map((x,i)=>`<div class="racer${x.self?" self":""}"><div class="race-label"><span>${i===0?"👑 ":""}${esc(x.name)}</span><b>${num(x.produce)}</b></div><div class="race-track"><i style="width:${Math.max(2,x.produce/top*100).toFixed(1)}%"></i></div>${x.self?"":`<small>${x.gap>=0?num(x.gap)+" behind Nick":num(Math.abs(x.gap))+" ahead"}</small>`}</div>`).join("")}</div>` : `<div class="empty">No leaderboard data</div>`;
+  const leaders=racers.slice(0,5);
+  $("leaderboard").innerHTML = leaders.length ? `<div class="race">${leaders.map((x,i)=>`<div class="racer${x.self?" self":""}"><div class="race-label"><span>${i===0?"👑 ":""}${esc(x.name)}</span><b>${num(x.produce)}</b></div><div class="race-track"><i style="width:${Math.max(2,x.produce/top*100).toFixed(1)}%"></i></div>${x.self?"":`<small>${x.gap>=0?num(x.gap)+" behind Nick":num(Math.abs(x.gap))+" ahead"}</small>`}</div>`).join("")}</div>${racers.length>leaders.length?`<div class="hint" style="margin-top:9px">${num(racers.length-leaders.length)} more racers in full standings</div>`:""}` : `<div class="empty">No leaderboard data</div>`;
   $("intent").innerHTML = kv([
     ["status", current.active ? "active" : "idle"],
     ["stage", esc(current.stage)],
@@ -1766,13 +1791,13 @@ function renderHealing(h) {
   const classes = (h.classes || []).filter(c => c.class !== "relax");
   const relax = (h.classes || []).find(c => c.class === "relax");
   $("heal-classes").innerHTML = (classes.length
-    ? classes.map(c => `<div class="healclass"><div class="top"><span class="cls">${esc(c.class)}</span>`
-        + `<span class="n">${num(c.count)}× · last run ${esc(c.last_run)}</span></div>`
-        + `<div class="what">${esc(c.last_action || "—")}</div>`
-        + (c.alerts && c.alerts.length ? `<div class="tagrow">${c.alerts.map(a => `<span class="tag">${esc(a)}</span>`).join("")}</div>` : "")
-        + `</div>`).join("")
+    ? classes.map(c => `<details class="healclass"><summary><span class="top"><span class="cls">${esc(c.class)}</span>`
+        + `<span class="n">${num(c.count)}× · last run ${esc(c.last_run)}</span></span>`
+        + `<span class="what">${esc(c.last_action || "—")}</span></summary>`
+        + (c.alerts && c.alerts.length ? `<div class="heal-evidence"><div class="tagrow">${c.alerts.map(a => `<span class="tag">${esc(a)}</span>`).join("")}</div></div>` : "")
+        + `</details>`).join("")
     : `<div class="empty">Nothing has needed healing</div>`)
-    + (relax ? `<div class="healclass"><div class="top"><span class="cls">relax</span><span class="n">${num(relax.count)}×</span></div>`
+    + (relax ? `<div class="healclass relax-row"><div class="top"><span class="cls">relax</span><span class="n">${num(relax.count)}×</span></div>`
         + `<div class="what">Knobs stepping back toward default after quiet runs — ${esc(relax.last_action || "")}</div></div>` : "");
   const log = h.recent || [];
   $("heal-log").innerHTML = log.length ? log.map(x => `<li><span style="color:var(--muted)">${time(x.ts)} run ${esc(x.run)}</span> <strong>${esc(x.class)}</strong>: ${esc(x.action)}${x.alert ? `<div class="what" style="color:var(--muted);font-size:12.5px">${esc(x.alert)}</div>` : ""}</li>`).join("") : `<li class="empty">No remedies applied yet</li>`;
@@ -1823,7 +1848,7 @@ function renderCostHistory(h) {
 
   const sources=h.token_sources||[], sourceMax=Math.max(1,...sources.map(x=>Number(x.tokens)||0));
   $("hist-sources").innerHTML=sources.map(x=>`<div class="source-row"><label>${esc(x.name)}</label><b>${short(x.tokens)}</b><div class="source-track"><i style="width:${Math.max(2,Number(x.tokens)/sourceMax*100).toFixed(1)}%"></i></div><small>${esc(x.note)}</small></div>`).join("")||`<div class="empty">No baseline composition</div>`;
-  $("hist-changes").innerHTML=(h.changes||[]).map(x=>`<div class="change-step ${esc(x.kind)}"><span class="change-icon">${esc(x.icon)}</span><div class="change-body"><div class="change-head"><b>${esc(x.era)}</b><span>${esc(x.when)}</span></div><p>${esc(x.change)}</p><div class="change-impact">${esc(x.impact)}</div><div class="change-code">${esc(x.code)}</div></div></div>`).join("")||`<div class="empty">No execution history</div>`;
+  $("hist-changes").innerHTML=(h.changes||[]).map((x,index)=>`<button class="change-step ${esc(x.kind)}${index===HISTORY_CHANGE_INDEX?" selected":""}" data-history-change="${index}" aria-pressed="${index===HISTORY_CHANGE_INDEX}"><span class="change-icon">${esc(x.icon)}</span><span class="change-body"><span class="change-head"><b>${esc(x.era)}</b><span>${esc(x.when)}</span></span><span class="change-copy">${esc(x.change)}</span><span class="change-impact">${esc(x.impact)}</span><span class="change-code">${esc(x.code)}</span></span></button>`).join("")||`<div class="empty">No execution history</div>`;
 
   $("hist-ledger").innerHTML=points.map(p=>`<i class="ledger-dot${p.actual_cost||p.escalations?" charged":p.healed?" healed":""}" title="Run ${esc(p.run)} · ${p.actual_tokens?num(p.actual_tokens)+" tokens":p.healed?num(p.healed)+" alert(s) healed locally":"explicit zero tokens"}"></i>`).join("");
   $("hist-ledger-stats").innerHTML=[
@@ -1834,6 +1859,7 @@ function renderCostHistory(h) {
   ].map(([k,v])=>`<div class="metric"><label>${esc(k)}</label><strong>${esc(v)}</strong></div>`).join("");
   $("hist-disclosure").textContent=h.disclosure||"";
   renderCostHistoryChart(h);
+  operatorHistory(h);
 }
 function renderCostHistoryChart(h) {
   const all=h.points||[], count=COST_HISTORY_RANGE==="all"?all.length:Number(COST_HISTORY_RANGE)||all.length;
@@ -1878,7 +1904,9 @@ function renderCostHistoryChart(h) {
   const sampleEvery=Math.max(1,Math.floor(points.length/12));
   const dots=points.map((row,i)=>i%sampleEvery===0||i===points.length-1?`<circle class="cost-point" cx="${x(i)}" cy="${y(actual[i])}" r="4"><title>Run ${esc(row.run)} · actual ${historyValue(actual[i],COST_HISTORY_METRIC)}</title></circle><circle class="cost-point old" cx="${x(i)}" cy="${y(old[i])}" r="3"><title>Run ${esc(row.run)} · counterfactual ${historyValue(old[i],COST_HISTORY_METRIC)}</title></circle>`:"").join("");
   const gateIndex=points.findIndex(row=>Number(row.run)===46), marker=gateIndex>=0?`<line class="cost-marker" x1="${x(gateIndex)}" y1="${pad.t}" x2="${x(gateIndex)}" y2="${pad.t+ch}"></line><text class="chart-label" x="${x(gateIndex)+5}" y="${pad.t+10}">run 46 · historical false-plateau gate (superseded)</text>`:"";
-  host.innerHTML=`<svg viewBox="0 0 ${w} ${hgt}" role="img" aria-label="${esc(title)}">${grid}${band}${marker}<polyline class="cost-old${COST_HISTORY_METRIC==="healing"?" cost-wakeup":""}" points="${line(old)}"></polyline><polyline class="cost-actual" points="${line(actual)}"></polyline>${dots}<text class="chart-label" x="${pad.l}" y="${hgt-5}">run ${esc(points[0].run)}</text><text class="chart-label" x="${w-pad.r}" y="${hgt-5}" text-anchor="end">run ${esc(points[points.length-1].run)}</text></svg>`;
+  const selectedChange=(h.changes||[])[HISTORY_CHANGE_INDEX]||{}, selectedRun=Number(selectedChange.run), selectedIndex=Number.isFinite(selectedRun)?points.findIndex(row=>Number(row.run)>=selectedRun):-1;
+  const selectedMarker=selectedIndex>=0?`<line class="cost-marker selected" x1="${x(selectedIndex)}" y1="${pad.t}" x2="${x(selectedIndex)}" y2="${pad.t+ch}"></line><text class="chart-label" x="${Math.min(w-190,x(selectedIndex)+6)}" y="${pad.t+24}">${esc(selectedChange.era||"selected milestone")}</text>`:"";
+  host.innerHTML=`<svg viewBox="0 0 ${w} ${hgt}" role="img" aria-label="${esc(title)}">${grid}${band}${marker}${selectedMarker}<polyline class="cost-old${COST_HISTORY_METRIC==="healing"?" cost-wakeup":""}" points="${line(old)}"></polyline><polyline class="cost-actual" points="${line(actual)}"></polyline>${dots}<text class="chart-label" x="${pad.l}" y="${hgt-5}">run ${esc(points[0].run)}</text><text class="chart-label" x="${w-pad.r}" y="${hgt-5}" text-anchor="end">run ${esc(points[points.length-1].run)}</text></svg>`;
   $("hist-chart-title").textContent=title;
   $("hist-chart-note").textContent=note;
   $("hist-legend").innerHTML=`<span><i></i>${esc(actualLabel)}</span><span><i class="${COST_HISTORY_METRIC==="healing"?"wakeup":"old"}"></i>${esc(oldLabel)}</span>${low.length?`<span><i class="old band"></i>Measured low-high range</span>`:""}`;
@@ -1901,6 +1929,10 @@ function renderEvidence(ev) {
   renderCostHistory(ev.cost_history||{});
   const c=ev.ceiling||{}, buckets=c.buckets||[];
   $("ev-ceiling-claim").textContent=c.claim||"No claim recorded.";
+  const scalingSummary=(c.scaling||{}).exponent;
+  $("ev-ceiling-summary").textContent=scalingSummary==null?"The growth verdict is waiting for enough comparable runs.":c.saturating
+    ? `Growth is showing saturation: exponent ${fixed(scalingSummary,3)} is below the 0.95 gate across ${num(c.samples)} comparable samples.`
+    : `Growth is still paying: exponent ${fixed(scalingSummary,3)} remains above the 0.95 saturation gate across ${num(c.samples)} comparable samples. The association is descriptive, not causal.`;
   $("ev-ceiling-chart").innerHTML=evidenceChart(buckets,c.regression_from||8000);
   const below=c.regression_below||{}, above=c.regression||{};
   const scaling=c.scaling||{}, scalingB=c.scaling_bucketed||{}, wfit=c.regression_bucketed_weighted||{};
@@ -1919,7 +1951,7 @@ function renderEvidence(ev) {
   ].map(([k,v])=>`<div class="metric"><label>${esc(k)}</label><strong style="font-size:15px">${esc(v)}</strong></div>`).join("");
   $("ev-ceiling-method").textContent=`Each point is a regime-filtered herd-size bucket from the full immutable ledger. Growth is judged by the scaling exponent (below 0.95 means each extra animal returns less than the last); straight-line r is reported but cannot tell saturation from super-linear growth. ${(c.confound&&c.confound.note)||""} The metric is ${(c.confound&&c.confound.metric_measures)||"collection throughput"}. Cohort ${c.cohort&&c.cohort.sha256?c.cohort.sha256.slice(0,12):"—"}.`;
 
-  const registry=ev.claims||{}, persisted=ev.persisted_claims||{}, claimRows=registry.claims||[], questionBook=ev.questions||{}, questionRows=(questionBook.questions||[]).filter(q=>q.status==="open"||q.status==="probing");
+  const registry=ev.claims||{}, persisted=ev.persisted_claims||{}, claimRows=registry.claims||[], questionBook=ev.questions||{}, priorityRank={critical:0,high:1,medium:2,low:3}, questionRows=(questionBook.questions||[]).filter(q=>q.status==="open"||q.status==="probing").sort((a,b)=>(priorityRank[a.priority]==null?9:priorityRank[a.priority])-(priorityRank[b.priority]==null?9:priorityRank[b.priority])||Number(b.occurrences||0)-Number(a.occurrences||0));
   const runtime=(ev.policy&&ev.policy.runtime)||{}, semantic=(ev.research&&ev.research.semantic_audit)||{};
   const accepted=claimRows.filter(x=>x.status==="accepted").length, superseded=claimRows.filter(x=>x.status==="superseded").length, overdue=claimRows.filter(x=>x.refresh&&x.refresh.state==="overdue").length;
   $("ev-knowledge-stats").innerHTML=[
@@ -1931,8 +1963,8 @@ function renderEvidence(ev) {
     ["open questions",num(questionRows.length)],
     ["semantic contract",semantic.ok?((semantic.warnings||[]).length?`passing with ${(semantic.warnings||[]).length} warning(s)`:"passing"):"FAILED"],
   ].map(([k,v])=>`<div class="metric"><label>${esc(k)}</label><strong style="font-size:15px">${esc(v)}</strong></div>`).join("");
-  $("ev-claims").innerHTML=claimRows.map(x=>`<div class="verdictbox ${x.status==="accepted"&&(x.refresh||{}).state!=="overdue"?"good":x.status==="superseded"?"":"bad"}" style="margin-bottom:8px"><b>${esc(x.id)} · ${esc(x.status)}</b><div class="method">${esc(x.statement)}</div><div class="method">confidence ${esc((x.confidence||{}).level)} · freshness ${esc((x.refresh||{}).state)}</div></div>`).join("")||`<div class="empty">No claims registered</div>`;
-  $("ev-questions").innerHTML=questionRows.map(q=>`<div class="verdictbox ${q.priority==="critical"?"bad":""}" style="margin-bottom:8px"><b>${esc(q.id)} · ${esc(q.class)}</b><div class="method">${esc(q.hypothesis)}</div><div class="method">seen ${esc(q.occurrences)}x · last run ${esc(q.last_seen_run)}</div></div>`).join("")||`<div class="verdictbox good"><b>No open strategy questions</b><div class="method">Every registered uncertainty is answered or abandoned.</div></div>`;
+  $("ev-claims").innerHTML=claimRows.map(x=>{const refresh=(x.refresh||{}).state, filter=x.status==="superseded"?"superseded":(refresh==="overdue"?"recheck":x.status);return `<div class="verdictbox claim-card ${x.status==="accepted"&&refresh!=="overdue"?"good":x.status==="superseded"?"":"bad"}" data-claim-status="${esc(filter)}"><b>${esc(x.id)} · ${esc(x.status)}</b><div class="method">${esc(x.statement)}</div><div class="method">confidence ${esc((x.confidence||{}).level)} · freshness ${esc(refresh)}</div></div>`;}).join("")||`<div class="empty">No claims registered</div>`;
+  $("ev-questions").innerHTML=questionRows.map(q=>`<div class="verdictbox question-card ${q.priority==="critical"?"bad":""}"><b>${esc(q.id)} · ${esc(q.class)}</b><div class="method">${esc(q.hypothesis)}</div><div class="method">${esc(q.priority||"normal")} priority · seen ${esc(q.occurrences)}x · last run ${esc(q.last_seen_run)} · next: ${esc(q.status||"open")}</div></div>`).join("")||`<div class="verdictbox good"><b>No open strategy questions</b><div class="method">Every registered uncertainty is answered or abandoned.</div></div>`;
   $("ev-policy").textContent=`Runtime policy ${runtime.policy_id||"unversioned"} · ${runtime.compatible?"compatible with promoted claims and rules":"not promoted/compatible: "+(runtime.errors||[]).join("; ")}. Counterfactual replay made ${num((ev.research&&ev.research.counterfactual||{}).mcp_calls)} MCP calls.`;
 
   const sp=ev.species||{}, species=sp.table||[], max=Math.max(1,...species.map(x=>Number(x.collected)||0)), probe=sp.probe||{};
@@ -1950,6 +1982,7 @@ function renderEvidence(ev) {
   const slider=$("ev-runs-slider");
   slider.oninput=()=>paintCostCounterfactual(ev.cost||{},Number(slider.value));
   paintCostCounterfactual(ev.cost||{},Number(slider.value));
+  operatorFindings(ev,OP_AUTONOMY);
 }
 function evidenceChart(buckets, divider) {
   if (!buckets.length) return `<div class="empty">No comparable runs yet</div>`;
@@ -1969,6 +2002,9 @@ function paintCostCounterfactual(cost, runsPerDay) {
   $("ev-new-cost").textContent=`$${exceptionCost.toFixed(2)} all time`;
   $("ev-cost-note").textContent=`At ${num(runsPerDay)} runs/day, the measured old-loop midpoint (${num(Math.round(inAvg))} input/tool tokens plus ${num(old.thinking_tokens)} thinking/output tokens per run) implies about $${perRun.toFixed(2)} per cycle. Routine cycles are explicit zero-token rows; ${money(exceptionCost,2)} is the estimated exception cost to date.`;
 }
+/*OPERATOR_JS_START*/
+__OPERATOR_JS__
+/*OPERATOR_JS_END*/
 async function loadEvidence(force=false) {
   if ((!force && EVIDENCE) || EVIDENCE_LOADING) return;
   EVIDENCE_LOADING=true;
@@ -1988,6 +2024,7 @@ async function load() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     render(await response.json());
     const now=Date.now();
+    if (!OP_AUTONOMY_LAST_FETCH_MS || now-OP_AUTONOMY_LAST_FETCH_MS>=OP_AUTONOMY_REFRESH_MS) loadOperatorAutonomy(!!OP_AUTONOMY);
     if (!EVIDENCE) loadEvidence();
     else if ((ACTIVE_TAB==="findings"||ACTIVE_TAB==="history") &&
              (!EVIDENCE_LAST_FETCH_MS || now-EVIDENCE_LAST_FETCH_MS>=EVIDENCE_REFRESH_MS)) loadEvidence(true);
@@ -2026,7 +2063,7 @@ function activateTab(name, writeHash) {
     const host=document.getElementById("tab-architecture");
     const renderer=window.renderArchitecture, loader=window.loadArchitecture;
     if (typeof renderer!=="function" || typeof loader!=="function") {
-      if (host) host.innerHTML=`<div class="card full"><h2>Architecture</h2><p class="arch-note">Architecture renderer failed to initialize. Expected renderArchitecture and loadArchitecture to be available.</p></div>`;
+      if (host) host.innerHTML=`<div class="arch-shell"><section class="page-hero arch-hero"><div><span class="page-kicker">Architecture telemetry unavailable</span><h2>Architecture control plane</h2><p>The specialized renderer did not initialize; the rest of the read-only dashboard remains available.</p></div><div class="hero-verdict attention"><b>Renderer unavailable</b><span>Expected the source-map bundle to initialize</span></div></section></div>`;
     } else {
       if (window.ARCH) safe(name,()=>renderer(window.ARCH,window.AUTONOMY));
       Promise.resolve(loader(true)).catch(error=>safe(name,()=>renderer({error:error && error.message ? error.message : String(error)},null)));
@@ -2054,7 +2091,7 @@ if (typeof window.addEventListener==="function") {
   window.addEventListener("keydown",event=>{
     if (event.metaKey||event.ctrlKey||event.altKey) return;
     if (event.target && /input|textarea|select/i.test(event.target.tagName||"")) return;
-    const map={o:"overview",p:"pipeline",c:"cost",t:"history",f:"findings",g:"game",w:"wire"}, tab=map[String(event.key||"").toLowerCase()];
+    const map={o:"overview",p:"pipeline",c:"cost",t:"history",f:"findings",g:"game",w:"wire",a:"architecture"}, tab=map[String(event.key||"").toLowerCase()];
     if (tab) activateTab(tab,true);
   });
 }
@@ -2123,10 +2160,12 @@ HTML = (
     .replace("__WIRE_CSS__", WIRE_CSS)
     .replace("__ARCH_CSS__", ARCH_CSS)
     .replace("__GAME_CSS__", GAME_CSS)
+    .replace("__OPERATOR_CSS__", OPERATOR_CSS)
     .replace("__GAME_MARKUP__", GAME_MARKUP)
     .replace("__TRACE_JS__", TRACE_JS)
     .replace("__WIRE_JS__", WIRE_JS)
     .replace("__ARCH_JS__", ARCH_JS)
+    .replace("__OPERATOR_JS__", OPERATOR_JS)
     .replace("__GAME_JS__", GAME_JS)
 )
 

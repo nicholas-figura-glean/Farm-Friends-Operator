@@ -645,11 +645,12 @@
     } else if (selected && selected.indexOf("node:") === 0) {
       body = nodeInspector(decodeURIComponent(selected.slice(5)), model);
     }
-    if (!body) {
+    var ambient = !body;
+    if (ambient) {
       body = '<div class="te-inspect-kind">TRACE INSPECTOR</div><h3>Select a span or matrix cell</h3>'
         + '<p>Measured step timing, tool arguments and results appear here. Python functions are labelled as static reachability.</p>';
     }
-    return '<aside class="te-inspector" id="trace-inspect"><button class="te-close" data-trace-close aria-label="Close inspector">×</button>'
+    return '<aside class="te-inspector' + (ambient ? ' empty' : '') + '" id="trace-inspect"><button class="te-close" data-trace-close aria-label="Close inspector">×</button>'
       + body + '</aside>';
   }
 
