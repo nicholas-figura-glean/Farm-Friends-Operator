@@ -55,7 +55,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 section("every agent is accounted for")
 
 view = autonomy.agents()
-check("all eight agents are described", view.get("expected") == 8,
+check("all nine required processes are described", view.get("expected") == 9,
       str(view.get("expected")))
 labels = {a["label"] for a in view.get("agents") or []}
 for expected in ("com.nickfigura.farmfriends",
@@ -65,7 +65,8 @@ for expected in ("com.nickfigura.farmfriends",
                  "com.nickfigura.farmfriends.contract",
                  "com.nickfigura.farmfriends.author",
                  "com.nickfigura.farmfriends.research",
-                 "com.nickfigura.farmfriends.dashboard"):
+                 "com.nickfigura.farmfriends.dashboard",
+                 "com.nickfigura.farmfriends.monitor"):
     check("watches %s" % expected.split("farmfriends")[-1] or "cycle",
           expected in labels)
 check("every agent explains what its absence costs",
@@ -83,7 +84,7 @@ section("the plists the architecture reads are actually parseable")
 # XML comment, which `plutil` tolerates and Python's expat rejects. Both agents
 # silently disappeared from the architecture view with no error anywhere.
 plists = sorted((PROJECT / "deploy").glob("com.nickfigura.farmfriends*.plist"))
-check("eight plists on disk", len(plists) == 8, str(len(plists)))
+check("nine plists on disk", len(plists) == 9, str(len(plists)))
 for path in plists:
     try:
         with path.open("rb") as handle:
@@ -100,6 +101,23 @@ for path in plists:
                             capture_output=True, text=True)
     check("plutil accepts %s" % path.name.replace("com.nickfigura.farmfriends", ""),
           result.returncode == 0, result.stdout.strip()[:80])
+
+monitor_plist_path = PROJECT / "deploy" / "com.nickfigura.farmfriends.monitor.plist"
+with monitor_plist_path.open("rb") as handle:
+    monitor_plist = plistlib.load(handle)
+monitor_args = monitor_plist.get("ProgramArguments") or []
+check("the browser server is kept alive", monitor_plist.get("KeepAlive") is True)
+check("the browser server binds the documented port", "8765" in monitor_args)
+check("the browser server refuses a surprise fallback port", "--strict-port" in monitor_args)
+check("the browser server runs at normal priority",
+      "ProcessType" not in monitor_plist and not monitor_plist.get("LowPriorityIO"))
+
+install_source = (PROJECT / "deploy" / "install.sh").read_text(encoding="utf-8")
+release_source = (PROJECT / "deploy" / "release.sh").read_text(encoding="utf-8")
+check("installation includes the monitor service", 'MONITOR="$LABEL.monitor"' in install_source)
+check("uninstall removes the monitor service", 'bootout "$DOMAIN/$MONITOR"' in install_source)
+check("a release restarts module-level HTML and routes",
+      'kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"' in release_source)
 
 
 # --------------------------------------------------------------------------
@@ -129,7 +147,7 @@ check("a failed section is surfaced as a blocker",
 # --------------------------------------------------------------------------
 section("the hot path does not pay for subprocesses")
 
-# The uncached view spawns launchctl seven times plus git. On the 2s dashboard poll
+# The uncached view spawns launchctl once per required process plus git. On the 2s dashboard poll
 # that was 1,800 rounds of subprocess churn an hour, so `_blockers` uses the cache.
 autonomy._CACHE["view"] = None
 autonomy._CACHE["at"] = 0.0
@@ -156,7 +174,7 @@ section("architecture is derived from what is on disk")
 
 snap = architecture.snapshot()
 check("a signature is produced", len(snap.get("signature") or "") == 64)
-check("all eight LaunchAgents are found", snap["stats"]["launch_agents"] == 8,
+check("all nine LaunchAgents are found", snap["stats"]["launch_agents"] == 9,
       str(snap["stats"]["launch_agents"]))
 check("modules were discovered", snap["stats"]["modules"] > 20,
       str(snap["stats"]["modules"]))
@@ -408,6 +426,122 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 # --------------------------------------------------------------------------
+section("the verifier checks what a browser actually receives")
+
+# The original verifier imported fresh functions from the current release. It stayed
+# green while an eight-hour-old monitor process served seven tabs and 404ed both new
+# endpoints. This fixture exercises the HTTP contract without requiring an installed
+# daemon during a first-time release gate.
+class _Response:
+    def __init__(self, body, status=200):
+        self.body = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self.body
+
+
+def _http_fixture(stale=False):
+    state = {
+        "app": "farmfriends-monitor",
+        "release": {
+            "serving_revision": "rev-a",
+            "pointer_revision": "rev-b" if stale else "rev-a",
+            "stale": stale,
+        },
+    }
+    bodies = {
+        "/": '<button data-tab="architecture"></button><div id="tab-architecture">'
+             '<script>fetch("/api/architecture")</script></div>',
+        "/api/state": json.dumps(state),
+        "/api/autonomy": json.dumps({"agents": {"live": 9}}),
+        "/api/architecture": json.dumps({"current": {"nodes": [{"id": "cycle"}]}}),
+    }
+
+    def _open(url, timeout=0):
+        del timeout
+        path = url.split("fixture.invalid", 1)[-1]
+        return _Response(bodies[path])
+
+    return _open
+
+
+original_urlopen = dashboard_agent.urlopen
+try:
+    dashboard_agent.urlopen = _http_fixture(stale=False)
+    served = dashboard_agent._served_dashboard("http://fixture.invalid")
+    check("the browser-path probe accepts a current eight-tab server", served["ok"],
+          str(served.get("error")))
+    check("the browser-path probe fetched all four resources",
+          served.get("bytes", 0) > 100, str(served.get("bytes")))
+
+    dashboard_agent.urlopen = _http_fixture(stale=True)
+    stale_served = dashboard_agent._served_dashboard("http://fixture.invalid")
+    check("the browser-path probe rejects a stale process", not stale_served["ok"])
+    check("the stale diagnosis names both revisions",
+          "rev-a" in stale_served.get("error", "")
+          and "rev-b" in stale_served.get("error", ""),
+          stale_served.get("error", ""))
+finally:
+    dashboard_agent.urlopen = original_urlopen
+
+check("scheduled passes include the browser-path probe",
+      "if throttled:\n        served = _served_dashboard()" in agent_src)
+
+
+# --------------------------------------------------------------------------
+section("the server distinguishes its own release from the pointer")
+
+import monitor  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / "deploy").mkdir()
+    (root / "deploy" / "com.nickfigura.farmfriends.monitor.plist").write_text(
+        "<plist/>", encoding="utf-8")
+    releases = root / "releases"
+    releases.mkdir()
+    for revision, content in (("rev-a", "a"), ("rev-b", "b")):
+        release_dir = releases / revision
+        (release_dir / "farm").mkdir(parents=True)
+        (release_dir / "RELEASED").write_text(revision, encoding="utf-8")
+        (release_dir / "run.py").write_text(content, encoding="utf-8")
+        (release_dir / "farm" / "sample.py").write_text(content, encoding="utf-8")
+    os.symlink(releases / "rev-a", root / "release")
+
+    original_project = monitor.PROJECT
+    monitor.PROJECT = releases / "rev-a"
+    try:
+        same = monitor._release_info()
+        check("a release process finds the canonical checkout",
+              same.get("project_root") == str(root), str(same.get("project_root")))
+        check("the process reports the revision it serves",
+              same.get("serving_revision") == "rev-a", str(same))
+        check("the current pointer is reported separately",
+              same.get("pointer_revision") == "rev-a", str(same))
+        check("matching process and pointer are not stale", same.get("stale") is False)
+
+        (root / "release").unlink()
+        os.symlink(releases / "rev-b", root / "release")
+        stale_info = monitor._release_info()
+        check("an old process detects a moved pointer", stale_info.get("stale") is True,
+              str(stale_info))
+        check("staleness preserves both identities",
+              stale_info.get("serving_revision") == "rev-a"
+              and stale_info.get("pointer_revision") == "rev-b", str(stale_info))
+        check("uncomparable fingerprints are never called not-diverged",
+              monitor._release_info().get("diverged") in (True, None))
+    finally:
+        monitor.PROJECT = original_project
+
+
+# --------------------------------------------------------------------------
 section("the event stream is honestly ordered")
 
 events = architecture.events(limit=80)
@@ -583,8 +717,8 @@ check("the asset loaded rather than stubbing out",
 check("the stylesheet loaded", "missing dashboard asset" not in monitor.ARCH_CSS)
 
 state = monitor.snapshot()
-check("snapshot reports all eight agents",
-      len((state.get("launchd") or {}).get("all") or []) == 8,
+check("snapshot reports all nine required processes",
+      len((state.get("launchd") or {}).get("all") or []) == 9,
       str(len((state.get("launchd") or {}).get("all") or [])))
 check("snapshot keeps the original cycle fields",
       "loaded" in (state.get("launchd") or {}))

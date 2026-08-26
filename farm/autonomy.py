@@ -29,8 +29,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 PROJECT = Path(__file__).resolve().parent.parent
 
-# Every agent that must be alive for the loop to be fully autonomous, with what its
-# absence actually costs. The dashboard used to watch two of these seven, so five
+# Every process that must be alive for the loop and its operator view, with what its
+# absence actually costs. The dashboard used to watch two of the original seven, so five
 # could have been dead behind a green page -- including the author agent, whose
 # silence looks exactly like "no repairs were needed".
 AGENTS: List[Dict[str, str]] = [
@@ -55,6 +55,12 @@ AGENTS: List[Dict[str, str]] = [
     {"key": "dashboard", "label": "com.nickfigura.farmfriends.dashboard",
      "role": "verifies the operator view",
      "lost": "broken dashboard readouts stop being reported"},
+    # Distinct from the verifier above. This is the long-running HTTP process a browser
+    # actually reaches. It was hand-started and survived eight releases, serving stale
+    # routes while every in-process verifier remained green.
+    {"key": "monitor", "label": "com.nickfigura.farmfriends.monitor",
+     "role": "serves the operator view",
+     "lost": "the dashboard URL is unavailable"},
 ]
 
 
@@ -106,7 +112,7 @@ def _tail(path: Path, limit: int) -> List[Dict[str, Any]]:
 
 
 def agents() -> Dict[str, Any]:
-    """Liveness of all seven agents, not just the two the page used to know about."""
+    """Liveness of every required agent and the browser-facing monitor process."""
     from farm import scheduler
 
     out: List[Dict[str, Any]] = []

@@ -194,6 +194,22 @@ assert resolved == os.path.realpath(target), "flip failed: %s" % resolved
 print("pointer -> %s" % os.path.basename(resolved))
 PY
 
+# monitor.py composes HTML and registers routes at import time. Moving the pointer does
+# not update an already-running process: before supervision existed, one hand-started
+# server survived eight releases and served a seven-tab page for 8.5 hours. If the
+# monitor LaunchAgent is installed, restart it after the atomic flip so it imports this
+# release. Failure is loud but does not roll back a release whose runtime has already
+# been published; the KeepAlive job and dashboard verifier will continue recovery.
+MONITOR_LABEL="com.nickfigura.farmfriends.monitor"
+MONITOR_DOMAIN="gui/$(id -u)"
+if launchctl print "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1; then
+  if launchctl kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"; then
+    echo "restarted $MONITOR_LABEL on $REV"
+  else
+    echo "WARNING: released code is live but $MONITOR_LABEL did not restart" >&2
+  fi
+fi
+
 # Clean up any stray link that the old buggy swap left inside a release.
 find "$RELEASES" -maxdepth 2 -name '.release.newlink.*' -delete 2>/dev/null || true
 find "$RELEASES" -maxdepth 2 -name 'release.new.*' -delete 2>/dev/null || true

@@ -168,15 +168,24 @@ def _blockers(
     for anomaly in anomalies:
         blockers.append({"level": "error", "text": str(anomaly)})
 
-    # Not a farm failure, but the dashboard would otherwise show numbers computed
-    # by rules the live loop is not running yet.
-    if (release or {}).get("diverged"):
+    # Not farm failures, but both mean the operator is looking at code other than the
+    # current pointer. The stale-process case is stronger: even the HTML and registered
+    # routes may be old, which is how the Architecture tab disappeared for 8.5 hours.
+    if (release or {}).get("stale"):
+        blockers.append(
+            {
+                "level": "error",
+                "text": "Dashboard process is stale: serving "
+                        f"{release.get('serving_revision')} while release points to "
+                        f"{release.get('pointer_revision')}",
+            }
+        )
+    elif (release or {}).get("diverged"):
         blockers.append(
             {
                 "level": "warn",
-                "text": "Working tree differs from the live release "
-                        f"({release.get('revision')}) - these panels use unreleased "
-                        "rules until deploy/release.sh publishes them",
+                "text": "Dashboard is running working-tree code that differs from "
+                        f"the live release ({release.get('revision')})",
             }
         )
 
@@ -777,32 +786,60 @@ def _heal_summary() -> Dict[str, Any]:
     }
 
 
-def _release_info() -> Dict[str, Any]:
-    """Which code is live, and whether this dashboard agrees with it.
+def _canonical_root() -> Path:
+    """Find the checkout even when this process runs inside releases/<revision>/."""
+    for candidate in (PROJECT,) + tuple(PROJECT.parents):
+        deploy = candidate / "deploy"
+        if deploy.is_dir() and any(deploy.glob("com.nickfigura.farmfriends*.plist")):
+            return candidate
+    return PROJECT
 
-    The dashboard imports farm/* from its OWN directory, so running it from the
-    working tree means state written by the released loop is being interpreted by
-    possibly-unreleased rules (a produce floor or knob clamp you just edited).
-    That is worth saying out loud rather than silently mixing the two.
+
+def _revision(root: Path, fallback: str) -> str:
+    try:
+        return (root / "RELEASED").read_text(encoding="utf-8").strip() or fallback
+    except OSError:
+        return fallback
+
+
+def _release_info() -> Dict[str, Any]:
+    """Identify both the code this process serves and the current release pointer.
+
+    Those are deliberately separate. The old implementation used PROJECT/release for
+    both. When monitor.py itself ran from releases/<rev>/ that path meant
+    releases/<rev>/release, which does not exist; it reported ``unpublished`` and, more
+    dangerously, ``diverged: false`` because one fingerprint was null. When an older
+    hand-started process stayed alive for eight hours it had no way to say that its HTML
+    and routes predated the pointer.
     """
-    live = PROJECT / "release"
+    root = _canonical_root()
+    pointer = root / "release"
     try:
-        target = live.resolve()
+        pointer_target = pointer.resolve(strict=True)
     except OSError:
-        target = live
-    try:
-        revision = (target / "RELEASED").read_text(encoding="utf-8").strip()
-    except OSError:
-        revision = "unpublished"
-    live_fp = release_info.fingerprint(str(target))
-    tree_fp = release_info.fingerprint(str(PROJECT))
+        pointer_target = pointer
+
+    serving_revision = _revision(PROJECT, "working-tree")
+    pointer_revision = _revision(pointer_target, "unpublished")
+    serving_fp = release_info.fingerprint(str(PROJECT))
+    pointer_fp = release_info.fingerprint(str(pointer_target))
+    comparable = bool(serving_fp and pointer_fp)
+    stale = bool(pointer_revision != "unpublished"
+                 and serving_revision != pointer_revision)
     return {
-        "revision": revision,
-        "target": str(target),
-        "live_fingerprint": live_fp,
-        "tree_fingerprint": tree_fp,
-        "diverged": bool(live_fp and tree_fp and live_fp != tree_fp),
+        # Backward-compatible: revision/target continue to mean the current pointer.
+        "revision": pointer_revision,
+        "target": str(pointer_target),
+        "pointer_revision": pointer_revision,
+        "serving_revision": serving_revision,
+        "stale": stale,
+        "serving_fingerprint": serving_fp,
+        "live_fingerprint": pointer_fp,
+        "tree_fingerprint": serving_fp,
+        # Unknown is represented as None, never as the falsely reassuring False.
+        "diverged": (serving_fp != pointer_fp) if comparable else None,
         "dashboard_root": str(PROJECT),
+        "project_root": str(root),
     }
 
 
@@ -1441,10 +1478,12 @@ function renderOverview(data) {
     ["supervisor", ld.supervisor?.loaded ? `${esc(ld.supervisor.state)}` : "not loaded"],
     ["agent runs", num(ld.runs)],
     ["last exit", esc(ld.last_exit || "—")],
-    ["release", esc(data.release?.revision || "—")],
-    ["code in this view", data.release?.diverged
-      ? `<span style="color:var(--yellow)">working tree (unreleased)</span>`
-      : `matches release`],
+    ["release pointer", esc(data.release?.pointer_revision || data.release?.revision || "—")],
+    ["code in this view", data.release?.stale
+      ? `<span style="color:var(--red)">stale · ${esc(data.release?.serving_revision || "unknown")}</span>`
+      : data.release?.diverged
+        ? `<span style="color:var(--yellow)">working tree (unreleased)</span>`
+        : `matches release`],
     ["server calls", num(r.calls)],
   ]);
   $("farm").innerHTML = kv([

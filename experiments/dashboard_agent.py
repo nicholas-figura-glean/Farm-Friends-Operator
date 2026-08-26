@@ -35,6 +35,8 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
@@ -42,6 +44,7 @@ sys.path.insert(0, str(PROJECT))
 from farm import architecture, autonomy, workorders  # noqa: E402
 
 LEDGER = PROJECT / "state" / "dashboard_health.ndjson"
+DASHBOARD_URL = os.environ.get("FARM_DASHBOARD_URL", "http://127.0.0.1:8765").rstrip("/")
 
 # Each dashboard readout, how it is produced, and how stale it may be before that is
 # a defect. The staleness budgets come from the cadence of whatever writes the data:
@@ -227,6 +230,62 @@ def _probe_once(source: str) -> Dict[str, Any]:
                 "ms": int((time.time() - started) * 1000)}
 
 
+def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
+    """Probe what a browser receives, not another in-process copy of the code.
+
+    The first version of this agent exercised Python producers directly. It reported
+    5/5 green while an eight-hour-old monitor process served seven tabs and returned
+    404 for both new endpoints. That test proved the working tree, not the dashboard.
+    """
+    started = time.time()
+    try:
+        payloads: Dict[str, Any] = {}
+        for path in ("/", "/api/state", "/api/autonomy", "/api/architecture"):
+            with urlopen(base_url + path, timeout=20) as response:
+                body = response.read()
+                if response.status != 200:
+                    raise RuntimeError("%s returned HTTP %s" % (path, response.status))
+                payloads[path] = body
+        html = payloads["/"].decode("utf-8", errors="replace")
+        missing = [marker for marker in (
+            'data-tab="architecture"',
+            'id="tab-architecture"',
+            '/api/architecture',
+        ) if marker not in html]
+        state = json.loads(payloads["/api/state"].decode("utf-8"))
+        autonomy_payload = json.loads(payloads["/api/autonomy"].decode("utf-8"))
+        architecture_payload = json.loads(payloads["/api/architecture"].decode("utf-8"))
+        release = state.get("release") or {}
+        errors: List[str] = []
+        if state.get("app") != "farmfriends-monitor":
+            errors.append("port is not the Farm Friends monitor")
+        if missing:
+            errors.append("served HTML missing %s" % ", ".join(missing))
+        if release.get("stale"):
+            errors.append("server runs %s while pointer is %s"
+                          % (release.get("serving_revision"),
+                             release.get("pointer_revision")))
+        if not autonomy_payload.get("agents"):
+            errors.append("autonomy payload has no agents section")
+        current = architecture_payload.get("current") or {}
+        if not current.get("nodes"):
+            errors.append("architecture payload has no components")
+        return {
+            "ok": not errors,
+            "bytes": sum(len(v) for v in payloads.values()),
+            "ms": int((time.time() - started) * 1000),
+            "detail": "8 tabs; serving %s" % release.get("serving_revision"),
+            "error": "; ".join(errors) if errors else None,
+            "release": release,
+        }
+    except (HTTPError, URLError, OSError, ValueError, RuntimeError) as exc:
+        return {
+            "ok": False,
+            "ms": int((time.time() - started) * 1000),
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+        }
+
+
 def _staleness() -> Dict[str, Any]:
     """How old the underlying writers' data is, independent of whether it renders."""
     from farm import journal
@@ -289,6 +348,26 @@ def main() -> int:
                        % (ms, int(baseline),
                           " (scheduled pass)" if throttled else ""),
                 "source": check["source"],
+            })
+
+    # Only a launchd pass requires the live server. Release gates and hand-run tests
+    # execute before the monitor service may be installed; they test _served_dashboard
+    # against a fixture instead of making deployment depend on pre-existing state.
+    if throttled:
+        served = _served_dashboard()
+        served_row = {
+            "tab": "served dashboard",
+            "source": "http.dashboard",
+            "critical": True,
+        }
+        served_row.update(served)
+        results.append(served_row)
+        if not served.get("ok"):
+            problems.append({
+                "severity": "breaking",
+                "what": "the browser-facing dashboard is stale or unavailable",
+                "why": served.get("error") or "HTTP probe returned not-ok",
+                "source": "http.dashboard",
             })
 
     stale = _staleness()
