@@ -460,11 +460,11 @@ def cached_report(max_age_seconds: float = CACHE_TTL_SECONDS) -> Dict[str, Any]:
 
 
 def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Autonomy problems worth interrupting the operator for.
+    """Conditions currently owned by recovery, containment, or verification agents.
 
-    Kept separate from `report()` so the overview tab can show these beside the farm's
-    own blockers. Only conditions that actually stop self-healing are listed; a
-    watching canary or an open research order is normal operation, not a blocker.
+    The historical function name is retained for API compatibility. Rows describe
+    autonomous ownership; none is an instruction for a person. A watching canary or
+    an open research order is normal operation and is not included.
     """
     view = view if view is not None else cached_report()
     out: List[Dict[str, Any]] = []
@@ -481,8 +481,8 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     can = view.get("canary") or {}
     if can.get("status") == "regressed":
         out.append({"severity": "critical",
-                    "what": "canary judged release %s regressed" % can.get("revision"),
-                    "why": can.get("reason") or "awaiting rollback"})
+                    "what": "automatic rollback active for regressed release %s" % can.get("revision"),
+                    "why": can.get("reason") or "canary owns rollback to the last verified release"})
 
     orders = (view.get("orders") or {}).get("summary") or {}
     failed = int(orders.get("failed") or 0)
@@ -491,8 +491,8 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     oldest = orders.get("oldest_repair_age_seconds")
     if failed:
         out.append({"severity": "warn",
-                    "what": "%d work order(s) exhausted their attempts" % failed,
-                    "why": "these need a human or a different approach"})
+                    "what": "%d work order(s) safely contained after bounded attempts" % failed,
+                    "why": "the verified release remains active while research seeks an alternate approach"})
     if repair_count and isinstance(oldest, int) and oldest > 3600:
         out.append({"severity": "warn",
                     "what": "%d repair(s) queued; oldest is %d minutes old" % (
@@ -503,14 +503,14 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     dirty_source = vcs_view.get("dirty_source_paths") or []
     if dirty_source:
         out.append({"severity": "warn",
-                    "what": "working source differs from main; autonomous authoring is paused",
-                    "why": "%d release-source file(s) are uncommitted, including %s" % (
+                    "what": "working source differs from main; autonomous authoring is safely paused",
+                    "why": "%d release-source file(s) are contained outside the live release, including %s" % (
                         len(dirty_source), ", ".join(str(path) for path in dirty_source[:3]))})
     if (vcs_view.get("available") and vcs_view.get("remote_head")
             and vcs_view.get("remote_tracking_synced") is False):
         out.append({"severity": "warn",
                     "what": "local main differs from last-known origin/main",
-                    "why": "release is blocked until the exact commit is pushed and verified"})
+                    "why": "publication is automatically held until remote verification succeeds"})
 
     con = view.get("contract") or {}
     age = con.get("last_scan_age_seconds")

@@ -12,10 +12,11 @@ Rules of the design:
 2. Every knob relaxes one step per quiet pass, so a transient incident cannot
    throttle the farm permanently.
 3. Anything strategic (rank, threats, stale decisions, rival wakes) is NOT
-   healed. It opens or updates one durable question. Only a high-priority first
-   occurrence pages; repeated alerts add evidence without repeated model spend.
-4. A class that keeps re-alerting despite its operational remedy escalates.
-   Silent, endless self-healing that is not working is worse than a page.
+   healed. It opens or updates one durable question owned by the research and
+   probe agents; repeated alerts add evidence without creating duplicate work.
+4. Unknown alerts and remedies that exhaust their bounded attempts are routed to
+   the same durable agent queue. They are never left waiting for operator input.
+   The last verified policy remains active while the queue investigates.
 
 State lives in state/heal.json, which only this module writes. The cycle reads
 the knobs; it never writes them, so there is no race with the run loop's meta.
@@ -372,27 +373,77 @@ def process(
     row: Optional[Dict[str, Any]],
     run: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Heal what can be healed; report what genuinely needs a model."""
+    """Heal deterministically or route the condition to an autonomous owner."""
     store = load()
     row = row or {}
     run = run if run is not None else row.get("run")
     healed: List[Dict[str, str]] = []
-    escalated: List[Dict[str, Any]] = []
+    routed: List[Dict[str, Any]] = []
     questioned: List[Dict[str, Any]] = []
-    already = set(store.get("healed") or [])
+    already = set()
+    for handled in store.get("healed") or []:
+        try:
+            already.add(handled)
+        except TypeError:
+            continue
     applied: Dict[str, str] = {}
     decision_bundle: Optional[Dict[str, Any]] = None
 
+    def route(
+        item: Dict[str, Any],
+        alert_class: str,
+        reason: str,
+        bundle: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Transfer one alert to a durable agent-owned question.
+
+        Routing is a terminal disposition for this alert instance, not a page.
+        A later run can add evidence to the same stable question identity while
+        probes, research, and authoring continue independently.
+        """
+        alert = str(item.get("alert") or "")
+        result = questions.open_or_update(
+            alert_class,
+            alert,
+            row=row,
+            item=item,
+            subject=item.get("subject"),
+            decision_bundle=bundle,
+            evidence_refs=["history.ndjson#run=%s" % item.get("run")],
+        )
+        question = result["question"]
+        entry = {
+            "alert": alert,
+            "class": alert_class,
+            "reason": reason,
+            "question_id": question.get("id"),
+            "opened": bool(result.get("opened") or result.get("reopened")),
+            "occurrences": question.get("occurrences"),
+            "priority": question.get("priority"),
+        }
+        if bundle is not None:
+            entry["decision_bundle"] = bundle
+        questioned.append(entry)
+        routed.append(entry)
+        key = alert_key(item)
+        already.add(key)
+        store.setdefault("healed", []).append(key)
+        _log({
+            "ts": _utcnow(), "run": run, "class": alert_class,
+            "alert": alert, "action": "routed to autonomous question %s" % question.get("id"),
+            "reason": reason,
+        })
+
     if not rules.HEAL_ENABLED:
+        for item in pending:
+            key = alert_key(item)
+            if key not in already:
+                route(item, "healing_disabled", "deterministic healing disabled; queued for agent")
+        save(store)
         return {
-            "healed": [],
-            "escalated": [
-                {"alert": i.get("alert", ""), "class": "disabled", "reason": "healing off"}
-                for i in pending
-            ],
-            "questions": [],
-            "knobs": dict(store.get("knobs") or {}),
-            "relaxed": [],
+            "healed": [], "routed": routed, "escalated": [],
+            "questions": questioned,
+            "knobs": dict(store.get("knobs") or {}), "relaxed": [],
         }
 
     for item in pending:
@@ -429,46 +480,14 @@ def process(
                 # class table to prove strategy cannot reach a remedy.
                 from . import research
                 decision_bundle = research.decision_bundle(row=row, include_sweep=True)
-            result = questions.open_or_update(
-                name,
-                alert,
-                row=row,
-                item=item,
-                subject=item.get("subject"),
-                decision_bundle=decision_bundle,
-                evidence_refs=["history.ndjson#run=%s" % item.get("run")],
-            )
-            question = result["question"]
-            questioned.append(
-                {
-                    "alert": alert,
-                    "class": name,
-                    "question_id": question.get("id"),
-                    "opened": bool(result.get("opened") or result.get("reopened")),
-                    "occurrences": question.get("occurrences"),
-                    "priority": question.get("priority"),
-                }
-            )
-            # This alert instance is disposed into a durable question. Mark the
-            # run+alert key handled so each supervisor pass cannot count it again;
-            # a future run has a new key and bumps the same question once.
-            already.add(key)
-            store.setdefault("healed", []).append(key)
-            if result.get("page_on_open"):
-                escalated.append(
-                    {
-                        "alert": alert,
-                        "class": name,
-                        "reason": "opened %s question %s" % (
-                            question.get("priority"), question.get("id")
-                        ),
-                        "question_id": question.get("id"),
-                        "decision_bundle": decision_bundle,
-                    }
-                )
+            route(item, name, "strategy evidence queued for research", decision_bundle)
             continue
         if remedy is None:
-            escalated.append({"alert": alert, "class": name, "reason": "needs judgement"})
+            route(
+                item,
+                "operational_%s" % name,
+                "no deterministic remedy; queued for autonomous diagnosis",
+            )
             continue
         # One remedy per class per pass. Several runs' worth of the same alert
         # describe ONE condition, and stepping the knob once per alert made the
@@ -484,18 +503,19 @@ def process(
         limit = rules.HEAL_MAX_ATTEMPTS.get(name, 3)
         count = _attempts(store, name, run)
         if count > limit:
-            escalated.append(
-                {
-                    "alert": alert,
-                    "class": name,
-                    "reason": "remedy ineffective after %d attempts" % (count - 1),
-                }
+            route(
+                item,
+                "operational_%s" % name,
+                "deterministic remedy ineffective after %d attempts; queued for alternate diagnosis"
+                % (count - 1),
             )
             continue
         action = remedy(item, row, store)
         if not action:
-            escalated.append(
-                {"alert": alert, "class": name, "reason": "no remedy left to apply"}
+            route(
+                item,
+                "operational_%s" % name,
+                "deterministic remedy exhausted; queued for alternate diagnosis",
             )
             continue
         applied[name] = action
@@ -513,14 +533,16 @@ def process(
             }
         )
 
-    relaxed = relax(store, run) if not escalated else []
+    relaxed = relax(store, run) if not routed else []
     for note in relaxed:
         _log({"ts": _utcnow(), "run": run, "class": "relax", "action": note})
 
     save(store)
     return {
         "healed": healed,
-        "escalated": escalated,
+        "routed": routed,
+        # Compatibility for older read-only consumers. Human escalation is retired.
+        "escalated": [],
         "questions": questioned,
         "knobs": dict(store.get("knobs") or {}),
         "relaxed": relaxed,

@@ -22,7 +22,8 @@ need doing periodically, and neither belongs in an HTTP handler:
    freshness against how often its writer is supposed to run. A broken or stale
    readout files a work order like any other defect.
 
-Exit codes: 0 clean, 1 problems found and filed, 2 the agent itself failed.
+Exit codes: 0 verification completed (including filed repairs); an unhandled
+exception remains a process failure for launchd to retry.
 """
 
 from __future__ import annotations
@@ -468,7 +469,8 @@ def main() -> int:
                   % (blocker["severity"], blocker["what"], blocker["why"]))
     if filed:
         print("  filed %d work order(s)" % filed)
-    return 1 if problems else 0
+    # Filing a repair is successful autonomous handling, not operator attention.
+    return 0
 
 
 if __name__ == "__main__":

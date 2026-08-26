@@ -312,7 +312,7 @@ def main() -> int:
                 for name, _, remedy in heal.CLASSES
             ), "no strategic class is reachable from a healing remedy")
 
-            # Question identity, deduplication, close/reopen, and page-once behavior.
+            # Question identity, deduplication, close/reopen, and headless routing.
             q1 = questions.open_or_update(
                 "rival_wake", "RIVAL WAKE: John recent 0.500/min vs base 0.000/min",
                 row={"run": 241, "ts": "2026-08-22T00:00:00Z"},
@@ -366,7 +366,7 @@ def main() -> int:
             suite.check(knob_rows[0]["occurrences"] == 6,
                         "reconciliation preserves accumulated occurrences", knob_rows[0])
 
-            # Healing's third disposition: question, no knob, one high-priority page.
+            # Healing's third disposition: durable agent-owned question, no page.
             shutil.rmtree(state)
             state.mkdir()
             shutil.copy2(source_history, state / "history.ndjson")
@@ -378,16 +378,18 @@ def main() -> int:
                 row,
                 291,
             )
-            suite.check(len(result["questions"]) == 1 and len(result["escalated"]) == 1,
-                        "first critical strategy alert opens one question and one page")
+            suite.check(len(result["questions"]) == 1 and len(result["routed"]) == 1
+                        and not result["escalated"],
+                        "first critical strategy alert routes one question without paging")
             suite.check(not result["knobs"], "strategy question cannot change healing knobs")
             result2 = heal.process(
                 [{"run": 292, "ts": row.get("ts"), "alert": "RANK LOST: now #2"}],
                 dict(row, run=292),
                 292,
             )
-            suite.check(len(result2["questions"]) == 1 and not result2["escalated"],
-                        "repeated critical alert updates the question without paging again")
+            suite.check(len(result2["questions"]) == 1 and len(result2["routed"]) == 1
+                        and not result2["escalated"],
+                        "repeated critical alert updates the same headless queue")
             suite.check(len(questions.load_all()) == 1 and questions.load_all()[0]["occurrences"] == 2,
                         "question disposition leaves one current ledger row")
 

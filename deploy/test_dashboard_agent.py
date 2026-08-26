@@ -73,8 +73,8 @@ check("every agent explains what its absence costs",
       all(a.get("lost") for a in autonomy.AGENTS))
 check("health consumes the authoritative service registry",
       [a["label"] for a in autonomy.AGENTS] == [a["label"] for a in control.SERVICES])
-# The cycle and the author agent are the two whose loss is unrecoverable without a
-# human, so they must escalate harder than the rest.
+# The cycle and author remain critical recovery dependencies; critical means the
+# automated recovery path is active, never that operator input is required.
 critical = {a["key"] for a in autonomy.AGENTS} & {"cycle", "author"}
 check("cycle and author are both known keys", critical == {"cycle", "author"})
 
@@ -169,6 +169,15 @@ check("the error names the exception type", "RuntimeError" in guarded["error"])
 check("a failed section is surfaced as a blocker",
       any("failed to read" in b["what"]
           for b in autonomy.blockers({"vcs": {"error": "synthetic"}})))
+operator_source = (PROJECT / "dashboard" / "operator.js").read_text(encoding="utf-8")
+architecture_source = (PROJECT / "dashboard" / "architecture.js").read_text(encoding="utf-8")
+monitor_source = (PROJECT / "monitor.py").read_text(encoding="utf-8")
+check("critical status names autonomous recovery rather than operator attention",
+      "Autonomous recovery active" in operator_source and "Attention required" not in operator_source)
+check("architecture assigns recovery ownership instead of operator action",
+      "Recovery ownership" in architecture_source and "Operator action" not in architecture_source)
+check("overview queue is agent-owned rather than an attention queue",
+      "Autonomous handling queue" in monitor_source and ">Attention queue<" not in monitor_source)
 
 original_canary_status = canary.status
 try:
@@ -202,8 +211,8 @@ stalled_repairs = {
 check("an actually stalled repair queue remains a blocker",
       any("repair(s) queued" in item.get("what", "")
           for item in autonomy.blockers(stalled_repairs)))
-check("dirty release source visibly pauses stale-base authoring",
-      any("autonomous authoring is paused" in item.get("what", "")
+check("dirty release source is safely contained from stale-base authoring",
+      any("autonomous authoring is safely paused" in item.get("what", "")
           for item in autonomy.blockers({"vcs": {"dirty_source_paths": ["farm/control.py"]}})))
 
 

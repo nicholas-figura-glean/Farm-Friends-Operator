@@ -373,7 +373,7 @@ with tempfile.TemporaryDirectory(prefix="author-remote-fail-") as failroot:
         author_agent.log = saved_log
         author_agent.ledger.record = saved_ledger_record
 
-check("remote failure returns a failed author pass", rc == 3, str(rc))
+check("remote failure is safely contained without an attention exit", rc == 0, str(rc))
 check("release publication is never attempted after push failure", publish_calls == [], str(publish_calls))
 check("the work order records a remote synchronization failure",
       bool(resolved) and resolved[-1][0][1] == workorders.FAILED

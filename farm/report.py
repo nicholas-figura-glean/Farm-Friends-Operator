@@ -15,7 +15,7 @@ def _fmt_items(items: Dict[str, int]) -> str:
     return ", ".join("%s %d" % (k, v) for k, v in sorted(items.items()))
 
 
-def cycle_summary(row: Dict[str, Any], anomalies: List[str], needs_llm: bool) -> str:
+def cycle_summary(row: Dict[str, Any], anomalies: List[str], actionable: bool) -> str:
     rivals = row.get("rivals") or {}
     top_rival, top_produce = ("none", 0)
     if rivals:
@@ -68,7 +68,9 @@ def cycle_summary(row: Dict[str, Any], anomalies: List[str], needs_llm: bool) ->
     ]
     for item in anomalies:
         lines.append("ANOMALY: %s" % item)
-    lines.append("needs_llm: %s" % ("true" if needs_llm else "false"))
+    lines.append(
+        "autonomy_queue: %d signal(s) recorded for the supervisor" % len(anomalies)
+    )
     return "\n".join(lines)
 
 
@@ -79,7 +81,7 @@ def review(
 ) -> str:
     """Digest: run trends, aggregates, and durable strategy questions."""
     if not rows:
-        return "no runs recorded\nneeds_llm: true"
+        return "no runs recorded\nautonomy_recovery: scheduler owns first-run recovery"
     lines = ["REVIEW last %d runs (%s -> %s)" % (len(rows), rows[0].get("ts"), rows[-1].get("ts"))]
     for r in rows:
         lines.append(
@@ -128,7 +130,10 @@ def review(
                 item.get("occurrences"), item.get("last_seen_run"),
             )
         )
-    lines.append("needs_llm: %s" % ("true" if (all_anoms or journal_due) else "false"))
+    lines.append(
+        "autonomy_queue: %d open signal(s); journal_due=%s"
+        % (len(all_anoms), "true" if journal_due else "false")
+    )
     return "\n".join(lines)
 
 

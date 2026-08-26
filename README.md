@@ -106,13 +106,15 @@ state/raw/latest/      last raw responses, overwritten each run
 state/intents.ndjson   legacy before/after mutation journal, retained for compatibility
 ```
 
-Exit codes: `0` routine, `3` needs attention, `4` hard failure.
+Exit codes: `0` completed, durably queued, or safely contained; `4` process failure
+(the supervisor/launchd recovery path owns retries). No runtime status requires
+operator input.
 
 ## Operating it
 
 ```bash
 python3 run.py --dry-run      # read live state, print the decision, mutate nothing
-python3 run.py --alerts       # only what survived healing; costs tokens when it prints
+python3 run.py --alerts       # legacy readout of queued signals; never pages an operator
 python3 run.py --supervise     # the self-healing pass (what the 60s agent runs)
 python3 run.py --heal-status    # active knobs, recent remedies, token cost
 python3 run.py --review 20    # trend across recent runs

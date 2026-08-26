@@ -286,7 +286,7 @@ StubClient.payload = breaking
 code = contract_watch.main()
 queue_path = os.path.join(root, "state", "workorders.ndjson")
 orders = workorders.open_orders(queue_path)
-check("breaking drift exits 3 (needs attention)", code == 3, "exit=%s" % code)
+check("breaking drift exits 0 after autonomous routing", code == 0, "exit=%s" % code)
 check("breaking drift files exactly one order", len(orders) == 1, str(orders))
 if orders:
     check("the order is marked breaking", orders[0]["severity"] == "breaking")
@@ -296,7 +296,7 @@ if orders:
 code = contract_watch.main()
 check("re-scanning does not pile up duplicate orders",
       len(workorders.open_orders(queue_path)) == 1, str(workorders.open_orders(queue_path)))
-check("unfixed breaking drift keeps reporting", code == 3, "exit=%s" % code)
+check("unfixed breaking drift remains headless on repeat scans", code == 0, "exit=%s" % code)
 
 baseline_now = contract.load_baseline(os.path.join(root, "state", "contract.json"))
 check(

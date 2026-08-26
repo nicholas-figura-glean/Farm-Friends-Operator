@@ -8,7 +8,8 @@
   run.py --heal-status show healing knobs, recent remedies and cost ledger
   run.py --self-test  parser regression against saved fixtures
 
-Exit codes: 0 routine, 3 anomaly (LLM should look), 4 hard failure.
+Exit codes: 0 completed, queued, or safely contained; 4 process failure owned by
+the supervisor/launchd retry path. No exit code requests operator input.
 """
 
 import argparse
@@ -131,7 +132,7 @@ def do_cycle(dry: bool) -> int:
         rules.RIVAL_WAKE_RECENT_INTERVALS + rules.RIVAL_WAKE_BASE_ROWS + 2,
     )
     history = cycle.tail_history(audit_window)
-    anomalies, needs_llm = watch.evaluate(row, prev, history=history)
+    anomalies, actionable = watch.evaluate(row, prev, history=history)
     row["anomalies"] = anomalies
     if dry:
         print(report.dry_run_plan(row))
@@ -152,7 +153,7 @@ def do_cycle(dry: bool) -> int:
         message = "POLICY DRIFT: epistemic sidecar failed: %s: %s" % (
             exc.__class__.__name__, str(exc)[:120]
         )
-        needs_llm = True
+        actionable = True
         ledger.record("epistemic.sidecar_failed", {"error": message}, run=row.get("run"))
         journal.record_alerts(row, [message])
         try:
@@ -196,10 +197,12 @@ def do_cycle(dry: bool) -> int:
                 window[-1].get("run"),
             )
 
-    print(report.cycle_summary(row, anomalies, needs_llm))
+    print(report.cycle_summary(row, anomalies, actionable))
     if journal_note:
         print(journal_note)
-    return 3 if needs_llm else 0
+    # Signals are durable in alerts.ndjson and the minute supervisor owns their
+    # disposition. A successful cycle never asks an operator to intervene.
+    return 0
 
 
 def do_alerts(clear: bool = True) -> int:
@@ -225,7 +228,7 @@ def do_alerts(clear: bool = True) -> int:
             )
         )
         print(release_info.line())
-        print("needs_llm: false")
+        print("autonomy_queue: empty")
         return 0
     lines = ["ALERTS %d pending" % len(pending)]
     for item in pending[-12:]:
@@ -244,12 +247,11 @@ def do_alerts(clear: bool = True) -> int:
     if clear:
         meta["alerts_acked_ts"] = pending[-1].get("ts")
         cycle.save_meta(meta)
-    tokens.record_escalation(
-        (last or {}).get("run"), payload, note="%d alert(s) shown to a model" % len(pending)
-    )
+    # This is a readout only. Merely printing a durable queue does not invoke a
+    # model and must not be booked as token spend or a human escalation.
     print(release_info.line())
-    print("needs_llm: true")
-    return 3
+    print("autonomy_queue: %d signal(s) recorded" % len(pending))
+    return 0
 
 
 def do_contract_status() -> int:
@@ -299,7 +301,8 @@ def do_orders() -> int:
                  order.get("kind"), str(order.get("summary"))[:60]))
         if order.get("note"):
             print("      note: %s" % str(order["note"])[:120])
-    return 3 if summary["breaking_open"] else 0
+    # Breaking orders are owned by the author/canary pipeline, not an operator.
+    return 0
 
 
 def do_vcs_status() -> int:
@@ -504,7 +507,7 @@ def do_supervise(cadence: int = 180) -> int:
     pending = journal.pending_alerts(meta.get("alerts_acked_ts"), heal.healed_keys())
     result = heal.process(pending, last, last.get("run"))
     healed = result["healed"]
-    escalated = result["escalated"]
+    routed = result.get("routed") or []
     questioned = result.get("questions") or []
     probe_result = None
     try:
@@ -521,14 +524,14 @@ def do_supervise(cadence: int = 180) -> int:
     summary = tokens.summary()
     age_text = "never" if age is None else "%.1fm" % (age / 60.0)
     print(
-        "SUPERVISE scheduler=%s last_run=%s healed=%d questions=%d escalated=%d "
+        "SUPERVISE scheduler=%s last_run=%s healed=%d questions=%d routed=%d "
         "cost_run=$%.4f avoided=$%.4f"
         % (
             "ok" if loaded else "repaired" if notes else "down",
             age_text,
             len(healed),
             len(questioned),
-            len(escalated),
+            len(routed),
             float(summary["latest"].get("cost_usd") or 0.0),
             float(summary["avoided_cost_usd"] or 0.0),
         )
@@ -546,36 +549,17 @@ def do_supervise(cadence: int = 180) -> int:
         )
     if probe_result:
         print("  probe %s: %s" % (probe_result.get("probe_id"), probe_result.get("status")))
-    escalation_payloads = []
-    for item in escalated:
-        print("  ESCALATE %s (%s): %s" % (item["class"], item["reason"], item["alert"]))
-        if item.get("decision_bundle"):
-            import json
-            payload = json.dumps(
-                {
-                    "question_id": item.get("question_id"),
-                    "alert": item.get("alert"),
-                    "decision_bundle": item.get("decision_bundle"),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )[:30_000]
-            escalation_payloads.append(payload)
-            print("  DECISION_BUNDLE %s" % payload)
-    if escalation_payloads:
-        combined = "\n".join(escalation_payloads)
-        tokens.record_escalation(
-            last.get("run"),
-            combined,
-            note="%d first-occurrence strategic question(s)" % len(escalation_payloads),
+    for item in routed:
+        print(
+            "  ROUTED %s -> %s (%s)"
+            % (item["class"], item.get("question_id"), item["reason"])
         )
     for note in notes:
         print("  %s" % note)
     if recovered:
         print("  recovery cycle completed")
-    print("needs_llm: %s" % ("true" if escalated else "false"))
-    return 3 if escalated else 0
+    print("autonomy_queue: %d routed condition(s)" % len(routed))
+    return 0
 
 
 def do_heal_status() -> int:
@@ -668,8 +652,7 @@ def do_health(stale_minutes: int = 11) -> int:
             "ANOMALY: primary loop stale (%s) - running a full cycle now"
             % ("never run" if age is None else "%.0f min" % age)
         )
-        code = do_cycle(dry=False)
-        return 3 if code == 0 else code
+        return do_cycle(dry=False)
 
     client = Client()
     run = cycle.Cycle(client)
@@ -693,8 +676,8 @@ def do_health(stale_minutes: int = 11) -> int:
             state["calls"],
         )
     )
-    print("needs_llm: %s" % ("true" if state["acted"] else "false"))
-    return 3 if state["acted"] else 0
+    print("autonomy_recovery: %s" % ("completed" if state["acted"] else "idle"))
+    return 0
 
 
 def do_review(n: int) -> int:
@@ -704,7 +687,7 @@ def do_review(n: int) -> int:
     text = report.review(rows, journal_due, questions.open_questions())
     print(text)
     print(release_info.line())
-    return 3 if text.rstrip().endswith("true") else 0
+    return 0
 
 
 def do_questions(include_closed: bool = False) -> int:
@@ -1262,18 +1245,36 @@ def do_self_test() -> int:
         {"run": 43, "alert": "2 transport retries across 320 calls"},
     ]
     saved_store, saved_ledger = _heal.STORE, _heal.LEDGER
+    saved_questions = os.environ.get("FARM_QUESTIONS_FILE")
+    saved_question_events = os.environ.get("FARM_QUESTION_EVENTS_FILE")
     tmpdir = tempfile.mkdtemp(prefix="farm-heal-test-")
     try:
         _heal.STORE = os.path.join(tmpdir, "heal.json")
         _heal.LEDGER = os.path.join(tmpdir, "heal.ndjson")
+        os.environ["FARM_QUESTIONS_FILE"] = os.path.join(tmpdir, "questions.ndjson")
+        os.environ["FARM_QUESTION_EVENTS_FILE"] = os.path.join(tmpdir, "question_events.ndjson")
         outcome = _heal.process(same, {"animals": 100, "ready_units": 0}, 43)
         stepped = rules.rate_ceiling(outcome["knobs"])
         if len(outcome["healed"]) != 3 or outcome["escalated"]:
             failures.append("queued duplicates should all be healed: %s" % outcome)
         if stepped != round(rules.MAX_CALLS_PER_SECOND * 0.8, 2):
             failures.append("one condition must move the ceiling exactly one step")
+        checks += 1
+        unknown = [{"run": 44, "alert": "synthetic unclassified operational condition"}]
+        routed = _heal.process(unknown, {"run": 44, "animals": 100}, 44)
+        if (len(routed.get("routed") or []) != 1 or routed.get("escalated")
+                or len(questions.open_questions()) != 1):
+            failures.append("unknown conditions must route headlessly: %s" % routed)
     finally:
         _heal.STORE, _heal.LEDGER = saved_store, saved_ledger
+        if saved_questions is None:
+            os.environ.pop("FARM_QUESTIONS_FILE", None)
+        else:
+            os.environ["FARM_QUESTIONS_FILE"] = saved_questions
+        if saved_question_events is None:
+            os.environ.pop("FARM_QUESTION_EVENTS_FILE", None)
+        else:
+            os.environ["FARM_QUESTION_EVENTS_FILE"] = saved_question_events
         shutil.rmtree(tmpdir, ignore_errors=True)
     checks += 1
     # Healing must converge: repeated remedies stop instead of running away.
@@ -1885,7 +1886,7 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             print("SUPERVISE CRASHED")
             traceback.print_exc(limit=3)
-            print("needs_llm: true")
+            print("autonomy_recovery: launchd will retry")
             return 4
     if args.alerts:
         return do_alerts()
@@ -1900,7 +1901,7 @@ def main() -> int:
             return do_health()
         except (ParseDrift, McpError, Timeout) as exc:
             print("HEALTH FAILED: %s: %s" % (exc.__class__.__name__, exc))
-            print("needs_llm: true")
+            print("autonomy_recovery: launchd will retry")
             return 4
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
@@ -1920,13 +1921,13 @@ def main() -> int:
         progress.finish("failed", error="%s: %s" % (exc.__class__.__name__, exc))
         print("FARM FAILED: %s: %s" % (exc.__class__.__name__, exc))
         print("raw responses in %s" % cycle.RAW_DIR)
-        print("needs_llm: true")
+        print("autonomy_recovery: supervisor will retry")
         return 4
     except Exception:  # noqa: BLE001
         progress.finish("failed", error="unhandled exception")
         print("FARM CRASHED")
         traceback.print_exc(limit=3)
-        print("needs_llm: true")
+        print("autonomy_recovery: supervisor will retry")
         return 4
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)

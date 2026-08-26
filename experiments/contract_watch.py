@@ -29,7 +29,8 @@ broken with nothing left to re-detect it. Pinned, the drift is re-reported every
 15 minutes until the code actually matches the server again, while `submit()`
 keeps the queue free of duplicates.
 
-Exit codes: 0 nothing actionable, 3 actionable drift queued, 4 the scan failed.
+Exit codes: 0 scan completed (including queued repairs), 4 the scan failed and
+launchd will retry it.
 """
 
 from __future__ import annotations
@@ -532,7 +533,9 @@ def main() -> int:
         "changes": len(changes), "actionable": len(actionable), "filed": len(filed),
         "breaking": len(breaking),
     })
-    return 3 if actionable else 0
+    # Actionable drift is already in the author-owned work queue. Nonzero here
+    # would mislabel successful autonomous routing as an operator dependency.
+    return 0
 
 
 if __name__ == "__main__":

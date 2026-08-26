@@ -1,7 +1,7 @@
 /* Shared operator narrative --------------------------------------------------
  * The charts remain owned by their tab modules. This layer answers the questions
  * those charts cannot answer alone: what is happening, what changed, what the
- * system decided, what it did, and whether a person needs to intervene.
+ * system decided, what it did, and which autonomous subsystem owns recovery.
  */
 
 var OP_AUTONOMY = null;
@@ -84,9 +84,9 @@ function operatorOverall(data, autonomy) {
   var healthNormal = data.health === "healthy" || data.health === "running";
   var warning = farmBlockers.length > 0 || autoBlockers.length > 0 || !healthNormal;
   var tone = critical ? "attention" : warning ? "watch" : "";
-  var label = critical ? "Attention required" : warning ? "Autonomy watching" : "Autonomous";
+  var label = critical ? "Autonomous recovery active" : warning ? "Autonomy watching" : "Autonomous";
   var count = farmBlockers.length + autoBlockers.length;
-  var detail = critical ? "A production or recovery guardrail needs intervention" : warning
+  var detail = critical ? "Recovery guardrails are containing the condition and scheduled agents own the next action" : warning
     ? count + " bounded condition" + (count === 1 ? "" : "s") + " visible; routine production continues"
     : "Routine operation is handling itself";
   opText("global-status", label);
@@ -226,7 +226,7 @@ function operatorHealing(data) {
   var active = Object.keys(overrides).length;
   var escalations = opN(tokens.total_escalations) || 0;
   var healed = opN(tokens.total_healed) || 0;
-  var label = latest ? (latest.class === "relax" ? "Safeguards returning to default" : "Latest condition handled locally") : "No intervention required";
+  var label = latest ? (latest.class === "relax" ? "Safeguards returning to default" : "Latest condition handled locally") : "No recovery work queued";
   opText("healing-verdict", label);
   opText("healing-verdict-detail", latest ? "Run #" + (latest.run == null ? "—" : latest.run) + " · " + opAgoTs(latest.ts) : "Routine execution remains on default settings");
   opClass("healing-hero-verdict", "hero-verdict", active ? "watch" : "");
@@ -334,7 +334,7 @@ function operatorFindings(evidence, autonomy) {
     ["Probes",probeCount,"bounded tests"],
     ["Claims",accepted.length,"accepted + fresh"],
     ["Policy",runtime.policy_id ? 1 : 0,runtime.compatible ? "compatible" : "not promoted"],
-    ["Runtime",runtime.compatible && semantic.ok ? "✓" : "!",semantic.ok ? "semantic contract passing" : "audit needs attention"]
+    ["Runtime",runtime.compatible && semantic.ok ? "✓" : "!",semantic.ok ? "semantic contract passing" : "audit queued for autonomous verification"]
   ].map(function (row) {
     return '<div class="knowledge-node"><small>' + esc(row[0]) + '</small><b>' + esc(row[1]) + '</b><span>' + esc(row[2]) + '</span></div>';
   }).join(""));

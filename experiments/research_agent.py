@@ -34,7 +34,7 @@ Four sources of hypotheses, cheapest first
    are exhausted. The model sees the journal, claims and the leaderboard gap, and
    must return falsifiable proposals with a bounded probe design.
 
-Exit codes: 0 nothing new, 3 a proposal was filed, 4 the agent broke.
+Exit codes: 0 pass completed (including queued proposals), 4 the agent broke.
 """
 
 from __future__ import annotations
@@ -467,7 +467,8 @@ def main() -> int:
 
     ledger.record("research.proposed", {"count": len(filed),
                                         "ids": [o["id"] for o in filed]})
-    return 3
+    # Filing a proposal is successful headless processing, not an attention state.
+    return 0
 
 
 def _model_due(stored: Dict[str, Any]) -> bool:

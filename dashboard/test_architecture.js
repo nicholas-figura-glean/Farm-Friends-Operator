@@ -120,20 +120,20 @@ var cleanPosture = archPosture(PAYLOAD, cleanCurrent, HEALTH_OK);
 ok(cleanPosture.tone === "good" && cleanPosture.loadedAgents === 2, "coherent topology with loaded services requires no action");
 ok(cleanPosture.liveTitle.indexOf("matches recorded v2") !== -1, "posture states live-to-recorded alignment");
 var downPosture = archPosture(PAYLOAD, healthyCurrent, HEALTH_DOWN);
-ok(downPosture.tone === "attention" && downPosture.intervention.indexOf("Restore 1 unloaded service") !== -1,
-   "an unloaded service becomes explicit operator intervention");
+ok(downPosture.tone === "attention" && downPosture.intervention.indexOf("Supervisor is restoring 1 unloaded service") !== -1,
+   "an unloaded service is explicitly owned by automatic recovery");
 var WATCH_VIEW = clone(HEALTH_OK);
 WATCH_VIEW.vcs.dirty_source_paths = ["dashboard/architecture.js", "dashboard/architecture.css"];
 WATCH_VIEW.canary = {status:"watching"};
 WATCH_VIEW.activity.events = [{ts:"2026-08-26T16:00:00Z",phase:"act",actor:"Author agent",status:"published",title:"Published bounded architecture repair"}];
 var watchPosture = archPosture(PAYLOAD, archApplyHealth(CURRENT,WATCH_VIEW), WATCH_VIEW);
-ok(watchPosture.tone === "watch" && watchPosture.intervention.indexOf("2 changed source files") !== -1,
-   "pending source changes are review guidance rather than a topology failure");
+ok(watchPosture.tone === "watch" && watchPosture.intervention.indexOf("containing 2 changed source files") !== -1,
+   "pending source changes are contained by release automation");
 var situation = archSituationHtml(PAYLOAD, cleanCurrent, WATCH_VIEW, watchPosture);
-ok(count(situation,'class="arch-situation-cell ') === 4, "summary answers now, changed, autonomous action, and operator action");
+ok(count(situation,'class="arch-situation-cell ') === 4, "summary answers now, changed, autonomous action, and recovery ownership");
 ok(situation.indexOf("Happening now") !== -1 && situation.indexOf("What changed") !== -1 &&
-   situation.indexOf("Autonomous action") !== -1 && situation.indexOf("Operator action") !== -1,
-   "operator questions are named explicitly");
+   situation.indexOf("Autonomous action") !== -1 && situation.indexOf("Recovery ownership") !== -1,
+   "headless ownership is named explicitly");
 ok(situation.indexOf("Published bounded architecture repair") !== -1, "latest autonomous action is projected without inventing activity");
 var UNCHANGED_VERSION = {events:[{ts:"2026-08-26T15:00:00Z",kind:"version",structural:true,title:"architecture v3",detail:"scheduled scan",added:[],removed:[]}]};
 ok(archSituationHtml(UNCHANGED_VERSION,cleanCurrent,HEALTH_OK,cleanPosture).indexOf("no component additions or removals") !== -1,

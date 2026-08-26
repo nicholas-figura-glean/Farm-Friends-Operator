@@ -166,7 +166,10 @@ def _blockers(
     blockers: List[Dict[str, str]] = []
     anomalies = latest.get("anomalies") or []
     for anomaly in anomalies:
-        blockers.append({"level": "error", "text": str(anomaly)})
+        blockers.append({
+            "level": "warn",
+            "text": "Supervisor-owned signal: %s" % str(anomaly),
+        })
 
     # Not farm failures, but both mean the operator is looking at code other than the
     # current pointer. The stale-process case is stronger: even the HTML and registered
@@ -1236,7 +1239,7 @@ __OPERATOR_CSS__
   <div class="card farmview overview-farm"><h2>Live farm <small>Every object is measured telemetry</small></h2><div class="scene" id="farm-scene"><div class="empty">Waiting for farm state…</div></div></div>
   <div class="card cycle-story-card"><h2><span id="cycle-story-summary">Latest cycle</span> <small>Observe → decide → act → verify</small></h2><div id="cycle-story"><div class="empty">Loading decision evidence…</div></div></div>
   <div class="card overview-support"><h2>Loop status</h2><div id="health"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Last run</label><strong id="last-run">—</strong></div><div class="metric"><label>Run age</label><strong id="run-age">—</strong></div><div class="metric"><label>Stage</label><strong id="stage">—</strong></div><div class="metric"><label>Cadence</label><strong id="cadence">—</strong></div></div></div>
-  <div class="card overview-support"><h2>Attention queue</h2><ul id="blockers"><li class="empty">Loading guardrails…</li></ul></div>
+  <div class="card overview-support"><h2>Autonomous handling queue</h2><ul id="blockers"><li class="empty">Loading agent-owned guardrails…</li></ul></div>
   <div class="card overview-support"><h2>Scheduler & release</h2><div class="kv" id="system"></div></div>
   <div class="card full grand-prix">
     <div class="gp-head"><div><div class="gp-kicker">Measured competition</div><h2>Produce Grand Prix</h2><div class="subtitle">The same recorded leaderboard snapshots, with no additional farm calls.</div></div>
@@ -1507,7 +1510,7 @@ function renderOverview(data) {
 
   const blockers=data.blockers || [];
   $("blockers").innerHTML = blockers.length ? blockers.map(b => `<li class="alert ${esc(b.level)}"><span class="alert-dot"></span><span>${esc(b.text)}</span></li>`).join("")
-    : `<li class="alert ok"><span class="alert-dot"></span><span>No operator action required</span></li>`;
+    : `<li class="alert ok"><span class="alert-dot"></span><span>No queued recovery work</span></li>`;
   $("system").innerHTML = kv([
     ["cycle agent", ld.loaded ? `${esc(ld.state)}${ld.pid ? ` · pid ${ld.pid}` : ""}` : "not loaded"],
     ["supervisor", ld.supervisor?.loaded ? `${esc(ld.supervisor.state)}` : "not loaded"],

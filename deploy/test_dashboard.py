@@ -484,8 +484,8 @@ def main() -> int:
         ("architecture audit descriptions cannot inherit global detail-card spacing",
          'class="arch-ev-detail"' in monitor.ARCH_JS and ".arch-ev-detail" in monitor.ARCH_CSS
          and 'class="detail"' not in monitor.ARCH_JS),
-        ("architecture answers the four operator questions before the graph",
-         all(text in monitor.ARCH_JS for text in ("Happening now", "What changed", "Autonomous action", "Operator action"))),
+        ("architecture answers the four headless-control questions before the graph",
+         all(text in monitor.ARCH_JS for text in ("Happening now", "What changed", "Autonomous action", "Recovery ownership"))),
         ("architecture history defaults to progressive disclosure", 'arch-history audit-drawer' in monitor.ARCH_JS),
         ("release-compatible panel discovery accepts modifier classes", packaged_panels == expected_panels),
         ("autonomy loads outside Architecture on its own cadence", "loadOperatorAutonomy" in html and "OP_AUTONOMY_REFRESH_MS" in html),

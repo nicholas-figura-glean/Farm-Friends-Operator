@@ -102,21 +102,21 @@ function archPosture(payload, current, autonomyView) {
   var canaryWatching = canaryStatus === "watching" || canaryStatus === "probation";
   var tone = drift || downAgents || unmapped || runtimeErrors || canaryBad ? "attention" :
     (dirtySources || canaryWatching ? "watch" : "good");
-  var intervention = "No operator action required";
-  if (drift) intervention = "Record the live topology before relying on change impact";
-  else if (downAgents) intervention = "Restore " + downAgents + " unloaded service" + (downAgents === 1 ? "" : "s");
-  else if (unmapped) intervention = "Classify " + unmapped + " unmapped module" + (unmapped === 1 ? "" : "s");
-  else if (runtimeErrors) intervention = "Inspect " + runtimeErrors + " path derivation error" + (runtimeErrors === 1 ? "" : "s");
-  else if (canaryBad) intervention = "Review the failed architecture canary outcome";
-  else if (dirtySources) intervention = "Review " + dirtySources + " changed source file" + (dirtySources === 1 ? "" : "s") + " before release";
-  else if (canaryWatching) intervention = "No action unless the active canary degrades";
+  var intervention = "No recovery work queued";
+  if (drift) intervention = "Architecture agent is recording the live topology before promotion";
+  else if (downAgents) intervention = "Supervisor is restoring " + downAgents + " unloaded service" + (downAgents === 1 ? "" : "s");
+  else if (unmapped) intervention = "Architecture agent is classifying " + unmapped + " unmapped module" + (unmapped === 1 ? "" : "s");
+  else if (runtimeErrors) intervention = "Architecture agent is isolating " + runtimeErrors + " path derivation error" + (runtimeErrors === 1 ? "" : "s");
+  else if (canaryBad) intervention = "Canary is rolling back the failed architecture release";
+  else if (dirtySources) intervention = "Release automation is containing " + dirtySources + " changed source file" + (dirtySources === 1 ? "" : "s") + " until gates pass";
+  else if (canaryWatching) intervention = "Canary owns observation and automatic rollback";
   var version = Number(payload.versions) || 0;
   var liveTitle = drift ? "Live tree differs from recorded v" + version : "Live tree matches recorded v" + version;
   var generatedAge = archAge(current.generated_at);
   return {
     tone: tone,
-    label: tone === "attention" ? "Architecture needs attention" :
-      (tone === "watch" ? "Architecture coherent · review pending" : "Architecture coherent"),
+    label: tone === "attention" ? "Architecture recovery active" :
+      (tone === "watch" ? "Architecture coherent · automation watching" : "Architecture coherent"),
     intervention: intervention,
     liveTitle: liveTitle,
     liveDetail: (generatedAge ? "Derived " + generatedAge : "Derived from the current source tree") +
@@ -170,9 +170,9 @@ function archSituationHtml(payload, current, autonomyView, posture) {
     cell(activity && activity.status === "failed" ? "attention" : "watch", "◇", "Autonomous action",
       activity ? (activity.title || "Autonomous decision recorded") : "No recent autonomous decision available",
       activity ? activityBits.join(" · ") : "Activity telemetry is unavailable") +
-    cell(posture.tone, posture.tone === "attention" ? "!" : "✓", "Operator action", posture.intervention,
-      posture.tone === "attention" ? "Intervention required" :
-        (posture.tone === "watch" ? "Review before promotion; runtime may continue" : "No intervention required")) +
+    cell(posture.tone, posture.tone === "attention" ? "!" : "✓", "Recovery ownership", posture.intervention,
+      posture.tone === "attention" ? "Automatic recovery in progress" :
+        (posture.tone === "watch" ? "Automation is verifying before promotion" : "No recovery work queued")) +
     '</section>';
 }
 

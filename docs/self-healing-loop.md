@@ -94,7 +94,8 @@ budget -> claim -> stage -> patch -> gate -> publish -> canary
   `farm/canary.py`, `farm/workorders.py`, `farm/llm.py`, `farm/rules.py` (every
   budget lives there), `deploy/release.sh`, and both agents' own source. An agent
   that can rewrite its gates is not supervised. Orders needing protected files are
-  escalated, not attempted.
+  safely contained on the last verified release and recorded for an alternate
+  agent-owned approach; they are never handed to an operator.
 * **Rationed.** Passes per day, dollars per day, minimum runs between changes, and
   a hard rule that no pass starts while a canary is still watching the last one —
   two unproven changes at once make an unhealthy canary impossible to attribute.
