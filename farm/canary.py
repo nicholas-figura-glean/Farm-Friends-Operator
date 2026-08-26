@@ -348,6 +348,23 @@ def evaluate(
     return verdict
 
 
+def _quantity(value: Any) -> float:
+    """Normalize scalar and structured counters from historical run schemas.
+
+    ``collected`` used to be a scalar and is now a per-produce mapping. Canary
+    evaluation spans releases, so it must understand both shapes rather than
+    crashing while a previous release is still under observation.
+    """
+    if isinstance(value, dict):
+        return sum(_quantity(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_quantity(item) for item in value)
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _looks_broken(row: Dict[str, Any]) -> bool:
     """Did this run fail outright?
 
@@ -358,9 +375,9 @@ def _looks_broken(row: Dict[str, Any]) -> bool:
     rate = _rate(row)
     if rate is not None and rate == 0:
         return True
-    if int(row.get("zero_streak") or 0) >= 3:
+    if _quantity(row.get("zero_streak")) >= 3:
         return True
-    if int(row.get("transport_errors_core") or 0) > 0 and int(row.get("collected") or 0) == 0:
+    if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
         return True
     return False
 

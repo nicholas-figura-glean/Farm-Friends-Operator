@@ -443,6 +443,20 @@ write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0}])
 verdict = canary.evaluate(store, runs)
 check("a run producing nothing reverts at once", verdict["status"] == canary.REGRESSED, str(verdict))
 
+# Collection changed from a scalar to a per-produce mapping. A transport retry on
+# a productive run is not a hard failure, while an all-zero mapping still is.
+structured_collection = {"egg": 120, "honey": 3, "milk": 0}
+check("structured collection totals are accepted",
+      canary._quantity(structured_collection) == 123, str(canary._quantity(structured_collection)))
+check("a retry with structured collection is not a hard failure",
+      not canary._looks_broken({"run": 7, "produce_per_min": 100.0,
+                                "transport_errors_core": 1,
+                                "collected": structured_collection}))
+check("a retry with zero structured collection is a hard failure",
+      canary._looks_broken({"run": 7, "produce_per_min": 100.0,
+                            "transport_errors_core": 1,
+                            "collected": {"egg": 0, "honey": 0}}))
+
 # A wolf attack is not a code regression.
 write_runs(base + [{"run": n, "produce_per_min": 95.0, "collected": 8,
                     "risk_events": ["wolf"], "anomalies": ["wolf attack"]} for n in range(7, 10)])
