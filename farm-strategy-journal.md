@@ -1578,3 +1578,32 @@ on :8766 serves them, 80 farm self-test checks green, farm code untouched.
 - 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
 - Peak hunger 18 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
 - Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T22:07:30Z - runs 961-980 (generated)
+
+- Rank: #1, lifetime produce 207400017 (+3318443 this window)
+- Animals: 289567 (beehive 1028, chicken 288301, cow 72, pig 75, sheep 91), +127 this window
+- Output: 0.125 units/chicken/min mean (min 0.049, max 0.245) over 19 measurable runs
+- Economy: 8087858 coins revenue, 2864290 spent on feed (35.4%), 500 chickens adopted of 500 planned
+- Husbandry: peak hunger 18 against threshold 6 (stop 70); feed 8687025 vs reserve 8687025
+- Throughput: 753 calls, 76s mean / 170s max per run, rate limit 5.0/s
+- Rivals:
+  - Neill: 12988044 lifetime (+2353517 this window, 70.9% of our gain)
+  - John: 12225447 lifetime (+-30616 this window, -0.9% of our gain)
+  - Deep: 2634797 lifetime (+1463 this window, 0.0% of our gain)
+  - Moe: 135429 lifetime (+-372 this window, -0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 19 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 0 lifetime (+0 this window, 0.0% of our gain)
+  - john: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: Neill exceeded 50% of our gain
+- Alerts this window: STRATEGY STALE: herd 289319-289447 across 30 runs while coins grew 11369806 (70% of 16188534 revenue; balance 260636808); IDLE CAPITAL: 260636808 coins equal 561.1x a typical run while growth cap is 25; THREAT: Neill gained 134480 vs our 212827 (>= 50%); animal count 289443 below expected 289457; STRATEGY STALE: herd 289319-289443 across 30 runs while coins grew 11071980 (70% of 15811154 revenue; balance 260775906)
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 18 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
