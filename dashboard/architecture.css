@@ -182,16 +182,20 @@
 .arch-history > summary small { overflow:hidden; color:var(--muted); font-size:9.5px; font-weight:450; text-overflow:ellipsis; white-space:nowrap; }
 .arch-history > summary em { flex:0 0 auto; color:var(--blue); font-size:9.5px; font-style:normal; }
 .arch-history[open] > summary { border-bottom:1px solid var(--line); }
-.arch-history-body { padding:13px 16px 16px; }
+.arch-history-body { min-width:0; padding:13px 16px 16px; }
 .arch-filter { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
 .arch-filter button { appearance:none; cursor:pointer; border:1px solid var(--line); border-radius:99px; background:var(--panel2); color:var(--muted);
   padding:4px 10px; font:700 9.5px/1 inherit; text-transform:uppercase; letter-spacing:.05em; }
 .arch-filter button[aria-pressed="true"] { color:var(--green); border-color:var(--green); }
-.arch-timeline { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:0 18px; max-height:430px; overflow-y:auto; }
-.arch-ev { display:grid; grid-template-columns:54px 1fr; gap:8px; padding:7px 0; border-bottom:1px solid #ffffff0a; }
-.arch-ev .when { color:var(--muted); font-size:9.5px; font-variant-numeric:tabular-nums; }
-.arch-ev .title { color:var(--text); font-size:10.5px; font-weight:680; }
-.arch-ev .detail { margin-top:2px; color:var(--muted); font-size:9.5px; line-height:1.4; overflow-wrap:anywhere; }
+.arch-timeline { display:grid; min-width:0; grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));
+  gap:0 18px; max-height:430px; overflow-x:hidden; overflow-y:auto; align-items:start; scrollbar-gutter:stable; }
+.arch-ev { display:grid; min-width:0; grid-template-columns:54px minmax(0,1fr); gap:10px; align-items:start;
+  padding:9px 0; border-bottom:1px solid #ffffff0a; }
+.arch-ev .when { min-width:0; color:var(--muted); font-size:9.5px; line-height:1.4; font-variant-numeric:tabular-nums; }
+.arch-ev .what { min-width:0; }
+.arch-ev .title { display:block; min-width:0; color:var(--text); font-size:10.5px; font-weight:680; line-height:1.4;
+  overflow-wrap:anywhere; word-break:break-word; }
+.arch-ev .detail { margin-top:4px; color:var(--muted); font-size:9.5px; line-height:1.45; overflow-wrap:anywhere; word-break:break-word; }
 .arch-ev .kind { display:inline-block; margin-right:5px; padding:1px 4px; border-radius:4px; background:#2c4a36; color:var(--green);
   font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
 .arch-ev[data-kind="release"] .kind { color:var(--blue); background:#2b3f55; }.arch-ev[data-kind="canary"] .kind { color:var(--yellow); background:#4a412b; }

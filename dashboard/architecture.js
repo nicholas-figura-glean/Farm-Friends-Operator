@@ -15,6 +15,7 @@ var ARCH_LOADING = false;
 var ARCH_LAST_FETCH_MS = null;
 var ARCH_SELECTED = null;
 var ARCH_FILTER = "all";
+var ARCH_HISTORY_OPEN = false;
 var ARCH_VIEW = "runtime";
 var ARCH_STEP = "all";
 var ARCH_QUERY = "";
@@ -673,6 +674,18 @@ function archEventsHtml(events, filter) {
   return rows.length ? rows.map(archEventHtml).join("") : '<p class="arch-note">No events recorded yet.</p>';
 }
 
+function archApplyHistoryFilter(host, events, filter) {
+  if (!host || !host.querySelector || !host.querySelectorAll) return false;
+  var timeline = host.querySelector("#arch-timeline");
+  var buttons = host.querySelectorAll("[data-arch-filter]");
+  if (!timeline || !buttons) return false;
+  timeline.innerHTML = archEventsHtml(events, filter);
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].setAttribute("aria-pressed", String(buttons[i].getAttribute("data-arch-filter") === filter));
+  }
+  return true;
+}
+
 function archStatsHtml(current, posture) {
   var stats = (current || {}).stats || {};
   posture = posture || archPosture({}, current || {}, null);
@@ -781,13 +794,17 @@ function renderArchitecture(payload, autonomyView) {
       archGraphHtml(model) + '<div class="arch-map-help">Scroll to zoom · drag to pan · select a component to inspect its route and change posture</div></section>' +
       '<aside class="card arch-detail" id="arch-detail" aria-label="Component inspector" aria-live="polite">' +
       archDetailHtml(current, selected, model) + '</aside></div>' +
-    '<details class="card arch-history audit-drawer"><summary><span><b>Architecture audit trail</b><small>' +
+    '<details class="card arch-history audit-drawer"' + (ARCH_HISTORY_OPEN ? ' open' : '') + '><summary><span><b>Architecture audit trail</b><small>' +
       archEscape(historyNote) + ' · structural versions, releases, canaries, findings and work orders</small></span><em>' +
       archEscape(payload.versions || 0) + ' structural versions</em></summary><div class="drawer-body arch-history-body"><div class="arch-filter">' +
       filterHtml + '</div><div class="arch-timeline" id="arch-timeline">' + archEventsHtml(payload.events, ARCH_FILTER) +
       '</div></div></details></div>';
 
   function rerender() { renderArchitecture(payload, autonomyView); }
+  if (host.querySelector) {
+    var historyDrawer = host.querySelector(".arch-history");
+    if (historyDrawer) historyDrawer.ontoggle = function () { ARCH_HISTORY_OPEN = !!historyDrawer.open; };
+  }
   host.onclick = function (event) {
     var target = archClosestAttr(event.target, host);
     if (!target) return;
@@ -804,7 +821,12 @@ function renderArchitecture(payload, autonomyView) {
       rerender(); return;
     }
     var filter = target.getAttribute("data-arch-filter");
-    if (filter) { ARCH_FILTER = filter; rerender(); return; }
+    if (filter) {
+      ARCH_FILTER = filter;
+      ARCH_HISTORY_OPEN = true;
+      if (!archApplyHistoryFilter(host, payload.events, filter)) rerender();
+      return;
+    }
     if (target.getAttribute("data-arch-pan") != null) {
       if (ARCH_DID_PAN) { ARCH_DID_PAN = false; return; }
       ARCH_SELECTED = null; rerender();

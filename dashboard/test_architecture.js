@@ -218,10 +218,23 @@ ok(archEventsHtml([],"all").indexOf("No events") !== -1, "empty history explains
 ok(events.indexOf("architecture v2") < events.indexOf("release 20260825T213240Z"), "server chronology is preserved");
 ok(archEventHtml({ts:"x",kind:"canary",title:"reverted",ok:false}).indexOf("✗") !== -1, "failed canary is marked failed");
 ok(archEventHtml({ts:"x",kind:"canary",title:"kept",ok:true}).indexOf("✓") !== -1, "successful canary is marked successful");
+function filterButton(name) {
+  return {pressed:null,getAttribute:function (attribute) { return attribute === "data-arch-filter" ? name : null; },
+    setAttribute:function (attribute, value) { if (attribute === "aria-pressed") this.pressed = value; }};
+}
+var fakeTimeline = {innerHTML:""};
+var allFilter = filterButton("all"), canaryFilter = filterButton("canary");
+var historyHost = {
+  querySelector:function (selector) { return selector === "#arch-timeline" ? fakeTimeline : null; },
+  querySelectorAll:function () { return [allFilter,canaryFilter]; }
+};
+ok(archApplyHistoryFilter(historyHost,PAYLOAD.events,"canary") && count(fakeTimeline.innerHTML,'class="arch-ev"') === 1,
+   "history filter updates only the event rows when DOM access is available");
+ok(allFilter.pressed === "false" && canaryFilter.pressed === "true", "in-place filtering keeps filter state accessible");
 
 /* ---- full render and delegated interaction ----------------------------- */
 HOST = {innerHTML:"",className:""};
-ARCH_VIEW = "runtime"; ARCH_STEP = "all"; ARCH_SELECTED = null; ARCH_QUERY = ""; ARCH_FILTER = "all"; archResetCamera();
+ARCH_VIEW = "runtime"; ARCH_STEP = "all"; ARCH_SELECTED = null; ARCH_QUERY = ""; ARCH_FILTER = "all"; ARCH_HISTORY_OPEN = false; archResetCamera();
 renderArchitecture(PAYLOAD, HEALTH_DOWN);
 ok(HOST.innerHTML.indexOf("Architecture control plane") !== -1 && HOST.innerHTML.indexOf("Happening now") !== -1,
    "full render leads with an operator architecture summary");
@@ -245,6 +258,8 @@ HOST.onclick({target:targetWith("data-arch-zoom","in")});
 ok(ARCH_CAMERA.scale === 1.25, "zoom controls change the camera");
 HOST.onclick({target:targetWith("data-arch-filter","canary")});
 ok(ARCH_FILTER === "canary" && count(HOST.innerHTML,'class="arch-ev"') === 1, "history filtering remains interactive");
+ok(ARCH_HISTORY_OPEN && HOST.innerHTML.indexOf('arch-history audit-drawer" open') !== -1,
+   "filtering keeps the architecture audit drawer open");
 
 /* ---- stats and escaping ------------------------------------------------ */
 var stats = archStatsHtml(CURRENT, cleanPosture);
