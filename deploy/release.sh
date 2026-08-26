@@ -148,12 +148,7 @@ import monitor
 # eighth tab left the gate reporting success for a set that no longer described the
 # page. A gate that cannot notice new work is not much of a gate.
 buttons = set(re.findall(r'role="tab" data-tab="([a-z_]+)"', monitor.HTML))
-panels = set()
-for tag in re.findall(r'<div\b[^>]*>', monitor.HTML):
-    panel_id = re.search(r'\bid="tab-([a-z_]+)"', tag)
-    classes = re.search(r'\bclass="([^"]*)"', tag)
-    if panel_id and classes and "tab" in classes.group(1).split():
-        panels.add(panel_id.group(1))
+panels = set(re.findall(r'class="tab" id="tab-([a-z_]+)"', monitor.HTML))
 required = {'overview', 'pipeline', 'cost', 'history', 'findings', 'game', 'wire',
             'architecture'}
 

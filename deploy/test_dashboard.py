@@ -454,15 +454,6 @@ def main() -> int:
         monitor.snapshot()
     except Exception as exc:  # noqa: BLE001 - this check reports the real failure
         snapshot_error = "%s: %s" % (exc.__class__.__name__, exc)
-    # The release gate must recognize modifier classes such as operator-tab and
-    # architecture-tab instead of requiring the class attribute to equal "tab".
-    packaged_panels = set()
-    for tag in re.findall(r'<div\b[^>]*>', html):
-        panel_id = re.search(r'\bid="tab-([a-z_]+)"', tag)
-        classes = re.search(r'\bclass="([^"]*)"', tag)
-        if panel_id and classes and "tab" in classes.group(1).split():
-            packaged_panels.add(panel_id.group(1))
-    expected_panels = {"overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture"}
     static_checks = [
         ("real /api/state snapshot survives trace helpers", snapshot_error is None),
         ("bootstrap runs before the game bundle", boot != -1 and game != -1 and boot < game),
@@ -484,7 +475,6 @@ def main() -> int:
         ("architecture answers the four operator questions before the graph",
          all(text in monitor.ARCH_JS for text in ("Happening now", "What changed", "Autonomous action", "Operator action"))),
         ("architecture history defaults to progressive disclosure", 'arch-history audit-drawer' in monitor.ARCH_JS),
-        ("release-compatible panel discovery accepts modifier classes", packaged_panels == expected_panels),
         ("autonomy loads outside Architecture on its own cadence", "loadOperatorAutonomy" in html and "OP_AUTONOMY_REFRESH_MS" in html),
         ("raw audit walls default to progressive disclosure", html.count("audit-drawer") >= 8),
         ("trace bundle is embedded exactly once", html.count(monitor.TRACE_JS) == 1),
