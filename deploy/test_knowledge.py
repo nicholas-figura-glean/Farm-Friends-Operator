@@ -337,6 +337,35 @@ def main() -> int:
             suite.raises(ValueError, lambda: questions.set_status(q1["question"]["id"], "forgotten"),
                          "invalid question status is rejected")
 
+            age1 = questions.open_or_update(
+                "knob_age", "KNOB AGE: individual_feeds=100 unchanged for 40 runs (since run 435)",
+                row={"run": 475, "ts": "2026-08-22T03:00:00Z"},
+            )
+            age2 = questions.open_or_update(
+                "knob_age", "KNOB AGE: individual_feeds=100 unchanged for 41 runs (since run 435)",
+                row={"run": 476, "ts": "2026-08-22T03:05:00Z"},
+            )
+            suite.check(age1["question"]["id"] == age2["question"]["id"],
+                        "changing knob age text keeps one canonical identity")
+            age3 = questions.open_or_update(
+                "knob_age", "KNOB AGE: individual_feeds unchanged for 42 runs (since run 435)",
+                row={"run": 477, "ts": "2026-08-22T03:10:00Z"},
+            )
+            suite.check(age2["question"]["id"] == age3["question"]["id"],
+                        "knob identity ignores a value sometimes omitted from alert prose")
+            current_path, _, _ = questions._paths()
+            legacy = dict(age2["question"], id="q-legacy-changing-age",
+                          key="knob_age:individual_feeds=100 unchanged for 42 runs (since run 435)",
+                          subject="individual_feeds=100 unchanged for 42 runs (since run 435)",
+                          occurrences=3)
+            questions._write_current(current_path, questions.load_all() + [legacy])
+            reconciled = questions.reconcile_duplicates(run=477)
+            knob_rows = [q for q in questions.load_all() if q.get("class") == "knob_age"]
+            suite.check(reconciled["removed"] == 1 and len(knob_rows) == 1,
+                        "legacy changing-age identities reconcile into one durable row", reconciled)
+            suite.check(knob_rows[0]["occurrences"] == 6,
+                        "reconciliation preserves accumulated occurrences", knob_rows[0])
+
             # Healing's third disposition: question, no knob, one high-priority page.
             shutil.rmtree(state)
             state.mkdir()

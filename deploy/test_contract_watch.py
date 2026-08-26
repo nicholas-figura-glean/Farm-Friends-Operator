@@ -118,6 +118,58 @@ section("every actionable change yields an instruction")
 
 import contract_watch  # noqa: E402
 
+section("contract orders reconcile with current drift")
+queue5 = os.path.join(tmp, "q5.ndjson")
+for stale in (
+    dict(change, id="shape-old-a", kind="response_templates_changed", tool="list_farm", severity="shape"),
+    dict(change, id="shape-old-b", kind="response_templates_changed", tool="list_farm", severity="shape"),
+    dict(change, id="gone-tool", kind="tool_removed", tool="old_tool", severity="breaking"),
+):
+    workorders.submit(stale, "contract_watch", "i", [], [], path=queue5)
+current_change = dict(change, id="shape-current", kind="response_templates_changed",
+                      tool="list_farm", severity="shape")
+workorders.submit(current_change, "contract_watch", "i", [], [], path=queue5)
+retired = contract_watch.reconcile_orders([current_change], [current_change], queue5)
+check("superseded variants and disappeared drift are retired", len(retired) == 3, str(retired))
+check("the exact current contract order stays open",
+      [o["id"] for o in workorders.open_orders(queue5)] == ["shape-current"],
+      str([o["id"] for o in workorders.open_orders(queue5)]))
+queue6 = os.path.join(tmp, "q6.ndjson")
+old_variant = dict(change, id="symbols-old", kind="response_symbols_changed",
+                   tool="list_farm", severity="shape")
+current_variant = dict(old_variant, id="symbols-current")
+for variant in (old_variant, current_variant):
+    workorders.submit(variant, "contract_watch", "i", [], [], path=queue6)
+retired = contract_watch.reconcile_orders([current_variant], [], queue6)
+check("an exact observed order compacts unconfirmed historical variants",
+      len(retired) == 1 and [o["id"] for o in workorders.open_orders(queue6)] == ["symbols-current"],
+      str(workorders.current(queue6)))
+queue7 = os.path.join(tmp, "q7.ndjson")
+workorders.submit(current_variant, "contract_watch", "i", [], [], path=queue7)
+settled = contract_watch.reconcile_orders([current_variant], [], queue7, settled=[current_variant])
+check("a parser-accepted current shape retires its exact open order",
+      len(settled) == 1 and workorders.open_orders(queue7) == [], str(workorders.current(queue7)))
+
+with tempfile.TemporaryDirectory() as raw_tmp:
+    raw = pathlib.Path(raw_tmp)
+    leaderboard_sample = raw / "leaderboard.txt"
+    leaderboard_sample.write_text(
+        "Leaderboard\n1. Nick: 100 produce, 5 animals, 20 coins\n",
+        encoding="utf-8",
+    )
+    leaderboard_change = {"tool": "leaderboard", "kind": "response_templates_changed"}
+    accepted = contract_watch.shape_parser_verdict(leaderboard_change, raw)
+    check("a confirmed shape that the live parser accepts needs no repair",
+          accepted.get("accepted") is True and accepted.get("consumed") is True, str(accepted))
+    leaderboard_sample.write_text("Leaderboard\nthis is not a leaderboard row\n", encoding="utf-8")
+    rejected = contract_watch.shape_parser_verdict(leaderboard_change, raw)
+    check("a confirmed shape that breaks the live parser remains actionable",
+          rejected.get("accepted") is False and "ParseDrift" in rejected.get("reason", ""), str(rejected))
+    ignored = contract_watch.shape_parser_verdict(
+        {"tool": "feed_animals", "kind": "response_templates_changed"}, raw)
+    check("response text with no runtime consumer cannot wake the author",
+          ignored.get("accepted") is True and ignored.get("consumed") is False, str(ignored))
+
 # The real alert ledger, captured before any redirection, so the suite can prove
 # it never wrote its fabricated breaking change into live operations.
 REAL_ALERTS = journal.ALERTS
@@ -252,6 +304,15 @@ check(
     "batch_id" not in (baseline_now["tools"]["feed_animals"]["args"] or {}),
     "baseline absorbed the break, which would hide it",
 )
+if orders:
+    workorders.resolve(orders[0]["id"], workorders.PUBLISHED,
+                       note="full release matrix passed", release="test-rev", path=queue_path)
+    code = contract_watch.main()
+    advanced = contract.load_baseline(os.path.join(root, "state", "contract.json"))
+    check("a published exact repair advances the pinned baseline", code == 0 and
+          "batch_id" in (advanced["tools"]["feed_animals"]["args"] or {}), str(advanced))
+    check("the repaired contract no longer leaves an open order",
+          workorders.open_orders(queue_path) == [], str(workorders.open_orders(queue_path)))
 
 # A cosmetic change on a quiet server should be absorbed, not queued.
 root = fresh_env()
@@ -291,6 +352,13 @@ check("a new tool becomes an opportunity order",
 if orders:
     check("the new-tool order forbids touching the live cycle",
           any("cycle.py is unchanged" in a for a in orders[0]["acceptance"]), str(orders[0]["acceptance"]))
+code = contract_watch.main()
+check("the safe additive contract is absorbed after filing its research task", code == 0,
+      "exit=%s" % code)
+check("absorbing a safe capability does not erase its durable research order",
+      len(workorders.open_orders(queue_path)) == 1
+      and workorders.open_orders(queue_path)[0]["severity"] == "opportunity",
+      str(workorders.open_orders(queue_path)))
 
 shutil.rmtree(tmp, ignore_errors=True)
 

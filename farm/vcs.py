@@ -49,7 +49,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-PROJECT = Path(__file__).resolve().parent.parent
+from . import control
+
+PROJECT = control.project_root(Path(__file__).resolve().parent.parent)
 
 # Branch namespace for machine-authored work. Kept under a prefix so a human can
 # see at a glance which history is autonomous, and so cleanup can be pattern-based.
@@ -100,10 +102,11 @@ def short(sha: Optional[str]) -> str:
     return (sha or "")[:12]
 
 
-def dirty_paths() -> List[str]:
-    """Tracked files with uncommitted changes in the live tree."""
+def dirty_paths(include_untracked: bool = False) -> List[str]:
+    """Files with working-tree changes, optionally including new files."""
     try:
-        out = _run(["status", "--porcelain", "--untracked-files=no"]).stdout
+        mode = "all" if include_untracked else "no"
+        out = _run(["status", "--porcelain", "--untracked-files=" + mode]).stdout
     except (GitError, OSError, subprocess.TimeoutExpired):
         return []
     return [line[3:].strip() for line in out.splitlines() if line.strip()]

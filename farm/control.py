@@ -1,0 +1,219 @@
+"""Authoritative trust boundary and service registry for the autonomous farm.
+
+The same declarations drive four independent consumers:
+
+* the author agent's edit policy
+* launchd supervision
+* the autonomy health view
+* the architecture diagram
+
+Keeping these facts in one dependency-free module prevents the operator view from
+claiming a file is protected or a service is supervised when enforcement disagrees.
+This module is itself part of the trusted computing base and may not be rewritten by
+an autonomous authoring pass.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+LABEL_PREFIX = "com.nickfigura.farmfriends"
+
+# Every process required for unattended operation. ``entry`` is the source path, not
+# the rendered plist argument (which normally runs through the immutable release
+# pointer). ``layer`` places the service in the system map; source modules retain their
+# own independently derived dependency edges.
+SERVICES: List[Dict[str, Any]] = [
+    {
+        "key": "cycle",
+        "label": LABEL_PREFIX,
+        "entry": "run.py",
+        "layer": "play",
+        "role": "plays the farm",
+        "lost": "the farm stops playing entirely",
+        "critical": True,
+    },
+    {
+        "key": "supervisor",
+        "label": LABEL_PREFIX + ".supervisor",
+        "entry": "run.py",
+        "layer": "operate",
+        "role": "watches and repairs the control loop",
+        "lost": "failed services and stale runs stop being recovered",
+        "critical": True,
+    },
+    {
+        "key": "expand",
+        "label": LABEL_PREFIX + ".expand",
+        "entry": "experiments/expand.py",
+        "layer": "play",
+        "role": "buys bounded scoring capacity",
+        "lost": "the herd stops growing at the expansion cadence",
+        "critical": False,
+    },
+    {
+        "key": "recovery",
+        "label": LABEL_PREFIX + ".recovery",
+        "entry": "experiments/recovery_watch.py",
+        "layer": "guard",
+        "role": "verifies recovery from a production outage",
+        "lost": "an outage recovery loses its independent verification",
+        "critical": False,
+    },
+    {
+        "key": "contract",
+        "label": LABEL_PREFIX + ".contract",
+        "entry": "experiments/contract_watch.py",
+        "layer": "detect",
+        "role": "detects endpoint drift",
+        "lost": "server contract changes go unnoticed",
+        "critical": False,
+    },
+    {
+        "key": "author",
+        "label": LABEL_PREFIX + ".author",
+        "entry": "experiments/author_agent.py",
+        "layer": "decide",
+        "role": "writes and publishes bounded repairs",
+        "lost": "drift is detected but never repaired",
+        "critical": True,
+    },
+    {
+        "key": "research",
+        "label": LABEL_PREFIX + ".research",
+        "entry": "experiments/research_agent.py",
+        "layer": "decide",
+        "role": "turns strategic uncertainty into bounded probes",
+        "lost": "new strategy is no longer explored",
+        "critical": False,
+    },
+    {
+        "key": "dashboard",
+        "label": LABEL_PREFIX + ".dashboard",
+        "entry": "experiments/dashboard_agent.py",
+        "layer": "operate",
+        "role": "verifies every operator readout",
+        "lost": "stale or broken dashboard tabs stop being detected",
+        "critical": False,
+    },
+    {
+        "key": "monitor",
+        "label": LABEL_PREFIX + ".monitor",
+        "entry": "monitor.py",
+        "layer": "operate",
+        "role": "serves the operator view",
+        "lost": "the dashboard URL and all tabs are unavailable",
+        "critical": True,
+    },
+]
+
+# The trusted computing base. These paths define budgets, permissions, evidence
+# identity, promotion, supervision, release, and rollback. Letting a model rewrite any
+# one of them would also let it weaken the mechanism that judges its next change.
+TRUSTED_PATHS = frozenset(
+    {
+        "run.py",
+        "farm/architecture.py",
+        "farm/autonomy.py",
+        "farm/canary.py",
+        "farm/claims.py",
+        "farm/contract.py",
+        "farm/control.py",
+        "farm/heal.py",
+        "farm/ledger.py",
+        "farm/llm.py",
+        "farm/mcp.py",
+        "farm/policy.py",
+        "farm/probes.py",
+        "farm/questions.py",
+        "farm/research.py",
+        "farm/rules.py",
+        "farm/scheduler.py",
+        "farm/tokens.py",
+        "farm/vcs.py",
+        "farm/watch.py",
+        "farm/workorders.py",
+        "experiments/author_agent.py",
+        "experiments/contract_watch.py",
+        "experiments/dashboard_agent.py",
+        "experiments/recovery_watch.py",
+        "experiments/research_agent.py",
+        "deploy/install.sh",
+        "deploy/release.sh",
+    }
+    | {"deploy/%s.plist" % service["label"] for service in SERVICES}
+)
+
+# Autonomous patches stay in existing Python implementation files. ``monitor.py`` is
+# intentionally editable: the independent dashboard verifier and release gates can
+# safely judge a renderer/route repair, while the health and architecture truth it
+# displays remain protected above.
+AUTHOR_EDITABLE_PREFIXES = ("farm/", "experiments/")
+AUTHOR_EDITABLE_FILES = ("monitor.py",)
+
+# Files that define a release. A dirty strategy journal is intentionally excluded: it
+# is linked as live evidence rather than packaged code and must not prevent repairs.
+RELEASE_SOURCE_PREFIXES = ("farm/", "experiments/", "fixtures/", "dashboard/", "game/", "deploy/")
+RELEASE_SOURCE_FILES = ("run.py", "monitor.py")
+
+
+def normalize_path(path: str) -> str:
+    text = str(path or "").strip().replace("\\", "/")
+    # Remove an ordinary relative prefix without turning "../../etc" into "etc".
+    # ``str.lstrip('./')`` removes any run of either character and therefore erases
+    # traversal evidence before the permission check can see it.
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def is_protected(path: str) -> bool:
+    return normalize_path(path) in TRUSTED_PATHS
+
+
+def is_release_source(path: str) -> bool:
+    rel = normalize_path(path)
+    return rel in RELEASE_SOURCE_FILES or any(rel.startswith(prefix) for prefix in RELEASE_SOURCE_PREFIXES)
+
+
+def author_editable(path: str) -> bool:
+    rel = normalize_path(path)
+    if not rel.endswith(".py") or rel.startswith("/") or ".." in rel.split("/"):
+        return False
+    if is_protected(rel):
+        return False
+    return rel in AUTHOR_EDITABLE_FILES or any(rel.startswith(prefix) for prefix in AUTHOR_EDITABLE_PREFIXES)
+
+
+def service(value: str) -> Optional[Dict[str, Any]]:
+    """Find a service by key or launchd label."""
+    return next((dict(item) for item in SERVICES if value in (item["key"], item["label"])), None)
+
+
+def labels(exclude: Iterable[str] = ()) -> List[str]:
+    omitted = set(exclude)
+    return [str(item["label"]) for item in SERVICES if item["key"] not in omitted]
+
+
+def project_root(runtime_root: Optional[Path] = None) -> Path:
+    """Resolve the editable checkout from a working tree or immutable release.
+
+    ``FARM_PROJECT_ROOT`` is injected into the author LaunchAgent and fails closed if
+    it does not identify a deployable checkout. Other callers can discover the same
+    root by walking above a release copy. A release directory itself is never returned
+    merely because it contains ``farm/``.
+    """
+    explicit = os.environ.get("FARM_PROJECT_ROOT")
+    if explicit:
+        candidate = Path(explicit).expanduser().resolve()
+        if not (candidate / "deploy" / "release.sh").is_file():
+            raise RuntimeError("FARM_PROJECT_ROOT is not a deployable project: %s" % candidate)
+        return candidate
+
+    start = Path(runtime_root or Path(__file__).resolve().parent.parent).resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / "deploy" / "release.sh").is_file() and (candidate / "farm").is_dir():
+            return candidate
+    raise RuntimeError("could not resolve editable project root from %s" % start)

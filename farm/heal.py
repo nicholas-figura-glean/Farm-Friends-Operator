@@ -434,6 +434,7 @@ def process(
                 alert,
                 row=row,
                 item=item,
+                subject=item.get("subject"),
                 decision_bundle=decision_bundle,
                 evidence_refs=["history.ndjson#run=%s" % item.get("run")],
             )

@@ -1344,3 +1344,179 @@ on :8766 serves them, 80 farm self-test checks green, farm code untouched.
 - 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
 - Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
 - Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T02:42:13Z - runs 801-820 (generated)
+
+- Rank: #1, lifetime produce 106393039 (+16028033 this window)
+- Animals: 254220 (beehive 1072, chicken 252894, cow 79, pig 80, sheep 95), +11831 this window
+- Output: 0.431 units/chicken/min mean (min 0.017, max 0.657) over 20 measurable runs
+- Economy: 33616784 coins revenue, 5425846 spent on feed (16.1%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 36 against threshold 6 (stop 70); feed 7626615 vs reserve 7626615
+- Throughput: 8310 calls, 165s mean / 226s max per run, rate limit 5.0/s
+- Rivals:
+  - John: 12204693 lifetime (+-73362 this window, -0.5% of our gain)
+  - Neill: 7383851 lifetime (+-45471 this window, -0.3% of our gain)
+  - Deep: 273995 lifetime (+104210 this window, 0.7% of our gain)
+  - Moe: 146256 lifetime (+-868 this window, -0.0% of our gain)
+  - Jason: 226 lifetime (+0 this window, 0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 9 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 6 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 6 lifetime (+0 this window, 0.0% of our gain)
+  - john: 6 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+-7 this window, -0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: animal count 242389 below expected 242433; RIVAL WAKE: Deep recent 366.467/min vs base 0.000/min over 6 intervals (lifetime 169785); animal count 248265 below expected 248281; animal count 250648 below expected 250699; animal count 251281 below expected 251323
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T05:19:48Z - runs 821-840 (generated)
+
+- Rank: #1, lifetime produce 123345012 (+16354621 this window)
+- Animals: 260686 (beehive 1065, chicken 259367, cow 79, pig 80, sheep 95), +6107 this window
+- Output: 0.449 units/chicken/min mean (min 0.234, max 0.621) over 20 measurable runs
+- Economy: 37018636 coins revenue, 5401644 spent on feed (14.6%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 36 against threshold 6 (stop 70); feed 7820595 vs reserve 7820595
+- Throughput: 8312 calls, 158s mean / 189s max per run, rate limit 5.0/s
+- Rivals:
+  - John: 12119570 lifetime (+-81455 this window, -0.5% of our gain)
+  - Neill: 7338881 lifetime (+-43293 this window, -0.3% of our gain)
+  - Deep: 464928 lifetime (+191000 this window, 1.2% of our gain)
+  - Moe: 145252 lifetime (+-952 this window, -0.0% of our gain)
+  - Jason: 226 lifetime (+0 this window, 0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 9 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 6 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 6 lifetime (+0 this window, 0.0% of our gain)
+  - john: 6 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: animal count 254862 below expected 254922; animal count 255524 below expected 255547; animal count 255858 below expected 255871; animal count 256504 below expected 256516; animal count 256835 below expected 256855
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T07:55:43Z - runs 841-860 (generated)
+
+- Rank: #1, lifetime produce 141365890 (+16820300 this window)
+- Animals: 266991 (beehive 1054, chicken 265684, cow 79, pig 79, sheep 95), +6023 this window
+- Output: 0.460 units/chicken/min mean (min 0.214, max 0.643) over 20 measurable runs
+- Economy: 38194605 coins revenue, 5530395 spent on feed (14.5%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 36 against threshold 6 (stop 70); feed 8010195 vs reserve 8009745
+- Throughput: 8315 calls, 162s mean / 184s max per run, rate limit 5.0/s
+- Rivals:
+  - John: 12042637 lifetime (+-71629 this window, -0.4% of our gain)
+  - Neill: 7290923 lifetime (+-44855 this window, -0.3% of our gain)
+  - Deep: 351408 lifetime (+-113404 this window, -0.7% of our gain)
+  - Moe: 109042 lifetime (+-36129 this window, -0.2% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+-194 this window, -0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 6 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+-30 this window, -0.0% of our gain)
+  - Alexander: 0 lifetime (+-9 this window, -0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+-6 this window, -0.0% of our gain)
+  - john: 0 lifetime (+-6 this window, -0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: animal count 260968 below expected 261015; animal count 261624 below expected 261634; animal count 261949 below expected 261977; animal count 262250 below expected 262266; animal count 262562 below expected 262605
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T10:30:21Z - runs 861-880 (generated)
+
+- Rank: #1, lifetime produce 159458709 (+17354907 this window)
+- Animals: 273280 (beehive 1043, chicken 271985, cow 79, pig 78, sheep 95), +5973 this window
+- Output: 0.460 units/chicken/min mean (min 0.217, max 0.652) over 20 measurable runs
+- Economy: 38803236 coins revenue, 5652018 spent on feed (14.6%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 36 against threshold 6 (stop 70); feed 8198415 vs reserve 8198415
+- Throughput: 8308 calls, 158s mean / 189s max per run, rate limit 5.0/s
+- Rivals:
+  - John: 11971368 lifetime (+-69407 this window, -0.4% of our gain)
+  - Neill: 7245173 lifetime (+-43885 this window, -0.3% of our gain)
+  - Deep: 609971 lifetime (+258654 this window, 1.5% of our gain)
+  - Moe: 108320 lifetime (+-648 this window, -0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 0 lifetime (+-6 this window, -0.0% of our gain)
+  - john: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: animal count 267307 below expected 267331; animal count 267615 below expected 267663; RIVAL WAKE: Deep recent 550.285/min vs base 0.000/min over 6 intervals (lifetime 378682); animal count 268225 below expected 268278; animal count 268849 below expected 268898
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T13:06:25Z - runs 881-900 (generated)
+
+- Rank: #1, lifetime produce 176261263 (+15936715 this window)
+- Animals: 279705 (beehive 1038, chicken 278419, cow 79, pig 77, sheep 92), +6107 this window
+- Output: 0.413 units/chicken/min mean (min 0.267, max 0.617) over 19 measurable runs
+- Economy: 37728174 coins revenue, 5419119 spent on feed (14.4%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 30 against threshold 6 (stop 70); feed 8391795 vs reserve 8391165
+- Throughput: 8288 calls, 163s mean / 247s max per run, rate limit 4.0/s
+- Rivals:
+  - John: 11894840 lifetime (+-70899 this window, -0.4% of our gain)
+  - Neill: 7201631 lifetime (+-41510 this window, -0.3% of our gain)
+  - Deep: 1399751 lifetime (+759757 this window, 4.8% of our gain)
+  - Moe: 107446 lifetime (+-757 this window, -0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 0 lifetime (+0 this window, 0.0% of our gain)
+  - john: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: bulk feed unconfirmed: feed_animals returned isError: 🚫 Failed query: 
+    WITH inv AS (
+      SELECT qty FROM inventory WH; animal count 273598 below expected 273605; animal count 273896 below expected 273950; RIVAL WAKE: Deep recent 4479.616/min vs base 238.965/min over 6 intervals (lifetime 824324); animal count 274545 below expected 274568
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 30 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned
+
+## 2026-08-26T15:45:33Z - runs 901-920 (generated)
+
+- Rank: #1, lifetime produce 190184809 (+13152069 this window)
+- Animals: 286764 (beehive 1032, chicken 285487, cow 77, pig 77, sheep 91), +6728 this window
+- Output: 0.328 units/chicken/min mean (min 0.140, max 0.531) over 20 measurable runs
+- Economy: 29470041 coins revenue, 5196253 spent on feed (17.6%), 8000 chickens adopted of 8000 planned
+- Husbandry: peak hunger 36 against threshold 6 (stop 70); feed 8602935 vs reserve 8602935
+- Throughput: 8264 calls, 165s mean / 180s max per run, rate limit 4.0/s
+- Rivals:
+  - John: 11921465 lifetime (+30172 this window, 0.2% of our gain)
+  - Neill: 7162197 lifetime (+-37094 this window, -0.3% of our gain)
+  - Deep: 2250088 lifetime (+849733 this window, 6.5% of our gain)
+  - Moe: 106846 lifetime (+-600 this window, -0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 30 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 0 lifetime (+0 this window, 0.0% of our gain)
+  - john: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: animal count 280340 below expected 280392; animal count 281000 below expected 281044; animal count 281627 below expected 281678; RIVAL GROWING: Deep herd 131216 -> 199129 (+67913) on 300057 coins; animal count 282308 below expected 282330
+- 20 run(s) ended with >=10 idle coins after a complete adoption plan, which means the feed reserve is binding rather than coins.
+- Peak hunger 36 reached the 6 feeding threshold, so feeding is now actually firing rather than sitting idle.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops banned

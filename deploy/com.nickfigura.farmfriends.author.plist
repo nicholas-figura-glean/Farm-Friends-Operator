@@ -6,10 +6,10 @@
   Glean llm_proxy gateway where it needs judgement), runs the full release gate
   matrix, and publishes under a self-reverting canary.
 
-  IMPORTANT: it runs from the PROJECT tree, not from __PROJECT__/release like the
-  other agents. It has to edit the working tree and then invoke deploy/release.sh
-  to publish it; running from inside an immutable release would mean editing the
-  very tree it was launched from.
+  IMPORTANT: executable code comes from the immutable release like every other
+  service, while FARM_PROJECT_ROOT explicitly identifies the editable checkout.
+  The author packages its gated worktree through the canonical deploy/release.sh;
+  it never writes into the release from which it is running.
 
   Cadence is only an upper bound on attention. The real rate limit is in
   farm/rules.py (AUTHOR_MIN_INTERVAL_RUNS, AUTHOR_MAX_ORDERS_PER_DAY,
@@ -28,6 +28,11 @@
   </array>
   <key>WorkingDirectory</key>
   <string>__PROJECT__/release</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FARM_PROJECT_ROOT</key>
+    <string>__PROJECT__</string>
+  </dict>
   <key>StartInterval</key>
   <integer>600</integer>
   <key>StandardOutPath</key>

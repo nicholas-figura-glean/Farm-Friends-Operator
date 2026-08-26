@@ -5,9 +5,10 @@ code was correct, the release was published, `--alerts` looked calm, and nothing
 ran for half an hour. A loop that cannot notice its own scheduler is dead is not
 self-healing.
 
-Two agents watch each other:
-  com.nickfigura.farmfriends            the 180s cycle
-  com.nickfigura.farmfriends.supervisor the 60s heal pass
+The cycle and supervisor watch each other, and the supervisor reconciles every
+load-bearing service declared in farm/control.py. A new plist therefore cannot exist
+outside supervision merely because somebody forgot to extend a second hand-written
+label tuple.
 
 Nothing here touches the farm. It only inspects and repairs launchd, and repairs
 are rate-limited so a permanently broken plist cannot become a restart loop.
@@ -17,12 +18,13 @@ import os
 import re
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import heal, rules
+from . import control, heal, rules
 
-CYCLE_LABEL = "com.nickfigura.farmfriends"
-SUPERVISOR_LABEL = "com.nickfigura.farmfriends.supervisor"
+CYCLE_LABEL = control.LABEL_PREFIX
+SUPERVISOR_LABEL = control.LABEL_PREFIX + ".supervisor"
 # The expansion agent is supervised too. It was NOT, and it silently died: the
 # last sprint was killed mid-run and the label ended up unloaded, so herd growth
 # fell to the cycle's own ~50/run for two hours while the leader added 10,869
@@ -35,7 +37,9 @@ EXPAND_LABEL = "com.nickfigura.farmfriends.expand"
 CONTRACT_LABEL = "com.nickfigura.farmfriends.contract"
 AUTHOR_LABEL = "com.nickfigura.farmfriends.author"
 RESEARCH_LABEL = "com.nickfigura.farmfriends.research"
-DASHBOARD_LABEL = "com.nickfigura.farmfriends.dashboard"
+DASHBOARD_LABEL = control.LABEL_PREFIX + ".dashboard"
+RECOVERY_LABEL = control.LABEL_PREFIX + ".recovery"
+MONITOR_LABEL = control.LABEL_PREFIX + ".monitor"
 AGENT_DIR = os.path.expanduser("~/Library/LaunchAgents")
 TIMEOUT = 5
 
@@ -45,10 +49,9 @@ def _domain() -> str:
 
 
 def project_root() -> str:
-    """The project dir, reachable from any release via the state symlink."""
+    """The canonical project dir from a working tree or immutable release."""
     here = os.path.dirname(os.path.abspath(__file__))
-    running_root = os.path.dirname(here)
-    return os.path.realpath(os.path.join(running_root, "state", ".."))
+    return str(control.project_root(Path(here).parent))
 
 
 def _run(args: List[str]) -> subprocess.CompletedProcess:

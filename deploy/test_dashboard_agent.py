@@ -31,7 +31,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 os.chdir(PROJECT)
 
-from farm import architecture, autonomy  # noqa: E402
+from farm import architecture, autonomy, canary, control  # noqa: E402
 
 CHECKS = 0
 FAILURES = 0
@@ -71,6 +71,8 @@ for expected in ("com.nickfigura.farmfriends",
           expected in labels)
 check("every agent explains what its absence costs",
       all(a.get("lost") for a in autonomy.AGENTS))
+check("health consumes the authoritative service registry",
+      [a["label"] for a in autonomy.AGENTS] == [a["label"] for a in control.SERVICES])
 # The cycle and the author agent are the two whose loss is unrecoverable without a
 # human, so they must escalate harder than the rest.
 critical = {a["key"] for a in autonomy.AGENTS} & {"cycle", "author"}
@@ -115,9 +117,23 @@ check("the browser server runs at normal priority",
 install_source = (PROJECT / "deploy" / "install.sh").read_text(encoding="utf-8")
 release_source = (PROJECT / "deploy" / "release.sh").read_text(encoding="utf-8")
 check("installation includes the monitor service", 'MONITOR="$LABEL.monitor"' in install_source)
+supervisor_source = (PROJECT / "run.py").read_text(encoding="utf-8")
+check("supervision iterates the authoritative service registry",
+      "for service in control.SERVICES" in supervisor_source)
 check("uninstall removes the monitor service", 'bootout "$DOMAIN/$MONITOR"' in install_source)
 check("a release restarts module-level HTML and routes",
       'kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"' in release_source)
+check("a release separates gated source from deployment state",
+      "FARM_SOURCE_ROOT" in release_source and "FARM_DEPLOY_ROOT" in release_source)
+check("every activated release arms a canary",
+      "canary.arm(" in release_source and "release activation failed closed" in release_source)
+check("release pruning preserves the active canary's rollback target",
+      '! -name "$PREVIOUS"' in release_source)
+
+with (PROJECT / "deploy" / "com.nickfigura.farmfriends.author.plist").open("rb") as handle:
+    author_plist = plistlib.load(handle)
+check("the immutable author process receives the editable checkout explicitly",
+      (author_plist.get("EnvironmentVariables") or {}).get("FARM_PROJECT_ROOT") == "__PROJECT__")
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +158,42 @@ check("the error names the exception type", "RuntimeError" in guarded["error"])
 check("a failed section is surfaced as a blocker",
       any("failed to read" in b["what"]
           for b in autonomy.blockers({"vcs": {"error": "synthetic"}})))
+
+original_canary_status = canary.status
+try:
+    canary.status = lambda: {
+        "status": canary.WATCHING,
+        "revision": "rev-new",
+        "previous": "rev-old",
+        "order_id": "order-1",
+        "armed_ts": "2026-08-26T00:00:00Z",
+        "verdict": {"status": canary.WATCHING, "reason": "collecting runs"},
+    }
+    canary_view = autonomy.canary_state()
+finally:
+    canary.status = original_canary_status
+check("a flat canary status preserves the live and rollback revisions",
+      canary_view.get("revision") == "rev-new" and canary_view.get("previous") == "rev-old",
+      str(canary_view))
+research_only = {
+    "orders": {"summary": {"open": 4, "repair_open": 0, "research_open": 4,
+                             "oldest_open_age_seconds": 99999}},
+    "llm": {"passes_today": 8, "max_passes": 8, "available": True},
+}
+check("aged research opportunities are not mislabeled as stalled repairs",
+      not any("repair(s) queued" in item.get("what", "")
+              for item in autonomy.blockers(research_only)))
+stalled_repairs = {
+    "orders": {"summary": {"open": 2, "repair_open": 2,
+                             "oldest_repair_age_seconds": 7200}},
+    "llm": {"passes_today": 0, "max_passes": 8, "available": True},
+}
+check("an actually stalled repair queue remains a blocker",
+      any("repair(s) queued" in item.get("what", "")
+          for item in autonomy.blockers(stalled_repairs)))
+check("dirty release source visibly pauses stale-base authoring",
+      any("autonomous authoring is paused" in item.get("what", "")
+          for item in autonomy.blockers({"vcs": {"dirty_source_paths": ["farm/control.py"]}})))
 
 
 # --------------------------------------------------------------------------
@@ -178,6 +230,11 @@ check("all nine LaunchAgents are found", snap["stats"]["launch_agents"] == 9,
       str(snap["stats"]["launch_agents"]))
 check("modules were discovered", snap["stats"]["modules"] > 20,
       str(snap["stats"]["modules"]))
+check("all nine runtime services are first-class architecture nodes",
+      snap["stats"]["agent_modules"] == 9, str(snap["stats"]["agent_modules"]))
+service_nodes = {n.get("agent_label") for n in snap["nodes"] if n.get("kind") == "agent"}
+check("every declared service has a health-addressable node",
+      service_nodes == {s["label"] for s in control.SERVICES}, str(sorted(service_nodes)))
 check("import edges were discovered", snap["stats"]["edges"] > 10,
       str(snap["stats"]["edges"]))
 check("every module is assigned a known layer",
@@ -193,6 +250,9 @@ for path in ("farm/canary.py", "farm/workorders.py", "farm/llm.py", "farm/rules.
     check("%s is marked unwritable" % path, path in protected)
 check("cycle is not marked unwritable",
       "farm/cycle.py" not in protected)
+check("the diagram consumes the enforced protected manifest",
+      architecture.PROTECTED == control.TRUSTED_PATHS)
+check("run.py orchestration is marked unwritable", "run.py" in protected)
 
 # The signature must ignore cosmetic edits, or the version history fills with noise
 # and stops being readable.
@@ -513,6 +573,10 @@ check("tab activation checks the global async loader",
       'typeof loader!=="function"' in composed and "window.loadArchitecture" in composed)
 check("loader failure becomes visible content",
       "Architecture renderer failed to initialize" in composed)
+check("an open Findings or History tab refreshes on its own",
+      "EVIDENCE_REFRESH_MS = 60000" in composed and "EVIDENCE_LAST_FETCH_MS" in composed)
+check("an open Architecture tab refreshes its model and liveness overlay",
+      "ARCHITECTURE_REFRESH_MS = 30000" in composed and "ARCH_LAST_FETCH_MS" in composed)
 
 
 # --------------------------------------------------------------------------

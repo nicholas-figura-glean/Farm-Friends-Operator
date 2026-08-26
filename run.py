@@ -29,6 +29,7 @@ from farm import (  # noqa: E402
     canary,
     claims,
     contract,
+    control,
     cycle,
     growth,
     heal,
@@ -388,11 +389,17 @@ def do_llm_status() -> int:
         except Exception as exc:  # noqa: BLE001
             print("  model selection failed: %s" % str(exc)[:160])
 
-    author_rows = [r for r in tokens.tail(600) if r.get("kind") == "author"]
-    spend = round(sum(float(r.get("cost_usd") or 0.0) for r in author_rows), 4)
-    print("  authoring passes recorded: %d, total $%.4f" % (len(author_rows), spend))
+    author_rows = [r for r in tokens.tail(1200) if r.get("kind") == "author"]
+    try:
+        from experiments import author_agent
+        passes, spend = author_agent.spend_today()
+    except Exception:  # noqa: BLE001 - status must still show completion detail
+        passes = sum(1 for r in tokens.tail(1200) if r.get("kind") == "author_pass")
+        spend = round(sum(float(r.get("cost_usd") or 0.0) for r in author_rows), 4)
+    print("  authoring passes in last 24h: %d, model spend $%.4f" % (passes, spend))
     print("  budget: %d passes/day, $%.2f/day"
           % (rules.AUTHOR_MAX_ORDERS_PER_DAY, rules.AUTHOR_MAX_COST_USD_PER_DAY))
+    print("  recent author model completions:")
     for row in author_rows[-5:]:
         print("    %s  %6d in %6d out  $%.4f  %s"
               % (row.get("ts"), row.get("tokens_in") or 0, row.get("tokens_out") or 0,
@@ -416,18 +423,19 @@ def do_supervise(cadence: int = 180) -> int:
         notes.extend(info.get("actions") or [])
         supervisor = scheduler.ensure(scheduler.SUPERVISOR_LABEL)
         notes.extend(supervisor.get("actions") or [])
-        # Herd growth is the score, so the expansion agent is load-bearing.
-        expand = scheduler.ensure(scheduler.EXPAND_LABEL)
-        notes.extend(expand.get("actions") or [])
-        # The self-healing pair. A dead contract watcher means server changes go
-        # unnoticed; a dead author means they go unrepaired.
-        for label in (scheduler.CONTRACT_LABEL, scheduler.AUTHOR_LABEL,
-                      scheduler.RESEARCH_LABEL, scheduler.DASHBOARD_LABEL):
+        # Reconcile every declared service. Expansion, recovery, endpoint drift,
+        # authoring, research, dashboard verification, and the HTTP monitor used to
+        # be maintained in several different hand-written lists; two were omitted
+        # from supervision while still appearing green in the operator view.
+        for service in control.SERVICES:
+            if service["key"] in {"cycle", "supervisor"}:
+                continue
+            label = str(service["label"])
             try:
                 agent = scheduler.ensure(label)
                 notes.extend(agent.get("actions") or [])
             except Exception as exc:  # noqa: BLE001
-                notes.append("%s check failed: %s" % (label.rsplit(".", 1)[-1], str(exc)[:60]))
+                notes.append("%s check failed: %s" % (service["key"], str(exc)[:60]))
         loaded = bool(info.get("loaded"))
     except Exception as exc:  # noqa: BLE001
         notes.append("scheduler check failed: %s" % str(exc)[:100])

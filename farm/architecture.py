@@ -30,6 +30,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from . import control
+
+
 def _project_root() -> Path:
     """The real project root, even when running from an immutable release copy.
 
@@ -44,12 +47,7 @@ def _project_root() -> Path:
     identify the project: a `deploy/` directory holding LaunchAgent plists. `state/` is
     already symlinked back here for the same reason.
     """
-    here = Path(__file__).resolve().parent.parent
-    for candidate in (here, *here.parents):
-        if (candidate / "deploy").is_dir() and any(
-                (candidate / "deploy").glob("com.nickfigura.farmfriends*.plist")):
-            return candidate
-    return here
+    return control.project_root(Path(__file__).resolve().parent.parent)
 
 
 PROJECT = _project_root()
@@ -90,17 +88,15 @@ MODULE_LAYER: Dict[str, str] = {
     "llm": "decide", "research": "decide",
     "canary": "guard", "workorders": "guard", "vcs": "guard", "heal": "guard",
     "scheduler": "operate", "autonomy": "operate", "architecture": "operate",
-    "progress": "operate", "release": "operate",
+    "progress": "operate", "release": "operate", "control": "guard",
+    "run": "operate", "monitor": "operate", "expand": "play",
+    "contract_watch": "detect", "recovery_watch": "guard",
+    "author_agent": "decide", "research_agent": "decide",
+    "dashboard_agent": "operate",
 }
 
-# Protected files, mirrored from the author agent's policy. Shown in the diagram
-# because "which parts may the machine rewrite" is the single most important thing an
-# operator needs to know about a self-modifying system, and it is invisible in code.
-PROTECTED = {
-    "farm/canary.py", "farm/workorders.py", "farm/llm.py", "farm/rules.py",
-    "farm/vcs.py", "deploy/release.sh",
-    "experiments/author_agent.py", "experiments/research_agent.py",
-}
+# This is the enforced trust boundary, not a UI mirror.
+PROTECTED = control.TRUSTED_PATHS
 
 
 def _git(args: List[str]) -> str:
@@ -159,11 +155,21 @@ def _agents() -> List[Dict[str, Any]]:
         args = [str(a) for a in (data.get("ProgramArguments") or [])]
         entry = next((a for a in args if a.endswith(".py")), "")
         interval = data.get("StartInterval")
+        label = str(data.get("Label") or path.stem)
+        normalized = entry.replace("__PROJECT__/release/", "").replace("__PROJECT__/", "")
+        if normalized.startswith(str(PROJECT)):
+            normalized = os.path.relpath(normalized, str(PROJECT))
+        declared = control.service(label) or {}
         out.append({
-            "label": str(data.get("Label") or path.stem),
-            "entry": os.path.relpath(entry, str(PROJECT)) if entry.startswith("/") else entry,
+            "key": declared.get("key") or label.rsplit(".", 1)[-1],
+            "label": label,
+            "entry": normalized,
             "interval_seconds": int(interval) if isinstance(interval, int) else None,
             "plist": path.name,
+            "layer": declared.get("layer") or "operate",
+            "role": declared.get("role") or "background service",
+            "lost": declared.get("lost") or "service capability is unavailable",
+            "critical": bool(declared.get("critical")),
         })
     return out
 
@@ -269,29 +275,40 @@ def _runtime_topology() -> Dict[str, Any]:
     }
 
 
-def _modules() -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], List[str]]:
-    """Module components and the import edges between them."""
+def _modules(agents: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], List[str]]:
+    """Source modules, all launchd services, and their dependency edges.
+
+    Services are distinct from source modules: cycle and supervisor both execute
+    run.py but have different cadence, authority, and health. Earlier snapshots only
+    scanned ``*_agent.py`` and therefore rendered three agents while nine jobs were
+    actually load-bearing.
+    """
+    agents = list(agents or _agents())
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, str]] = []
     unmapped: List[str] = []
-    sources: Dict[str, str] = {}
+    sources: Dict[str, Dict[str, str]] = {}
+
+    def add_source(path: Path, rel: str, layer_hint: Optional[str] = None) -> None:
+        if not path.is_file() or path.name == "__init__.py":
+            return
+        name = path.stem
+        source = path.read_text(encoding="utf-8", errors="replace")
+        sources[name] = {"source": source, "rel": rel, "layer": layer_hint or ""}
 
     for path in sorted((PROJECT / "farm").glob("*.py")):
-        if path.name == "__init__.py":
+        add_source(path, "farm/%s" % path.name)
+    entry_layers = {str(agent.get("entry")): str(agent.get("layer") or "operate") for agent in agents}
+    for rel, layer in sorted(entry_layers.items()):
+        if not rel.endswith(".py") or rel.startswith("farm/"):
             continue
-        sources[path.stem] = path.read_text(encoding="utf-8", errors="replace")
-    for path in sorted((PROJECT / "experiments").glob("*_agent.py")):
-        sources[path.stem] = path.read_text(encoding="utf-8", errors="replace")
+        add_source(PROJECT / rel, rel, layer)
 
-    for name, source in sources.items():
-        rel = ("farm/%s.py" % name) if (PROJECT / "farm" / (name + ".py")).exists() \
-            else ("experiments/%s.py" % name)
-        if name.endswith("_agent"):
-            layer = "decide"
-        else:
-            layer = MODULE_LAYER.get(name, "observe")
-            if name not in MODULE_LAYER:
-                unmapped.append(name)
+    for name, item in sources.items():
+        source, rel = item["source"], item["rel"]
+        layer = item.get("layer") or MODULE_LAYER.get(name, "observe")
+        if not item.get("layer") and name not in MODULE_LAYER:
+            unmapped.append(name)
         doc = ""
         try:
             doc = (ast.get_docstring(ast.parse(source)) or "").strip().split("\n")[0]
@@ -299,7 +316,7 @@ def _modules() -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], List[str]]:
             pass
         nodes.append({
             "id": name,
-            "kind": "agent" if name.endswith("_agent") else "module",
+            "kind": "module",
             "path": rel,
             "layer": layer,
             "loc": source.count("\n") + 1,
@@ -310,8 +327,34 @@ def _modules() -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], List[str]]:
             if dep in sources and dep != name:
                 edges.append({"source": name, "target": dep})
 
+    for agent in agents:
+        key = str(agent.get("key") or agent.get("label") or "service")
+        node_id = "service:%s" % key
+        entry = str(agent.get("entry") or "")
+        entry_id = Path(entry).stem if entry.endswith(".py") else ""
+        nodes.append({
+            "id": node_id,
+            "label": key,
+            "kind": "agent",
+            "path": "deploy/%s" % str(agent.get("plist") or ""),
+            "layer": str(agent.get("layer") or "operate"),
+            "loc": None,
+            "doc": str(agent.get("role") or "background service")[:150],
+            "protected": True,
+            "agent_label": agent.get("label"),
+            "service_key": key,
+            "entry": entry,
+        })
+        if entry_id in sources:
+            edges.append({"source": node_id, "target": entry_id})
+
     nodes.sort(key=lambda n: (n["layer"], n["id"]))
-    edges.sort(key=lambda e: (e["source"], e["target"]))
+    edges = sorted(
+        ({"source": source, "target": target} for source, target in {
+            (edge["source"], edge["target"]) for edge in edges
+        }),
+        key=lambda edge: (edge["source"], edge["target"]),
+    )
     return nodes, edges, sorted(unmapped)
 
 
@@ -336,8 +379,8 @@ def signature(nodes: Iterable[Dict[str, Any]], edges: Iterable[Dict[str, str]],
 
 def snapshot() -> Dict[str, Any]:
     """The architecture as it exists right now."""
-    nodes, edges, unmapped = _modules()
     agents = _agents()
+    nodes, edges, unmapped = _modules(agents)
     tools = _tools()
     stores = _stores()
     runtime = _runtime_topology()

@@ -12,6 +12,7 @@
 
 var ARCH = null;
 var ARCH_LOADING = false;
+var ARCH_LAST_FETCH_MS = null;
 var ARCH_SELECTED = null;
 var ARCH_FILTER = "all";
 var ARCH_VIEW = "runtime";
@@ -98,6 +99,13 @@ function archApplyHealth(current, autonomyView) {
   out.nodes = archList(current.nodes).map(function (original) {
     var node = archCopy(original);
     if (node.kind !== "agent") return node;
+    if (node.agent_label && health[String(node.agent_label)]) {
+      node.agent_health = health[String(node.agent_label)];
+      if (!node.agent_health.loaded) node.down = true;
+      return node;
+    }
+    // Compatibility with historical snapshots, which represented only *_agent.py
+    // source files and inferred their service from the entry string.
     for (var i = 0; i < specs.length; i++) {
       var spec = specs[i] || {};
       if (String(spec.entry || "").indexOf(String(node.id)) === -1) continue;
@@ -388,7 +396,7 @@ function archGraphHtml(model) {
     var classes = archNodeClass(node) + (state ? " " + state : "");
     var label = node.label || node.id;
     var meta = node.kind === "tool" ? "external MCP tool" :
-               (node.kind === "agent" ? "background agent" : ((node.loc || "?") + " lines"));
+               (node.kind === "agent" ? (node.entry ? "service · " + node.entry : "background agent") : ((node.loc || "?") + " lines"));
     var status = node.down ? '<circle class="arch-node-health down" cx="' + (pos.width - 12) + '" cy="12" r="4"></circle>' :
                  (node.kind === "agent" && node.agent_health ? '<circle class="arch-node-health live" cx="' + (pos.width - 12) + '" cy="12" r="4"></circle>' : "");
     var lock = node.protected ? '<text class="arch-node-lock" x="' + (pos.width - 10) + '" y="' + (pos.height - 9) + '" text-anchor="end">LOCKED</text>' : "";
@@ -756,6 +764,7 @@ async function loadArchitecture(force) {
     const response = await fetch(`/api/architecture?t=${Date.now()}`, {cache: "no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     ARCH = await response.json();
+    ARCH_LAST_FETCH_MS = Date.now();
     safe("architecture", () => renderArchitecture(ARCH, AUTONOMY));
   } catch (error) {
     safe("architecture", () => renderArchitecture(

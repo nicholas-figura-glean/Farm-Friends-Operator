@@ -408,6 +408,7 @@ def run_audit(
         }
         audit_history[-1] = latest_with_claims
     latest = audit_history[-1] if audit_history else {}
+    reconciliation = questions.reconcile_duplicates(run=latest.get("run"))
     findings = rules.strategy_audit(audit_history)
     findings.extend(model_drift(audit_history))
     for claim in claims.overdue(registry):
@@ -454,6 +455,7 @@ def run_audit(
         "run": latest.get("run"),
         "findings": findings,
         "questions": opened,
+        "question_reconciliation": reconciliation,
         "semantic": audit,
     }
     if persist:

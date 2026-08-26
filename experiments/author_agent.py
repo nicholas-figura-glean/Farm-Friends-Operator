@@ -50,31 +50,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PROJECT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT))
+RUNTIME_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(RUNTIME_ROOT))
 
-from farm import canary, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, control, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
 
+# The process executes immutable code through release/, but edits and publishes from
+# the canonical checkout. The LaunchAgent injects FARM_PROJECT_ROOT; the fallback
+# resolver also walks out of releases/<revision>/ for hand runs and older installs.
+PROJECT = control.project_root(RUNTIME_ROOT)
 STATE = PROJECT / "state"
 LOCK = STATE / ".author.lock"
 STORE = STATE / "author.json"
 LOG = STATE / "author.ndjson"
 
-# Only these may ever be edited. An allowlist, not a denylist: a new top-level
-# file must be deliberately permitted rather than accidentally writable.
-EDITABLE_PREFIXES = ("farm/", "experiments/")
-EDITABLE_FILES = ("run.py",)
-
-# The supervision machinery is off limits. See the module docstring.
-PROTECTED = (
-    "farm/canary.py",
-    "farm/workorders.py",
-    "farm/llm.py",
-    "farm/rules.py",          # every budget and threshold lives here
-    "experiments/author_agent.py",
-    "experiments/contract_watch.py",
-    "deploy/release.sh",
-)
+# One authoritative trust boundary drives this enforcement, supervision, tests,
+# and the architecture diagram. A UI-only mirror previously disagreed with this
+# tuple and showed files locked that the model could still rewrite.
+EDITABLE_PREFIXES = control.AUTHOR_EDITABLE_PREFIXES
+EDITABLE_FILES = control.AUTHOR_EDITABLE_FILES
+PROTECTED = tuple(sorted(control.TRUSTED_PATHS))
 
 # Files copied into a staging tree. Mirrors deploy/release.sh's manifest.
 STAGE_DIRS = ("farm", "experiments", "fixtures", "dashboard", "game", "deploy")
@@ -113,18 +108,24 @@ def log(row: Dict[str, Any]) -> None:
 
 
 def spend_today() -> Tuple[int, float]:
-    """Authoring passes and dollars spent in the last 24h, from the token ledger."""
+    """Real author passes and model cost in the last 24 hours.
+
+    A pass is booked once when an order is claimed. Model completions are cost rows,
+    not passes: retries, research calls, and live gateway smoke tests previously made
+    49 test requests look like 49 autonomous changes and wedged an 8-pass budget.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     passes, cost = 0, 0.0
-    for row in tokens.tail(600):
-        if row.get("kind") != "author":
-            continue
+    for row in tokens.tail(1200):
         try:
             when = datetime.strptime(str(row.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-        if when >= cutoff:
+        if when < cutoff:
+            continue
+        if row.get("kind") == "author_pass":
             passes += 1
+        elif row.get("kind") == "author":
             cost += float(row.get("cost_usd") or 0.0)
     return passes, round(cost, 4)
 
@@ -136,6 +137,20 @@ def budget_check(stored: Dict[str, Any]) -> Optional[str]:
         return "daily pass budget spent (%d/%d)" % (passes, rules.AUTHOR_MAX_ORDERS_PER_DAY)
     if cost >= rules.AUTHOR_MAX_COST_USD_PER_DAY:
         return "daily cost ceiling reached ($%.2f/$%.2f)" % (cost, rules.AUTHOR_MAX_COST_USD_PER_DAY)
+
+    # A worktree forks from main. If packaged source differs from main, that base is
+    # stale and a successful repair would silently republish the pre-change system.
+    # Include untracked files: a newly added control module is as release-critical as
+    # a modified tracked one. The live strategy journal is linked evidence, not code.
+    if vcs.available():
+        dirty_source = [
+            path for path in vcs.dirty_paths(include_untracked=True)
+            if control.is_release_source(path)
+        ]
+        if dirty_source:
+            return "release source differs from main (%d file(s): %s)" % (
+                len(dirty_source), ", ".join(dirty_source[:3])
+            )
 
     # Never author while a previous release is still on probation: two unproven
     # changes at once make an unhealthy canary impossible to attribute.
@@ -155,7 +170,7 @@ def budget_check(stored: Dict[str, Any]) -> Optional[str]:
 # -- staging -----------------------------------------------------------------
 
 
-def stage_tree() -> Dict[str, Any]:
+def stage_tree(order_id: str = "stage") -> Dict[str, Any]:
     """An isolated tree to patch and gate, preferring a git worktree.
 
     The live tree is never edited speculatively: launchd fires every 180s and
@@ -171,7 +186,7 @@ def stage_tree() -> Dict[str, Any]:
     """
     if vcs.available():
         try:
-            worktree = vcs.worktree_add("stage")
+            worktree = vcs.worktree_add(order_id)
             return {"root": worktree["path"], "vcs": worktree}
         except vcs.GitError:
             pass  # fall through to the copy path
@@ -207,16 +222,15 @@ def unstage(stage: Dict[str, Any], keep_branch: bool = False) -> None:
 
 def editable(rel: str) -> Optional[str]:
     """Why `rel` may not be edited, or None if it may."""
-    rel = rel.strip().lstrip("./")
+    original = str(rel or "")
+    rel = control.normalize_path(original)
+    if rel.startswith("/") or ".." in rel.split("/"):
+        return "path escapes the project"
     if not rel.endswith(".py"):
         return "only Python files may be edited"
-    if ".." in rel or rel.startswith("/"):
-        return "path escapes the project"
-    if rel in PROTECTED:
-        return "%s is supervision machinery and is protected" % rel
-    if rel in EDITABLE_FILES:
-        return None
-    if any(rel.startswith(prefix) for prefix in EDITABLE_PREFIXES):
+    if control.is_protected(rel):
+        return "%s is trusted control-plane machinery and is protected" % rel
+    if control.author_editable(rel):
         return None
     return "%s is outside the editable set" % rel
 
@@ -271,7 +285,7 @@ def candidate_files(order: Dict[str, Any], root: str) -> List[str]:
     """Files this order may touch, filtered through the edit policy."""
     out: List[str] = []
     for rel in list(order.get("files") or []):
-        rel = rel.strip().lstrip("./")
+        rel = control.normalize_path(str(rel))
         if editable(rel) is None and os.path.isfile(os.path.join(root, rel)):
             out.append(rel)
     return out[: rules.AUTHOR_MAX_FILES_PER_ORDER]
@@ -374,7 +388,7 @@ def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
     files: Dict[str, str] = {}
     problems: List[str] = []
     for edit in edits:
-        rel = edit["path"]
+        rel = control.normalize_path(edit["path"])
         refusal = editable(rel)
         if refusal:
             problems.append("refused %s: %s" % (rel, refusal))
@@ -406,7 +420,8 @@ def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
     return {"files": files, "problems": problems}
 
 
-def model_patch(order: Dict[str, Any], root: str, feedback: str = "") -> Dict[str, Any]:
+def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
+                ledger_actor: str = "author") -> Dict[str, Any]:
     """Ask the gateway for edit blocks and apply them to the staging tree."""
     user, offered = build_prompt(order, root)
     if not offered:
@@ -423,6 +438,8 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "") -> Dict[st
         max_output_tokens=32_000,
         run=canary.latest_run(),
         note="order=%s %s" % (order.get("id"), order.get("kind")),
+        actor=ledger_actor,
+        purpose="work_order" if ledger_actor == "author" else "gateway_smoke_test",
     )
     if result["truncated"]:
         return {"backend": "model", "files": {}, "usage": result,
@@ -547,38 +564,42 @@ def current_revision() -> str:
         return ""
 
 
-def publish(files: Dict[str, str], order: Dict[str, Any], summary: str,
+def publish(source_root: str, order: Dict[str, Any], summary: str,
             commit: Optional[str] = None) -> Dict[str, Any]:
-    """Copy the verified patch into the live tree and release it under a canary."""
+    """Package the gated staging tree and atomically publish it under a canary.
+
+    Source and deployment roots are deliberately separate. The old implementation
+    copied files into ``PROJECT`` before invoking the release script; when PROJECT was
+    mis-resolved to releases/<revision>, that temporarily mutated the running
+    immutable release. release.sh now reads code from ``source_root`` and writes only
+    a new artifact beneath the canonical checkout.
+    """
     previous = current_revision()
-
-    backups: Dict[str, str] = {}
-    for rel, body in files.items():
-        live = PROJECT / rel
-        try:
-            backups[rel] = live.read_text(encoding="utf-8")
-        except OSError:
-            backups[rel] = ""
-        live.write_text(body, encoding="utf-8")
-
-    proc = subprocess.run(["/bin/bash", "deploy/release.sh"], cwd=str(PROJECT),
+    script = PROJECT / "deploy" / "release.sh"
+    if not script.is_file():
+        return {"published": False, "error": "canonical release script is missing"}
+    env = dict(os.environ)
+    env.update({
+        "FARM_SOURCE_ROOT": str(Path(source_root).resolve()),
+        "FARM_DEPLOY_ROOT": str(PROJECT),
+        "FARM_CANARY_ORDER_ID": str(order.get("id") or ""),
+        "FARM_CANARY_REASON": summary[:500],
+        "FARM_CANARY_COMMIT": commit or "",
+    })
+    proc = subprocess.run(["/bin/bash", str(script)], cwd=str(source_root), env=env,
                           capture_output=True, text=True, timeout=1800, check=False)
     if proc.returncode != 0:
-        # release.sh re-runs the gates against the live tree. If it refuses, put
-        # the tree back exactly as it was: a rejected patch must leave no trace.
-        for rel, body in backups.items():
-            (PROJECT / rel).write_text(body, encoding="utf-8")
         return {"published": False,
-                "error": "release.sh refused: %s" % ((proc.stdout + proc.stderr)[-1200:])}
+                "error": "release.sh refused: %s" % ((proc.stdout + proc.stderr)[-1600:])}
 
     revision = current_revision()
     if not revision or revision == previous:
         return {"published": False, "error": "release pointer did not advance"}
-
-    armed = canary.arm(revision, previous, reason=summary, order_id=str(order.get("id") or ""),
-                       commit=commit or "",
-                       store=str(PROJECT / canary.STORE), history=str(PROJECT / canary.HISTORY),
-                       run_history=str(PROJECT / canary.RUN_HISTORY))
+    armed = canary.status(
+        str(PROJECT / canary.STORE), str(PROJECT / canary.RUN_HISTORY)
+    )
+    if armed.get("revision") != revision or armed.get("status") != canary.WATCHING:
+        return {"published": False, "error": "release advanced without arming its canary"}
     return {"published": True, "revision": revision, "previous": previous, "canary": armed}
 
 
@@ -611,7 +632,7 @@ def main() -> int:
         print("AUTHOR idle: no open work orders")
         return 0
 
-    blocked = [f for f in (order.get("files") or []) if editable(str(f).strip().lstrip("./"))]
+    blocked = [f for f in (order.get("files") or []) if editable(control.normalize_path(str(f)))]
     if blocked and not candidate_files(order, str(PROJECT)):
         workorders.resolve(order["id"], workorders.ABANDONED,
                            note="requires protected or non-editable files: %s" % ", ".join(blocked[:4]),
@@ -627,10 +648,13 @@ def main() -> int:
                        step="author_change")
 
     workorders.claim(order["id"], "author_agent", run=canary.latest_run(), path=queue)
+    tokens.record("author_pass", canary.latest_run(), note="order=%s %s" % (
+        order.get("id"), order.get("kind")
+    ))
     print("AUTHOR claimed %s (%s %s): %s"
           % (order["id"], order["severity"], order["kind"], (order.get("summary") or "")[:90]))
 
-    stage = stage_tree()
+    stage = stage_tree(str(order.get("id") or "stage"))
     root = stage["root"]
     if stage.get("vcs"):
         print("  staged in a git worktree on %s at %s"
@@ -763,7 +787,7 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
                       % str(exc)[:140])
                 log({"event": "vcs_failed", "order": order["id"], "error": str(exc)[:300]})
 
-        result = publish(files, order, summary, commit=commit_info.get("sha"))
+        result = publish(root, order, summary, commit=commit_info.get("sha"))
         if not result.get("published"):
             workorders.resolve(order["id"], workorders.FAILED,
                                note=str(result.get("error"))[:400], path=queue)
@@ -773,6 +797,14 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
 
         if commit_info.get("sha"):
             vcs.tag_release(result["revision"], commit_info["sha"])
+        elif not (stage and stage.get("vcs")):
+            # Git-less fallback: persist only the files that were gated, and only
+            # after the immutable artifact is live. This never touches release/.
+            for rel in files:
+                source = Path(root) / rel
+                target = PROJECT / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(source), str(target))
 
         workorders.resolve(order["id"], workorders.PUBLISHED,
                            note=summary, release=result["revision"], path=queue,

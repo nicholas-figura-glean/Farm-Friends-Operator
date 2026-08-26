@@ -251,6 +251,8 @@ def complete(
     max_output_tokens: int = 32_000,
     run: Optional[int] = None,
     note: str = "",
+    actor: str = "author",
+    purpose: str = "reasoning",
 ) -> Dict[str, Any]:
     """One turn against the gateway, with real usage booked to the token ledger.
 
@@ -304,14 +306,15 @@ def complete(
         tokens_out = tokens.estimate_tokens(text)
         estimated = True
 
+    ledger_kind = actor if actor in {"author", "research", "test"} else "other_llm"
     tokens.record(
-        "author",
+        ledger_kind,
         run,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         note=(
-            "%s model=%s reasoning=%d%s%s"
-            % (note, chosen, reasoning, " estimated" if estimated else "", " TRUNCATED" if truncated else "")
+            "%s purpose=%s model=%s reasoning=%d%s%s"
+            % (note, purpose, chosen, reasoning, " estimated" if estimated else "", " TRUNCATED" if truncated else "")
         )[:200],
     )
 
@@ -326,6 +329,8 @@ def complete(
         "duration_seconds": round(time.monotonic() - started, 2),
         "truncated": truncated,
         "incomplete_reason": incomplete_reason,
+        "actor": ledger_kind,
+        "purpose": purpose,
     }
 
 

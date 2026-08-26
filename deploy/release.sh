@@ -12,6 +12,8 @@
 # So: releases are never mutated, never deleted while possibly in use, and the
 # pointer moves with a single rename(2).
 #
+# Source and deployment roots may differ for an autonomous worktree build:
+#   FARM_SOURCE_ROOT=/tmp/gated-worktree FARM_DEPLOY_ROOT=/canonical/project deploy/release.sh
 # Usage: deploy/release.sh [--stage-only]
 set -euo pipefail
 
@@ -25,9 +27,17 @@ if [[ "$#" -ne 0 ]]; then
   exit 2
 fi
 
-PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELEASES="$PROJECT/releases"
-LINK="$PROJECT/release"
+SCRIPT_PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_PROJECT="${FARM_SOURCE_ROOT:-$SCRIPT_PROJECT}"
+DEPLOY_PROJECT="${FARM_DEPLOY_ROOT:-$SCRIPT_PROJECT}"
+SOURCE_PROJECT="$(cd "$SOURCE_PROJECT" && pwd)"
+DEPLOY_PROJECT="$(cd "$DEPLOY_PROJECT" && pwd)"
+RELEASES="$DEPLOY_PROJECT/releases"
+LINK="$DEPLOY_PROJECT/release"
+PREVIOUS=""
+if [[ -L "$LINK" ]]; then
+  PREVIOUS="$(basename "$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$LINK")")"
+fi
 
 # A release is built from the working tree, so the working tree is what ships. If it
 # disagrees with main, then main is not a record of what is running, and the next
@@ -41,8 +51,8 @@ LINK="$PROJECT/release"
 # A warning rather than a hard failure: an operator mid-edit should still be able to
 # cut a release, and refusing would make this script fail in exactly the situation
 # where someone is trying to fix something urgently.
-if [[ -d "$PROJECT/.git" ]] && command -v git >/dev/null 2>&1; then
-  DIVERGED="$(cd "$PROJECT" && git diff --name-only main -- . 2>/dev/null | head -20)"
+if command -v git >/dev/null 2>&1 && git -C "$SOURCE_PROJECT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  DIVERGED="$(git -C "$SOURCE_PROJECT" diff --name-only main -- . 2>/dev/null | head -20)"
   if [[ -n "$DIVERGED" ]]; then
     echo "WARNING: the working tree differs from main; this release will ship the" >&2
     echo "         working tree, and main will not describe what is running:" >&2
@@ -53,7 +63,7 @@ fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"
 
-cd "$PROJECT"
+cd "$SOURCE_PROJECT"
 if [[ -e "$TARGET" ]]; then
   echo "release target already exists: $TARGET" >&2
   exit 2
@@ -70,9 +80,8 @@ fi
 /usr/bin/python3 deploy/test_architecture.py
 /usr/bin/python3 deploy/test_dashboard.py
 /usr/bin/python3 deploy/test_recovery_watch.py
-# The self-healing loop is now part of the runtime, so its suites gate releases
-# too. test_author includes a live gateway round trip that skips (not fails) when
-# the Desktop-managed token is dormant.
+# The self-healing loop is part of the runtime, so its deterministic suites gate
+# releases too. The paid live gateway smoke test is opt-in and never runs here.
 /usr/bin/python3 deploy/test_contract.py
 /usr/bin/python3 deploy/test_contract_watch.py
 /usr/bin/python3 deploy/test_vcs.py
@@ -122,8 +131,8 @@ cp experiments/*.py "$TARGET/experiments/" 2>/dev/null || true
 find "$TARGET" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # State and the journal live with the project so they survive every release.
-ln -sfn "$PROJECT/state" "$TARGET/state"
-ln -sfn "$PROJECT/farm-strategy-journal.md" "$TARGET/farm-strategy-journal.md"
+ln -sfn "$DEPLOY_PROJECT/state" "$TARGET/state"
+ln -sfn "$DEPLOY_PROJECT/farm-strategy-journal.md" "$TARGET/farm-strategy-journal.md"
 echo "$REV" > "$TARGET/RELEASED"
 
 # Verify the staged runtime and composed dashboard in isolation before anything
@@ -195,6 +204,66 @@ assert resolved == os.path.realpath(target), "flip failed: %s" % resolved
 print("pointer -> %s" % os.path.basename(resolved))
 PY
 
+# Every activated release is provisional. The release builder owns this boundary so
+# manual, autonomous, and installer-driven flips cannot accidentally bypass canary
+# coverage. The author supplies the originating work-order metadata through bounded
+# environment variables; ordinary builds receive an explicit release identity.
+if [[ -n "$PREVIOUS" ]]; then
+  CANARY_STORE="$DEPLOY_PROJECT/state/canary.json"
+  CANARY_BACKUP="$DEPLOY_PROJECT/state/.canary.pre-release.$$"
+  HAD_CANARY=0
+  if [[ -f "$CANARY_STORE" ]]; then
+    cp "$CANARY_STORE" "$CANARY_BACKUP"
+    HAD_CANARY=1
+  fi
+  if ! FARM_CANARY_REASON="${FARM_CANARY_REASON:-release $REV}" \
+       FARM_CANARY_ORDER_ID="${FARM_CANARY_ORDER_ID:-manual-release-$REV}" \
+       FARM_CANARY_COMMIT="${FARM_CANARY_COMMIT:-}" \
+       /usr/bin/python3 - "$TARGET" "$DEPLOY_PROJECT" "$REV" "$PREVIOUS" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+target, project, revision, previous = sys.argv[1:]
+sys.path.insert(0, target)
+from farm import canary
+
+root = Path(project)
+armed = canary.arm(
+    revision,
+    previous,
+    reason=os.environ.get("FARM_CANARY_REASON", "release " + revision)[:500],
+    order_id=os.environ.get("FARM_CANARY_ORDER_ID", "manual-release-" + revision)[:160],
+    commit=os.environ.get("FARM_CANARY_COMMIT", "")[:80],
+    store=str(root / canary.STORE),
+    history=str(root / canary.HISTORY),
+    run_history=str(root / canary.RUN_HISTORY),
+)
+if armed.get("status") != canary.WATCHING or armed.get("revision") != revision:
+    raise SystemExit("release activated but canary did not arm")
+print("canary armed %s -> previous %s" % (revision, previous))
+PY
+  then
+    echo "release activation failed closed: canary did not arm; restoring $PREVIOUS" >&2
+    /usr/bin/python3 - "$RELEASES/$PREVIOUS" "$LINK" <<'PY'
+import os, sys
+target, link = sys.argv[1], sys.argv[2]
+tmp = link + ".rollback.%d" % os.getpid()
+os.symlink(target, tmp)
+os.replace(tmp, link)
+PY
+    if [[ "$HAD_CANARY" -eq 1 ]]; then
+      mv "$CANARY_BACKUP" "$CANARY_STORE"
+    else
+      rm -f "$CANARY_STORE" "$CANARY_BACKUP"
+    fi
+    exit 4
+  fi
+  rm -f "$CANARY_BACKUP"
+else
+  echo "WARNING: first release has no prior revision to canary against" >&2
+fi
+
 # monitor.py composes HTML and registers routes at import time. Moving the pointer does
 # not update an already-running process: before supervision existed, one hand-started
 # server survived eight releases and served a seven-tab page for 8.5 hours. If the
@@ -217,9 +286,10 @@ find "$RELEASES" -maxdepth 2 -name 'release.new.*' -delete 2>/dev/null || true
 
 # Prune old releases, but only ones old enough that no run can still be inside
 # them (the hard timeout is 240s, so 30 minutes is generous). Never prune the
-# release the pointer currently resolves to.
+# live release or the previous revision held by the active canary: deleting the
+# latter turns an armed rollback into a promise that cannot be kept.
 LIVE="$(/usr/bin/python3 -c 'import os,sys; print(os.path.basename(os.path.realpath(sys.argv[1])))' "$LINK")"
 find "$RELEASES" -maxdepth 1 -mindepth 1 -type d -mmin +30 \
-  ! -name "$REV" ! -name "$LIVE" -exec rm -rf {} + 2>/dev/null || true
+  ! -name "$REV" ! -name "$LIVE" ! -name "$PREVIOUS" -exec rm -rf {} + 2>/dev/null || true
 
 echo "released $REV -> $LINK ($(ls -1 "$RELEASES" | wc -l | tr -d ' ') kept)"

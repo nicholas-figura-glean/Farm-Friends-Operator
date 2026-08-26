@@ -1338,7 +1338,9 @@ function kv(items) { return items.map(([k,v]) => `<div><span>${esc(k)}</span><sp
 // signals, chart and log tail frozen at their last values while the overview
 // kept refreshing -- a stuck page that looks alive.
 let LAST = null, LAST_FETCH_MS = null, FETCH_ERROR = null;
-let EVIDENCE = null, EVIDENCE_LOADING = false;
+let EVIDENCE = null, EVIDENCE_LOADING = false, EVIDENCE_LAST_FETCH_MS = null;
+let ACTIVE_TAB = "overview";
+const EVIDENCE_REFRESH_MS = 60000, ARCHITECTURE_REFRESH_MS = 30000;
 let CHART_METRIC = "produce", ACTIVE_RUN = null;
 let RACE_MODE = "absolute", RACE_RANGE = 100;
 let COST_HISTORY_METRIC = "cost", COST_HISTORY_RANGE = "all";
@@ -1403,7 +1405,13 @@ function renderHeartbeat() {
     const dataAge = Math.max(0, Math.round((Date.now() - LAST_FETCH_MS) / 1000));
     bits.push(`Updated ${new Date(LAST_FETCH_MS).toLocaleTimeString()} (${dataAge}s ago)`);
   }
-  bits.push("Auto-refresh: 2s, redraw 1s");
+  bits.push("Auto-refresh: state 2s, active findings 60s, active architecture 30s, redraw 1s");
+  if ((ACTIVE_TAB==="findings"||ACTIVE_TAB==="history") && EVIDENCE_LAST_FETCH_MS) {
+    bits.push(`Findings refreshed ${Math.max(0,Math.round((Date.now()-EVIDENCE_LAST_FETCH_MS)/1000))}s ago`);
+  }
+  if (ACTIVE_TAB==="architecture" && typeof ARCH_LAST_FETCH_MS!=="undefined" && ARCH_LAST_FETCH_MS) {
+    bits.push(`Architecture refreshed ${Math.max(0,Math.round((Date.now()-ARCH_LAST_FETCH_MS)/1000))}s ago`);
+  }
   if (PANEL_ERRORS.length) bits.push(`<span class="bad">${PANEL_ERRORS.length} panel error(s): ${esc(PANEL_ERRORS.join("; "))}</span>`);
   const html = bits.join("<br>");
   const updated = $("updated"); if (updated) updated.innerHTML = html;
@@ -1968,6 +1976,7 @@ async function loadEvidence(force=false) {
     const response=await fetch(`/api/evidence?t=${Date.now()}`,{cache:"no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     EVIDENCE=await response.json();
+    EVIDENCE_LAST_FETCH_MS=Date.now();
     safe("findings",()=>renderEvidence(EVIDENCE));
   } catch(error) {
     safe("findings",()=>renderEvidence({error:error&&error.message?error.message:String(error)}));
@@ -1978,7 +1987,13 @@ async function load() {
     const response = await fetch(`/api/state?t=${Date.now()}`, {cache:"no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     render(await response.json());
+    const now=Date.now();
     if (!EVIDENCE) loadEvidence();
+    else if ((ACTIVE_TAB==="findings"||ACTIVE_TAB==="history") &&
+             (!EVIDENCE_LAST_FETCH_MS || now-EVIDENCE_LAST_FETCH_MS>=EVIDENCE_REFRESH_MS)) loadEvidence(true);
+    if (ACTIVE_TAB==="architecture" && typeof loadArchitecture==="function" &&
+        (typeof ARCH_LAST_FETCH_MS==="undefined" || !ARCH_LAST_FETCH_MS ||
+         now-ARCH_LAST_FETCH_MS>=ARCHITECTURE_REFRESH_MS)) loadArchitecture(true);
   } catch (error) {
     // Keep polling: a monitor restart or a half-written read must not end the
     // refresh loop. The heartbeat shows the page is trying, not dead.
@@ -1990,6 +2005,7 @@ async function load() {
 function activateTab(name, writeHash) {
   const allowed=["overview","pipeline","cost","history","findings","game","wire","architecture"];
   if (!allowed.includes(name)) name="overview";
+  ACTIVE_TAB=name;
   document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===name)));
   document.querySelectorAll(".tab").forEach(panel=>{panel.hidden=panel.id!==`tab-${name}`;});
   if (writeHash && typeof location!=="undefined" && location.hash!==`#${name}`) location.hash=name;

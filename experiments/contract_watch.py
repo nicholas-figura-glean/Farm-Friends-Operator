@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import contract, journal, ledger, policy, workorders  # noqa: E402
+from farm import contract, journal, ledger, parse, policy, workorders  # noqa: E402
 from farm.mcp import Client, McpError  # noqa: E402
 
 STATE = PROJECT / "state"
@@ -55,6 +55,20 @@ LOCK = STATE / ".contract-watch.lock"
 # Severities that justify spending a model on a code change. `additive` and
 # `cosmetic` are recorded and absorbed without ever waking the author.
 ACTIONABLE = ("breaking", "shape", "opportunity")
+
+# A response format matters only when local code consumes it. These are the same
+# parsers the cycle uses. Tools absent from this map have response bodies that are
+# recorded for evidence but do not influence a decision, so format variation cannot
+# justify a code rewrite.
+PARSER_BY_TOOL = {
+    "list_farm": parse.parse_farm,
+    "leaderboard": parse.parse_leaderboard,
+    "collect_produce": parse.parse_collect,
+    "sell": parse.parse_sell,
+    "buy_feed": parse.parse_buy_feed,
+    "adopt_animal": parse.parse_adopt,
+    "farm_events": parse.parse_events,
+}
 
 
 def utcnow() -> str:
@@ -77,6 +91,41 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 
 
 # -- turning a change into an instruction ------------------------------------
+
+
+def latest_raw_sample(tool: str, raw_dir: Path) -> Optional[Path]:
+    candidates: List[Path] = []
+    try:
+        entries = list(raw_dir.glob("*.txt"))
+    except OSError:
+        return None
+    for path in entries:
+        if contract._tool_for_raw(path.stem) == tool:
+            candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def shape_parser_verdict(change: Dict[str, Any], raw_dir: Path) -> Dict[str, Any]:
+    """Whether the current consumer accepts the exact sample that changed shape."""
+    tool = str(change.get("tool") or "")
+    parser = PARSER_BY_TOOL.get(tool)
+    if parser is None:
+        return {"accepted": True, "consumed": False,
+                "reason": "no runtime parser consumes %s response text" % tool}
+    sample = latest_raw_sample(tool, raw_dir)
+    if sample is None:
+        return {"accepted": None, "consumed": True,
+                "reason": "no current raw sample available for parser verification"}
+    try:
+        text = sample.read_text(encoding="utf-8", errors="replace")
+        parser(text)
+    except Exception as exc:  # noqa: BLE001 - any consumer failure is actionable
+        return {"accepted": False, "consumed": True, "sample": sample.name,
+                "reason": "%s: %s" % (type(exc).__name__, str(exc)[:180])}
+    return {"accepted": True, "consumed": True, "sample": sample.name,
+            "reason": "current parser accepted the captured sample"}
 
 
 def order_for(change: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str]]]:
@@ -222,6 +271,81 @@ def order_for(change: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str
     return None
 
 
+def reconcile_orders(observed: List[Dict[str, Any]], actionable: List[Dict[str, Any]],
+                     queue_path: str,
+                     settled: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Retire stale contract orders instead of accumulating every transient shape.
+
+    Exact change ids remain idempotent. This adds lifecycle reconciliation: an open
+    order is abandoned when its drift disappeared, or when a newly confirmed change
+    for the same tool and family supersedes it. Claimed and terminal work is never
+    touched here.
+    """
+    observed_ids = {str(change.get("id") or "") for change in observed}
+    settled_ids = {str(change.get("id") or "") for change in (settled or [])}
+    settled_families = {
+        (str(change.get("tool") or ""), str(change.get("kind") or ""))
+        for change in (settled or [])
+    }
+    observed_families = {
+        (str(change.get("tool") or ""), str(change.get("kind") or ""))
+        for change in observed
+    }
+    actionable_by_family = {
+        (str(change.get("tool") or ""), str(change.get("kind") or "")): str(change.get("id") or "")
+        for change in actionable
+    }
+    current_orders = workorders.current(queue_path)
+    open_ids = {
+        str(order.get("id") or "") for order in current_orders.values()
+        if order.get("status") == workorders.OPEN
+    }
+    # If the exact currently observed variant already has an order, it is a better
+    # representative of that family even before another confirmation streak finishes.
+    # Keep it and collapse historical mood/symbol/template variants around it.
+    observed_open_by_family = {
+        (str(change.get("tool") or ""), str(change.get("kind") or "")): str(change.get("id") or "")
+        for change in observed if str(change.get("id") or "") in open_ids
+    }
+    retired: List[Dict[str, Any]] = []
+    for order in current_orders.values():
+        if order.get("status") != workorders.OPEN or order.get("source") != "contract_watch":
+            continue
+        order_id = str(order.get("id") or "")
+        family = (str(order.get("tool") or ""), str(order.get("kind") or ""))
+        # Opportunities are durable research tasks, not repairs tied to a pinned
+        # incompatibility. Absorbing a safe additive contract change must not erase
+        # the experiment that still needs to evaluate it.
+        if order.get("severity") == "opportunity":
+            continue
+        if order_id in settled_ids or family in settled_families:
+            resolved = workorders.resolve(
+                order_id,
+                workorders.SUPERSEDED,
+                note="current response sample is accepted by its runtime consumer",
+                path=queue_path,
+            )
+            if resolved:
+                retired.append(resolved)
+            continue
+        if order_id in observed_ids:
+            continue
+        replacement = actionable_by_family.get(family) or observed_open_by_family.get(family)
+        if replacement:
+            reason = "superseded by current contract change %s" % replacement
+        elif family not in observed_families:
+            reason = "contract drift no longer appears in the latest scan"
+        else:
+            # A variant is visible but has not met the confirmation streak. Keep the
+            # existing order until the replacement is itself trustworthy.
+            continue
+        resolved = workorders.resolve(order_id, workorders.SUPERSEDED,
+                                      note=reason, path=queue_path)
+        if resolved:
+            retired.append(resolved)
+    return retired
+
+
 # -- main --------------------------------------------------------------------
 
 
@@ -285,10 +409,50 @@ def main() -> int:
     prior_streaks = stored.get("streaks") if isinstance(stored.get("streaks"), dict) else {}
     confirmed, streaks = contract.confirm(changes, prior_streaks)
 
-    actionable = [c for c in confirmed if c.get("severity") in ACTIONABLE]
-    absorbable = [c for c in changes if c.get("severity") not in ACTIONABLE]
+    confirmed_ids = {str(change.get("id") or "") for change in confirmed}
+    accepted_shapes: List[Dict[str, Any]] = []
+    failed_shapes: List[Dict[str, Any]] = []
+    unknown_shapes: List[Dict[str, Any]] = []
+    raw_dir = PROJECT / contract.RAW_DIR
+    for change in confirmed:
+        if change.get("severity") != "shape":
+            continue
+        verdict = shape_parser_verdict(change, raw_dir)
+        change["parser_validation"] = verdict
+        if verdict.get("accepted") is True:
+            accepted_shapes.append(change)
+        elif verdict.get("accepted") is False:
+            failed_shapes.append(change)
+        else:
+            unknown_shapes.append(change)
 
-    # File orders for confirmed, actionable drift.
+    pending_shapes = [
+        change for change in changes
+        if change.get("severity") == "shape"
+        and str(change.get("id") or "") not in confirmed_ids
+    ]
+    blocking = [c for c in confirmed if c.get("severity") == "breaking"] + failed_shapes
+    opportunities = [c for c in confirmed if c.get("severity") == "opportunity"]
+    actionable = blocking + opportunities
+    absorbable = [c for c in changes if c.get("severity") in {"additive", "cosmetic"}]
+    absorbable.extend(accepted_shapes)
+
+    current_orders = workorders.current(queue_path)
+    published_repairs = [
+        change for change in blocking
+        if (current_orders.get(str(change.get("id") or "")) or {}).get("status") == workorders.PUBLISHED
+    ]
+    accepted_after_publish = 0
+    if blocking and len(published_repairs) == len(blocking):
+        accepted_after_publish = len(blocking)
+        blocking = []
+        actionable = opportunities
+
+    retired = reconcile_orders(changes, actionable, queue_path, settled=accepted_shapes)
+
+    # File orders for confirmed, actionable drift. Opportunities are durable research
+    # tasks but do not pin the compatibility baseline; only breakage or a parser that
+    # rejects the exact current sample does.
     filed: List[Dict[str, Any]] = []
     for change in actionable:
         built = order_for(change)
@@ -302,11 +466,11 @@ def main() -> int:
         if order:
             filed.append(order)
 
-    # Absorb changes that need no code so they stop appearing in every diff. The
-    # baseline advances only for the untouched parts of the contract: anything
-    # under an actionable change stays pinned until the fix ships.
-    if not actionable and absorbable:
+    baseline_advanced = False
+    if changes and not blocking and not unknown_shapes and not pending_shapes:
         contract.save_baseline(snapshot, baseline_path)
+        baseline = snapshot
+        baseline_advanced = True
 
     scan_row = {
         "ts": utcnow(),
@@ -315,11 +479,18 @@ def main() -> int:
         "changes": len(changes),
         "actionable": len(actionable),
         "orders_filed": len(filed),
-        "absorbed": len(absorbable) if not actionable else 0,
+        "orders_retired": len(retired),
+        "accepted_after_publish": accepted_after_publish,
+        "parser_accepted": len(accepted_shapes),
+        "parser_failed": len(failed_shapes),
+        "parser_unknown": len(unknown_shapes) + len(pending_shapes),
+        "baseline_advanced": baseline_advanced,
+        "absorbed": len(absorbable) if baseline_advanced else 0,
         "tools": len(snapshot["tools"]),
         "detail": [
             {"severity": c["severity"], "kind": c["kind"], "tool": c["tool"],
-             "summary": c["summary"][:160], "seen": c.get("seen_consecutive")}
+             "summary": c["summary"][:160], "seen": c.get("seen_consecutive"),
+             "parser": c.get("parser_validation")}
             for c in changes[:20]
         ],
     }

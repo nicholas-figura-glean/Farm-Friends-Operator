@@ -27,41 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-PROJECT = Path(__file__).resolve().parent.parent
+from . import control
 
-# Every process that must be alive for the loop and its operator view, with what its
-# absence actually costs. The dashboard used to watch two of the original seven, so five
-# could have been dead behind a green page -- including the author agent, whose
-# silence looks exactly like "no repairs were needed".
-AGENTS: List[Dict[str, str]] = [
-    {"key": "cycle", "label": "com.nickfigura.farmfriends",
-     "role": "plays the farm", "lost": "the farm stops playing entirely"},
-    {"key": "supervisor", "label": "com.nickfigura.farmfriends.supervisor",
-     "role": "watches the loop", "lost": "failures stop being escalated"},
-    {"key": "expand", "label": "com.nickfigura.farmfriends.expand",
-     "role": "buys capacity", "lost": "the herd stops growing"},
-    {"key": "recovery", "label": "com.nickfigura.farmfriends.recovery",
-     "role": "restarts a wedged loop", "lost": "a wedged loop stays wedged"},
-    {"key": "contract", "label": "com.nickfigura.farmfriends.contract",
-     "role": "detects endpoint drift", "lost": "schema changes go unnoticed"},
-    {"key": "author", "label": "com.nickfigura.farmfriends.author",
-     "role": "writes the repairs", "lost": "drift is detected but never fixed"},
-    {"key": "research", "label": "com.nickfigura.farmfriends.research",
-     "role": "finds unused strategy", "lost": "no new strategy is explored"},
-    # Listed last but watched like the rest. An agent that reports on the health of
-    # every readout is worthless if its own silence goes unnoticed, and its silence is
-    # especially quiet: nothing else writes the architecture ledger or notices a
-    # broken tab, so losing it means the operator view degrades invisibly.
-    {"key": "dashboard", "label": "com.nickfigura.farmfriends.dashboard",
-     "role": "verifies the operator view",
-     "lost": "broken dashboard readouts stop being reported"},
-    # Distinct from the verifier above. This is the long-running HTTP process a browser
-    # actually reaches. It was hand-started and survived eight releases, serving stale
-    # routes while every in-process verifier remained green.
-    {"key": "monitor", "label": "com.nickfigura.farmfriends.monitor",
-     "role": "serves the operator view",
-     "lost": "the dashboard URL is unavailable"},
-]
+PROJECT = control.project_root(Path(__file__).resolve().parent.parent)
+
+# This public alias remains for callers and tests, but the declarations themselves
+# live in the shared control manifest used by supervision and architecture too.
+AGENTS: List[Dict[str, Any]] = [dict(service) for service in control.SERVICES]
 
 
 def _guard(fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
@@ -145,7 +117,10 @@ def canary_state() -> Dict[str, Any]:
 
     st = canary.status()
     verdict = st.get("verdict") or {}
-    info = st.get("canary") or {}
+    # canary.status() is a flat record with a nested verdict. Older prototypes
+    # returned the record under ``canary``; accept both so the operator view never
+    # says "watching None" while a real release is on probation.
+    info = st.get("canary") or st
     return {
         "status": verdict.get("status") or st.get("status") or "inactive",
         "revision": info.get("revision"),
@@ -186,6 +161,18 @@ def orders_state(limit: int = 12) -> Dict[str, Any]:
     # question about whether the loop is keeping up.
     rank = {"open": 0, "claimed": 1, "failed": 2, "published": 3, "rejected": 4}
     rows.sort(key=lambda r: (rank.get(str(r.get("status")), 9), -(r.get("age_seconds") or 0)))
+    pending = [r for r in rows if r.get("status") in {"open", "claimed"}]
+    repairs = [r for r in pending if r.get("severity") in {"breaking", "shape", "degraded"}]
+    research = [r for r in pending if r not in repairs]
+    summary = dict(summary)
+    summary["oldest_open_age_seconds"] = max(
+        (int(r.get("age_seconds") or 0) for r in pending), default=None
+    )
+    summary["repair_open"] = len(repairs)
+    summary["research_open"] = len(research)
+    summary["oldest_repair_age_seconds"] = max(
+        (int(r.get("age_seconds") or 0) for r in repairs), default=None
+    )
     return {"summary": summary, "orders": rows[:limit], "total": len(rows)}
 
 
@@ -232,7 +219,8 @@ def vcs_state() -> Dict[str, Any]:
     if not vcs.available():
         return {"available": False}
     recent = vcs.recent(limit=10)
-    dirty = vcs.dirty_paths()
+    dirty = vcs.dirty_paths(include_untracked=True)
+    dirty_source = [path for path in dirty if control.is_release_source(path)]
 
     def _git(args: List[str]) -> str:
         # vcs exposes no "what branch am I on" helper -- `branch_name(order_id)` builds
@@ -251,6 +239,7 @@ def vcs_state() -> Dict[str, Any]:
         "head": vcs.short(vcs.head() or ""),
         "clean": not dirty,
         "dirty_paths": dirty[:8],
+        "dirty_source_paths": dirty_source[:12],
         "subject": recent[0]["subject"] if recent else None,
         "recent": recent,
         "release_tags": tags,
@@ -316,6 +305,7 @@ def llm_state() -> Dict[str, Any]:
         "passes_today": passes,
         "spend_today": cost,
         "budget": getattr(rules, "AUTHOR_MAX_COST_USD_PER_DAY", None),
+        "max_passes": getattr(rules, "AUTHOR_MAX_ORDERS_PER_DAY", None),
     }
 
 
@@ -373,7 +363,7 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     for key in ag.get("down") or []:
         spec = next((a for a in AGENTS if a["key"] == key), {})
         out.append({
-            "severity": "critical" if key in ("cycle", "author") else "warn",
+            "severity": "critical" if spec.get("critical") else "warn",
             "what": "agent %s is not loaded" % spec.get("label", key),
             "why": spec.get("lost", "unknown effect"),
         })
@@ -386,10 +376,26 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
 
     orders = (view.get("orders") or {}).get("summary") or {}
     failed = int(orders.get("failed") or 0)
+    open_count = int(orders.get("open") or 0)
+    repair_count = int(orders.get("repair_open") or 0)
+    oldest = orders.get("oldest_repair_age_seconds")
     if failed:
         out.append({"severity": "warn",
                     "what": "%d work order(s) exhausted their attempts" % failed,
                     "why": "these need a human or a different approach"})
+    if repair_count and isinstance(oldest, int) and oldest > 3600:
+        out.append({"severity": "warn",
+                    "what": "%d repair(s) queued; oldest is %d minutes old" % (
+                        repair_count, oldest // 60),
+                    "why": "a loaded author is not enough; the repair queue is not making progress"})
+
+    vcs_view = view.get("vcs") or {}
+    dirty_source = vcs_view.get("dirty_source_paths") or []
+    if dirty_source:
+        out.append({"severity": "warn",
+                    "what": "working source differs from main; autonomous authoring is paused",
+                    "why": "%d release-source file(s) are uncommitted, including %s" % (
+                        len(dirty_source), ", ".join(str(path) for path in dirty_source[:3]))})
 
     con = view.get("contract") or {}
     age = con.get("last_scan_age_seconds")
@@ -403,6 +409,12 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         out.append({"severity": "warn",
                     "what": "model gateway unavailable",
                     "why": "mechanical repairs still work; reasoned patches do not"})
+    passes = llm_view.get("passes_today")
+    maximum = llm_view.get("max_passes")
+    if repair_count and isinstance(passes, int) and isinstance(maximum, int) and passes >= maximum:
+        out.append({"severity": "warn",
+                    "what": "author pass budget is exhausted with %d repair(s) queued" % repair_count,
+                    "why": "%d/%d real author passes used in the last 24 hours" % (passes, maximum)})
 
     for section in ("agents", "canary", "orders", "contract", "vcs", "research", "llm"):
         err = (view.get(section) or {}).get("error")

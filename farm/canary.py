@@ -43,15 +43,16 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import rules
+from . import control, rules
 
 STORE = os.path.join("state", "canary.json")
 # The real project root. Used only to decide whether a caller is operating on live
 # state or on a temp directory, which is what keeps a test suite from rewriting
 # real git history. See record_inverse_commit().
-PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT = str(control.project_root(Path(__file__).resolve().parent.parent))
 HISTORY = os.path.join("state", "canary.ndjson")
 RUN_HISTORY = os.path.join("state", "history.ndjson")
 
@@ -366,11 +367,12 @@ def _looks_broken(row: Dict[str, Any]) -> bool:
 
 def resolve(
     verdict: Dict[str, Any],
-    project: str = ".",
+    project: Optional[str] = None,
     store: str = STORE,
     history: str = HISTORY,
 ) -> Dict[str, Any]:
     """Act on a verdict: clear a healthy canary, revert a regressed one."""
+    project = project or PROJECT
     status = verdict.get("status")
     if status not in (HEALTHY, REGRESSED):
         return {"acted": False, "status": status, "reason": verdict.get("reason", "")}
@@ -404,7 +406,7 @@ def resolve(
     return outcome
 
 
-def revert(previous: str, project: str = ".") -> Dict[str, Any]:
+def revert(previous: str, project: Optional[str] = None) -> Dict[str, Any]:
     """Point `release` back at `previous` with the same atomic rename(2) flip.
 
     `mv` is not usable here: BSD mv follows an existing symlink-to-directory and
@@ -412,6 +414,7 @@ def revert(previous: str, project: str = ".") -> Dict[str, Any]:
     stale. That bug already pinned launchd to old code once, so the flip is done
     with os.replace exactly as deploy/release.sh does it.
     """
+    project = project or PROJECT
     if not previous:
         return {"reverted": False, "error": "no previous revision recorded"}
 

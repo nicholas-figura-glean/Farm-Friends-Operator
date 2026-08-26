@@ -10,9 +10,9 @@ Everything runs against a temp sandbox tree with `author_agent.PROJECT`
 redirected, so `publish()` and `deploy/release.sh` are never reached and the live
 release pointer is never touched.
 
-One test makes a real call to the Glean llm_proxy gateway to prove the model
-backend works end to end. It is skipped, not failed, when the token is dormant --
-an expired credential is not a code defect.
+An opt-in test can make a real call to the Glean llm_proxy gateway to prove the
+model backend works end to end. Deterministic release gates never make that paid,
+non-reproducible call; run with FARM_RUN_LIVE_LLM_TEST=1 when explicitly wanted.
 """
 
 import json
@@ -27,7 +27,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "experiments"))
 
-from farm import canary, llm, rules, workorders  # noqa: E402
+from farm import canary, control, llm, rules, tokens, vcs, workorders  # noqa: E402
 
 import author_agent  # noqa: E402
 
@@ -55,7 +55,12 @@ section("the edit policy refuses what it must")
 
 check("farm modules are editable", author_agent.editable("farm/parse.py") is None)
 check("experiments are editable", author_agent.editable("experiments/expand.py") is None)
-check("run.py is editable", author_agent.editable("run.py") is None)
+check("run.py is protected orchestration", author_agent.editable("run.py") is not None)
+check("monitor.py remains repairable behind independent gates",
+      author_agent.editable("monitor.py") is None)
+check("author resolves the canonical deployable checkout",
+      (author_agent.PROJECT / "deploy" / "release.sh").is_file()
+      and author_agent.PROJECT == control.project_root())
 
 for protected in author_agent.PROTECTED:
     check("%s is protected" % protected, author_agent.editable(protected) is not None)
@@ -208,6 +213,49 @@ no_files = author_agent.build_prompt(dict(prompt_order, files=["farm/canary.py"]
 check("a protected target is not offered to the model", no_files[1] == [], str(no_files[1]))
 
 
+# -- isolated publication ----------------------------------------------------
+
+section("publication packages the gated source without editing the running release")
+
+captured = {}
+revisions = iter(["rev-old", "rev-new"])
+saved_run = author_agent.subprocess.run
+saved_revision = author_agent.current_revision
+saved_status = canary.status
+try:
+    def _fake_run(args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        return author_agent.subprocess.CompletedProcess(args, 0, "released", "")
+
+    author_agent.subprocess.run = _fake_run
+    author_agent.current_revision = lambda: next(revisions)
+    canary.status = lambda *a, **k: {"status": canary.WATCHING, "revision": "rev-new"}
+    publication = author_agent.publish(
+        sandbox,
+        {"id": "order-isolated"},
+        "isolated publication test",
+        commit="abc123",
+    )
+finally:
+    author_agent.subprocess.run = saved_run
+    author_agent.current_revision = saved_revision
+    canary.status = saved_status
+
+check("publication advances only after release.sh succeeds", publication.get("published") is True,
+      str(publication))
+check("release source is the gated staging tree",
+      (captured.get("env") or {}).get("FARM_SOURCE_ROOT") == os.path.realpath(sandbox),
+      str((captured.get("env") or {}).get("FARM_SOURCE_ROOT")))
+check("deployment root is the canonical checkout",
+      (captured.get("env") or {}).get("FARM_DEPLOY_ROOT") == str(author_agent.PROJECT))
+check("publication invokes the canonical release script",
+      captured.get("args", [None, None])[1] == str(author_agent.PROJECT / "deploy" / "release.sh"),
+      str(captured.get("args")))
+check("author source no longer writes candidate bodies into PROJECT before release",
+      "live.write_text(body" not in pathlib.Path(author_agent.__file__).read_text(encoding="utf-8"))
+
+
 # -- canary ------------------------------------------------------------------
 
 section("canary arming and verdicts")
@@ -306,6 +354,9 @@ check("per-animal rate needs a positive herd to be defined",
 
 section("revert safety")
 
+check("default rollback root is the canonical checkout, not release/",
+      pathlib.Path(canary.PROJECT) == author_agent.PROJECT
+      and (pathlib.Path(canary.PROJECT) / "releases").is_dir(), str(canary.PROJECT))
 rev = tempfile.mkdtemp()
 os.makedirs(os.path.join(rev, "releases", "revA"))
 os.makedirs(os.path.join(rev, "releases", "revB"))
@@ -369,6 +420,25 @@ check("a resolved canary cannot revert again",
 
 section("authoring is rationed")
 
+# Passes and completions are different accounting units. A release smoke test used
+# to write 49 author completion rows and permanently consume an 8-pass daily budget.
+saved_ledger = tokens.LEDGER
+with tempfile.TemporaryDirectory() as budget_tmp:
+    tokens.LEDGER = os.path.join(budget_tmp, "tokens.ndjson")
+    try:
+        tokens.record("author_pass", 1, note="order=a")
+        tokens.record("author", 1, tokens_in=100, tokens_out=10, note="completion retry 1")
+        tokens.record("author", 1, tokens_in=100, tokens_out=10, note="completion retry 2")
+        tokens.record("research", 1, tokens_in=1000, tokens_out=100, note="hypothesis")
+        tokens.record("test", 1, tokens_in=1000, tokens_out=100, note="smoke")
+        pass_count, author_cost = author_agent.spend_today()
+        check("one claimed order counts as one pass despite retries", pass_count == 1,
+              str(pass_count))
+        check("only author completions count against author dollar budget",
+              author_cost == round(tokens.cost(100, 10) * 2, 4), str(author_cost))
+    finally:
+        tokens.LEDGER = saved_ledger
+
 check("a live canary blocks a new authoring pass",
       "canary" in (author_agent.budget_check({}) or "").lower()
       or author_agent.budget_check({}) is None or True)
@@ -381,12 +451,22 @@ check("a live canary blocks a new authoring pass",
 saved = canary.latest_run
 saved_spend = author_agent.spend_today
 saved_active = canary.active
+saved_dirty = vcs.dirty_paths
 canary.latest_run = lambda *a, **k: 100
 author_agent.spend_today = lambda *a, **k: (0, 0.0)
 canary.active = lambda *a, **k: False
+vcs.dirty_paths = lambda *a, **k: []
 try:
-    check("with budget and canary clear, the interval rule is what decides",
+    check("with budget, source and canary clear, the interval rule is what decides",
           author_agent.budget_check({}) is None, str(author_agent.budget_check({})))
+    vcs.dirty_paths = lambda *a, **k: ["farm/parse.py", "farm-strategy-journal.md"]
+    reason = author_agent.budget_check({})
+    check("uncommitted release source blocks a stale-base authoring pass",
+          reason is not None and "differs from main" in reason, str(reason))
+    vcs.dirty_paths = lambda *a, **k: ["farm-strategy-journal.md"]
+    check("the linked strategy journal alone does not block code repair",
+          author_agent.budget_check({}) is None, str(author_agent.budget_check({})))
+    vcs.dirty_paths = lambda *a, **k: []
     reason = author_agent.budget_check({"last_authored_run": 98})
     check("authoring twice in quick succession is blocked",
           reason is not None and "run" in reason, str(reason))
@@ -397,6 +477,7 @@ finally:
     canary.latest_run = saved
     author_agent.spend_today = saved_spend
     canary.active = saved_active
+    vcs.dirty_paths = saved_dirty
 
 
 # -- real gateway round trip -------------------------------------------------
@@ -404,7 +485,10 @@ finally:
 section("model backend against the live gateway")
 
 availability = llm.availability()
-if not availability.get("available"):
+if os.environ.get("FARM_RUN_LIVE_LLM_TEST") != "1":
+    SKIPPED.append("gateway round trip: opt-in only")
+    print("  skip (set FARM_RUN_LIVE_LLM_TEST=1 for a paid live smoke test)")
+elif not availability.get("available"):
     SKIPPED.append("gateway round trip: %s" % availability.get("reason"))
     print("  skip (gateway dormant: %s)" % availability.get("reason"))
 else:
@@ -448,7 +532,7 @@ def parse_animal(line):
         "files": ["farm/parse.py"],
     }
 
-    patch = author_agent.model_patch(live_order, real)
+    patch = author_agent.model_patch(live_order, real, ledger_actor="test")
     check("the gateway returned a usable patch", bool(patch.get("files")),
           "problems=%s" % patch.get("problems"))
     if patch.get("files"):

@@ -290,6 +290,8 @@ def model_hypotheses(context: Dict[str, Any]) -> List[Dict[str, Any]]:
         max_output_tokens=16_000,
         run=canary.latest_run(),
         note="research hypotheses",
+        actor="research",
+        purpose="hypothesis_generation",
     )
     if result["truncated"]:
         return []

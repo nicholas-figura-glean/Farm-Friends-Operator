@@ -175,9 +175,31 @@ def _append_event(path: Path, event: Dict[str, Any]) -> None:
         handle.write(json.dumps(event, sort_keys=True, allow_nan=False, default=str) + "\n")
 
 
+def _normalize_subject(alert_class: str, value: str) -> str:
+    target = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    if alert_class == "knob_age":
+        # Alert prose carries a changing age ("unchanged for 41 runs", then 42),
+        # but the uncertainty is the knob or claim before that phrase.
+        target = re.split(
+            r"\s+(?:unchanged\s+for|evidence\s+is\s+overdue|evidence\s+overdue|last\s+validated)\b",
+            target,
+            maxsplit=1,
+        )[0]
+        # A knob's identity is its name, not whichever value happened to be in the
+        # alert. Legacy alerts alternated between ``adopt_cap`` and ``adopt_cap=30``.
+        target = re.sub(r"\s*=\s*[-+]?\d+(?:\.\d+)?(?:/s)?$", "", target)
+    elif alert_class == "model_drift":
+        target = re.split(
+            r"\s+(?:recent|changed|drifted|no\s+longer\s+predicts)\b",
+            target,
+            maxsplit=1,
+        )[0]
+    return target.strip(" :;,.") or "farm"
+
+
 def _subject(alert_class: str, alert: str, explicit: Optional[str] = None) -> str:
     if explicit:
-        return explicit.strip().lower()
+        return _normalize_subject(alert_class, explicit)
     patterns = [
         r"^RIVAL WAKE:\s*([^:]+?)(?:\s+recent|\s+rate|\s+herd|$)",
         r"^RIVAL GROWING:\s*([^:]+?)(?:\s+herd|$)",
@@ -187,11 +209,11 @@ def _subject(alert_class: str, alert: str, explicit: Optional[str] = None) -> st
     for pattern in patterns:
         found = re.search(pattern, alert or "", re.IGNORECASE)
         if found:
-            return found.group(1).strip().lower()
+            return _normalize_subject(alert_class, found.group(1))
     if alert_class in {"knob_age", "model_drift", "policy_drift"}:
         found = re.search(r"(?:KNOB AGE|MODEL DRIFT|POLICY DRIFT):\s*([^:;,]+)", alert or "", re.I)
         if found:
-            return found.group(1).strip().lower()
+            return _normalize_subject(alert_class, found.group(1))
     return "farm"
 
 
@@ -199,6 +221,98 @@ def identity(alert_class: str, alert: str, subject: Optional[str] = None) -> Tup
     target = _subject(alert_class, alert, subject)
     key = "%s:%s" % (alert_class, target)
     return "q-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16], key
+
+
+def _collapse_duplicates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Merge legacy rows that describe the same class + canonical subject."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for original in rows:
+        row = dict(original)
+        alert_class = str(row.get("class") or "unknown")
+        qid, key = identity(alert_class, str(row.get("alert") or ""), str(row.get("subject") or ""))
+        row["_canonical_id"] = qid
+        row["_canonical_key"] = key
+        groups.setdefault(qid, []).append(row)
+
+    collapsed: List[Dict[str, Any]] = []
+    migrations: List[Dict[str, Any]] = []
+    for qid, members in groups.items():
+        # Prefer an already-canonical row, otherwise the oldest durable record.
+        winner = next((dict(row) for row in members if row.get("id") == qid), None)
+        if winner is None:
+            winner = dict(sorted(members, key=lambda row: (
+                row.get("opened_run") if isinstance(row.get("opened_run"), int) else 10**18,
+                str(row.get("opened_ts") or ""), str(row.get("id") or ""),
+            ))[0])
+        key = str(winner.pop("_canonical_key", "%s:farm" % winner.get("class")))
+        winner.pop("_canonical_id", None)
+        removed = [str(row.get("id")) for row in members if row.get("id") != qid]
+        winner["id"] = qid
+        winner["key"] = key
+        winner["subject"] = key.split(":", 1)[1]
+        winner["occurrences"] = sum(max(1, int(row.get("occurrences") or 1)) for row in members)
+        winner["generation"] = max(int(row.get("generation") or 1) for row in members)
+        winner["evidence_refs"] = sorted({
+            str(ref) for row in members for ref in (row.get("evidence_refs") or []) if ref
+        })
+        priorities = [str(row.get("priority") or "medium") for row in members]
+        winner["priority"] = max(priorities, key=lambda value: _PRIORITY.get(value, 0))
+        active = [row for row in members if row.get("status") in {"open", "probing"}]
+        if active:
+            winner["status"] = "probing" if any(row.get("status") == "probing" for row in active) else "open"
+            winner["answer"] = None
+            winner["closed_run"] = None
+            winner["closed_ts"] = None
+        latest = max(members, key=lambda row: (
+            row.get("last_seen_run") if isinstance(row.get("last_seen_run"), int) else -1,
+            str(row.get("last_seen_ts") or ""),
+        ))
+        for field in ("last_seen_run", "last_seen_ts", "alert", "decision_bundle"):
+            if latest.get(field) is not None:
+                winner[field] = latest.get(field)
+        opened_runs = [row.get("opened_run") for row in members if isinstance(row.get("opened_run"), int)]
+        opened_times = [str(row.get("opened_ts")) for row in members if row.get("opened_ts")]
+        winner["opened_run"] = min(opened_runs) if opened_runs else winner.get("opened_run")
+        winner["opened_ts"] = min(opened_times) if opened_times else winner.get("opened_ts")
+        collapsed.append(winner)
+        if len(members) > 1 or removed or any(row.get("id") != qid for row in members):
+            migrations.append({
+                "question_id": qid,
+                "class": winner.get("class"),
+                "subject": winner.get("subject"),
+                "merged": len(members),
+                "removed_ids": removed,
+            })
+
+    collapsed.sort(key=lambda value: (value.get("opened_run") or 0, value.get("id")))
+    return collapsed, migrations
+
+
+def reconcile_duplicates(run: Optional[int] = None) -> Dict[str, Any]:
+    """Persist canonical identities while retaining an append-only migration audit."""
+    current_path, events_path, lock_path = _paths()
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        original = load_all()
+        rows, migrations = _collapse_duplicates(original)
+        if migrations:
+            _write_current(current_path, rows)
+            for migration in migrations:
+                _append_event(events_path, dict(
+                    migration,
+                    schema_version=SCHEMA_VERSION,
+                    event="deduplicated",
+                    ts=_utcnow(),
+                    run=run,
+                ))
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return {
+        "before": len(original),
+        "after": len(rows),
+        "merged_groups": len(migrations),
+        "removed": len(original) - len(rows),
+    }
 
 
 def template(alert_class: str) -> Dict[str, Any]:
@@ -234,7 +348,7 @@ def open_or_update(
 
     with open(lock_path, "a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        rows = load_all()
+        rows, migrations = _collapse_duplicates(load_all())
         existing = next((value for value in rows if value.get("id") == qid), None)
         opened = existing is None
         reopened = bool(existing and existing.get("status") in {"answered", "abandoned"})
@@ -289,6 +403,14 @@ def open_or_update(
                 event_name = "updated"
         rows.sort(key=lambda value: (value.get("opened_run") or 0, value.get("id")))
         _write_current(current_path, rows)
+        for migration in migrations:
+            _append_event(events_path, dict(
+                migration,
+                schema_version=SCHEMA_VERSION,
+                event="deduplicated",
+                ts=_utcnow(),
+                run=run,
+            ))
         _append_event(
             events_path,
             {
