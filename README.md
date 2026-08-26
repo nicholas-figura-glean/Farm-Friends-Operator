@@ -265,7 +265,7 @@ visible:
   contracts; `dashboard/test_mcp_wire.js` verifies 71 switchboard contracts;
   `deploy/test_tool_trace.py` verifies 21 telemetry, pairing, error and
   redaction contracts; `deploy/test_dashboard.py` runs the real page script and
-  snapshot against a DOM stub for 144 checks; topology and the architecture payload
+  snapshot against a DOM stub for 145 checks; topology and the architecture payload
   have their own suites. Run the complete gate with `deploy/test_dashboard.sh`.
   Render the current real run without opening a
   browser using `python3 deploy/preview_trace_explorer.py --check` (or
