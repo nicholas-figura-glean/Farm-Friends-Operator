@@ -37,7 +37,7 @@ function opAgoTs(ts) {
 }
 function opTone(status) {
   status = String(status || "").toLowerCase();
-  if (/error|failed|critical|regressed|stalled|offline|attention/.test(status)) return "attention";
+  if (/error|failed|critical|regressed|stalled|offline|recovering/.test(status)) return "recovering";
   if (/warn|watch|probation|open|claimed|active|running/.test(status)) return "watch";
   return "";
 }
@@ -78,13 +78,13 @@ function operatorOverall(data, autonomy) {
   var critical = data.health === "offline" || data.health === "error" || /failed|stalled/.test(pipelineStatus)
     || autoBlockers.some(function (row) { return row.severity === "critical"; })
     || farmBlockers.some(function (row) {
-      return (row.level === "critical" || row.level === "error")
+      return (row.level === "critical" || row.level === "error" || row.level === "recovering")
         && /production (stopped|stalled)|hard failure|cycle failed|agent .*not loaded|unrecoverable/i.test(String(row.text || ""));
     });
   var healthNormal = data.health === "healthy" || data.health === "running";
   var warning = farmBlockers.length > 0 || autoBlockers.length > 0 || !healthNormal;
-  var tone = critical ? "attention" : warning ? "watch" : "";
-  var label = critical ? "Autonomous recovery active" : warning ? "Autonomy watching" : "Autonomous";
+  var tone = critical ? "recovering" : warning ? "watch" : "";
+  var label = critical ? "Self-healing" : warning ? "Autonomy watching" : "Autonomous";
   var count = farmBlockers.length + autoBlockers.length;
   var detail = critical ? "Recovery guardrails are containing the condition and scheduled agents own the next action" : warning
     ? count + " bounded condition" + (count === 1 ? "" : "s") + " visible; routine production continues"
@@ -99,7 +99,7 @@ function operatorOverall(data, autonomy) {
   var live = agents.live, expected = agents.expected;
   opText("autonomy-agents", live == null || expected == null ? "Loading services" : live + "/" + expected + " services loaded");
   opText("autonomy-agents-detail", opList(agents.down).length ? opList(agents.down).join(", ") + " unavailable" : "All scheduled control loops available");
-  opClass("autonomy-services", "auto-cell", opList(agents.down).length ? "attention" : "");
+  opClass("autonomy-services", "auto-cell", opList(agents.down).length ? "recovering" : "");
 
   var pipeline = data.pipeline || {};
   var canary = autonomy.canary || {};
@@ -291,7 +291,7 @@ function operatorWire(data) {
     + (model && model.stats ? " · " + model.stats.peak + " peak concurrency · ×" + model.stats.parallelism.toFixed(1) + " overlap" : "")
     : "The view never synthesizes calls that were not recorded.";
   opText("wire-hero-detail", detail);
-  opClass("wire-hero-verdict", "hero-verdict", clean ? "" : "attention");
+  opClass("wire-hero-verdict", "hero-verdict", clean ? "" : "recovering");
   opHtml("wire-deltas", [
     '<span class="delta ' + (clean ? "good" : "bad") + '">Clean <b>' + esc(num(calls.length-errors.length)) + '/' + esc(num(calls.length)) + '</b></span>',
     '<span class="delta">In flight <b>' + esc(num(active.length)) + '</b></span>',

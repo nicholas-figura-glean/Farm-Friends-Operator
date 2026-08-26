@@ -5,6 +5,7 @@ $FARM_MCP_URL or ~/.config/farm/endpoint (mode 0600), never passed as a
 CLI argument, and scrubbed from every exception message and log line.
 """
 
+import http.client
 import json
 import os
 import ssl
@@ -192,7 +193,14 @@ class Client(object):
                     raw = resp.read().decode("utf-8", "replace")
                 self.last_service_seconds = time.time() - _started
                 return _decode(raw)
-            except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
+            except (
+                urllib.error.URLError,
+                urllib.error.HTTPError,
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+                OSError,
+                ValueError,
+            ) as exc:
                 last = exc
                 self.transport_errors += 1
                 self.transport_errors_by_tool[self._current_tool] = (

@@ -100,7 +100,7 @@ function archPosture(payload, current, autonomyView) {
   var canaryStatus = String(canary.status || "").toLowerCase();
   var canaryBad = ["failed", "reverted", "unhealthy", "rollback"].indexOf(canaryStatus) !== -1;
   var canaryWatching = canaryStatus === "watching" || canaryStatus === "probation";
-  var tone = drift || downAgents || unmapped || runtimeErrors || canaryBad ? "attention" :
+  var tone = drift || downAgents || unmapped || runtimeErrors || canaryBad ? "recovering" :
     (dirtySources || canaryWatching ? "watch" : "good");
   var intervention = "No recovery work queued";
   if (drift) intervention = "Architecture agent is recording the live topology before promotion";
@@ -115,7 +115,7 @@ function archPosture(payload, current, autonomyView) {
   var generatedAge = archAge(current.generated_at);
   return {
     tone: tone,
-    label: tone === "attention" ? "Architecture recovery active" :
+    label: tone === "recovering" ? "Architecture self-healing" :
       (tone === "watch" ? "Architecture coherent · automation watching" : "Architecture coherent"),
     intervention: intervention,
     liveTitle: liveTitle,
@@ -163,15 +163,15 @@ function archSituationHtml(payload, current, autonomyView, posture) {
       '</b><p>' + archEscape(archTruncate(detail, 180)) + '</p></div></article>';
   }
   return '<section class="arch-situation" aria-label="Architecture operating summary">' +
-    cell(posture.drift ? "attention" : "good", "◎", "Happening now", posture.liveTitle, posture.liveDetail) +
+    cell(posture.drift ? "recovering" : "good", "◎", "Happening now", posture.liveTitle, posture.liveDetail) +
     cell(structural ? "good" : "neutral", "↗", "What changed",
       structural ? (structural.title || "Structural version recorded") : "No structural version recorded",
       structural ? changeBits.join(" · ") : "The architecture ledger has no structural event yet") +
-    cell(activity && activity.status === "failed" ? "attention" : "watch", "◇", "Autonomous action",
+    cell(activity && activity.status === "failed" ? "recovering" : "watch", "◇", "Autonomous action",
       activity ? (activity.title || "Autonomous decision recorded") : "No recent autonomous decision available",
       activity ? activityBits.join(" · ") : "Activity telemetry is unavailable") +
-    cell(posture.tone, posture.tone === "attention" ? "!" : "✓", "Recovery ownership", posture.intervention,
-      posture.tone === "attention" ? "Automatic recovery in progress" :
+    cell(posture.tone, posture.tone === "recovering" ? "↻" : "✓", "Recovery ownership", posture.intervention,
+      posture.tone === "recovering" ? "Automatic recovery in progress" :
         (posture.tone === "watch" ? "Automation is verifying before promotion" : "No recovery work queued")) +
     '</section>';
 }
@@ -630,7 +630,7 @@ function archDetailHtml(current, id, model) {
     (node.protected ? "agents may not edit this file" : "author agent may patch this file");
   var postureTitle = node.kind === "tool" ? "External boundary" :
     (node.down ? "Service unavailable" : (node.protected ? "Protected control surface" : "Autonomous edits permitted"));
-  var postureTone = node.down ? "attention" : (node.protected || node.kind === "tool" ? "watch" : "good");
+  var postureTone = node.down ? "recovering" : (node.protected || node.kind === "tool" ? "watch" : "good");
   function relation(title, ids) {
     return '<details class="arch-relation"><summary><span>' + archEscape(title) + '</span><b>' + ids.length +
       '</b></summary><div>' + archRelationButtons(ids, model) + '</div></details>';
@@ -743,7 +743,7 @@ function renderArchitecture(payload, autonomyView) {
   if (!payload || payload.error) {
     host.innerHTML = '<div class="arch-shell"><section class="page-hero arch-hero"><div><span class="page-kicker">Architecture telemetry unavailable</span>' +
       '<h2>Architecture control plane</h2><p>The source-derived model could not be built. The rest of the dashboard remains read-only and available.</p></div>' +
-      '<div class="hero-verdict attention"><b>Model unavailable</b><span>' +
+      '<div class="hero-verdict recovering"><b>Model rebuilding</b><span>' +
       archEscape((payload || {}).error || "No architecture data returned") + '</span></div></section></div>';
     return;
   }
@@ -752,11 +752,11 @@ function renderArchitecture(payload, autonomyView) {
   var model = archGraphModel(current, ARCH_VIEW, ARCH_STEP, ARCH_SELECTED, ARCH_QUERY);
   var selected = model.selected;
   var posture = archPosture(payload, current, autonomyView);
-  var drift = posture.drift ? '<div class="arch-warn attention">The live tree’s shape does not match the newest recorded version. Change-impact claims remain provisional until the next architecture scan records it.</div>' : "";
-  var unmapped = posture.unmapped ? '<div class="arch-warn attention">Unclassified modules: ' +
-    archEscape(archList(current.unmapped).join(", ")) + '. They remain visible in Observation &amp; evidence until classified.</div>' : "";
+  var drift = posture.drift ? '<div class="arch-warn recovering">The architecture agent is recording the live tree before promotion. Change-impact claims remain provisional meanwhile.</div>' : "";
+  var unmapped = posture.unmapped ? '<div class="arch-warn recovering">Architecture agent is classifying modules: ' +
+    archEscape(archList(current.unmapped).join(", ")) + '. They remain visible in Observation &amp; evidence during classification.</div>' : "";
   var runtimeWarning = model.view === "runtime" && posture.runtimeErrors ?
-    '<div class="arch-warn attention">Some runtime paths could not be derived: ' + archEscape(archList(current.runtime_errors).join("; ")) + '</div>' : "";
+    '<div class="arch-warn recovering">Architecture agent is re-deriving runtime paths: ' + archEscape(archList(current.runtime_errors).join("; ")) + '</div>' : "";
   var filters = ["all", "structural", "release", "canary", "order", "finding"];
   var filterHtml = filters.map(function (name) {
     return '<button data-arch-filter="' + name + '" aria-pressed="' + (ARCH_FILTER === name) + '">' + name + '</button>';

@@ -385,7 +385,7 @@ def activity_state(limit: int = 18) -> Dict[str, Any]:
             "Boundary scan classified %d change%s" % (changes, "" if changes == 1 else "s"),
             summary or "%d actionable · %d absorbed · %d work orders filed" % (
                 actionable, absorbed, int(row.get("orders_filed") or 0)),
-            "attention" if actionable else "verified", "state/contract.ndjson",
+            "recovering" if actionable else "verified", "state/contract.ndjson",
             (row.get("fingerprint") or "")[:12],
         )
 
@@ -397,7 +397,7 @@ def activity_state(limit: int = 18) -> Dict[str, Any]:
         add(
             row.get("ts"), "research", "Research agent",
             "%s: %s" % (event.replace("_", " ").title(), title), detail,
-            "attention" if row.get("errors_found") else "recorded",
+            "recovering" if row.get("errors_found") else "recorded",
             "state/research_findings.ndjson", row.get("question_id") or row.get("subject"),
         )
 

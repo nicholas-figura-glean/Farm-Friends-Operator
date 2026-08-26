@@ -120,7 +120,7 @@ var cleanPosture = archPosture(PAYLOAD, cleanCurrent, HEALTH_OK);
 ok(cleanPosture.tone === "good" && cleanPosture.loadedAgents === 2, "coherent topology with loaded services requires no action");
 ok(cleanPosture.liveTitle.indexOf("matches recorded v2") !== -1, "posture states live-to-recorded alignment");
 var downPosture = archPosture(PAYLOAD, healthyCurrent, HEALTH_DOWN);
-ok(downPosture.tone === "attention" && downPosture.intervention.indexOf("Supervisor is restoring 1 unloaded service") !== -1,
+ok(downPosture.tone === "recovering" && downPosture.intervention.indexOf("Supervisor is restoring 1 unloaded service") !== -1,
    "an unloaded service is explicitly owned by automatic recovery");
 var WATCH_VIEW = clone(HEALTH_OK);
 WATCH_VIEW.vcs.dirty_source_paths = ["dashboard/architecture.js", "dashboard/architecture.css"];
@@ -139,7 +139,7 @@ var UNCHANGED_VERSION = {events:[{ts:"2026-08-26T15:00:00Z",kind:"version",struc
 ok(archSituationHtml(UNCHANGED_VERSION,cleanCurrent,HEALTH_OK,cleanPosture).indexOf("no component additions or removals") !== -1,
    "a recorded version with unchanged component membership says so explicitly");
 var DRIFT_PAYLOAD = clone(PAYLOAD); DRIFT_PAYLOAD.live_matches_recorded = false;
-ok(archPosture(DRIFT_PAYLOAD,cleanCurrent,HEALTH_OK).tone === "attention", "unrecorded topology drift requires attention");
+ok(archPosture(DRIFT_PAYLOAD,cleanCurrent,HEALTH_OK).tone === "recovering", "unrecorded topology drift is owned by recovery");
 
 /* ---- separate runtime and structure lenses ----------------------------- */
 var runtime = archGraphModel(CURRENT, "runtime", "all", null, "");

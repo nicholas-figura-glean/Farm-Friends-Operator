@@ -8,6 +8,7 @@ scrub secrets, remain bounded, preserve call_count semantics and never break a
 successful tool call when its own file cannot be written.
 """
 
+import http.client
 import json
 import os
 import tempfile
@@ -18,7 +19,7 @@ from typing import Any, Dict, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import monitor  # noqa: E402
-from farm import ledger  # noqa: E402
+from farm import ledger, mcp  # noqa: E402
 from farm.mcp import Client, McpError, ToolError  # noqa: E402
 
 
@@ -146,6 +147,42 @@ def main() -> int:
             transport_end = rows(path)[-1]
             check("secret-token-123" not in transport_end["error"] and "farm.invalid" not in transport_end["error"],
                   "telemetry scrubs endpoint and token", transport_end["error"])
+
+            # Large list_farm responses occasionally lose the final HTTP chunk.
+            # That is transport noise and must be retried inside the call rather
+            # than crashing the whole cycle and waiting for scheduler recovery.
+            saved_urlopen = mcp.urllib.request.urlopen
+            saved_retries, saved_backoff = mcp.RETRIES, mcp.BACKOFF
+            attempts = []
+
+            class Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def read(self):
+                    return b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+
+            def flaky_urlopen(*args, **kwargs):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise http.client.IncompleteRead(b'{"partial":')
+                return Response()
+
+            try:
+                mcp.urllib.request.urlopen = flaky_urlopen
+                mcp.RETRIES, mcp.BACKOFF = 2, 0
+                retried = Client("https://farm.invalid/secret-token-123")
+                result = retried._post({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            finally:
+                mcp.urllib.request.urlopen = saved_urlopen
+                mcp.RETRIES, mcp.BACKOFF = saved_retries, saved_backoff
+            check(result.get("result", {}).get("ok") is True and len(attempts) == 2,
+                  "an incomplete chunk is retried inside the MCP call", repr(result))
+            check(retried.transport_errors == 1,
+                  "the recovered chunk failure remains transport telemetry")
 
             # A broken telemetry destination must cost visibility, never a cycle.
             os.environ["FARM_TOOL_CALL_LOG"] = os.path.join(tmp, "not-a-dir", "calls.ndjson")

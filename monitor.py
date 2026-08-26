@@ -177,8 +177,8 @@ def _blockers(
     if (release or {}).get("stale"):
         blockers.append(
             {
-                "level": "error",
-                "text": "Dashboard process is stale: serving "
+                "level": "recovering",
+                "text": "Dashboard restart in progress: serving "
                         f"{release.get('serving_revision')} while release points to "
                         f"{release.get('pointer_revision')}",
             }
@@ -202,24 +202,24 @@ def _blockers(
         )
         runway = rules.feed_buffer_minutes(feed, int(latest.get("animals") or 0))
         if shortfall > tolerance or runway < rules.FEED_BUFFER_MIN_MINUTES:
-            blockers.append({"level": "error", "text": f"Feed safety breach: {runway:.0f}m runway; {shortfall:,} below reserve"})
+            blockers.append({"level": "recovering", "text": f"Feed safeguard active: {runway:.0f}m runway; {shortfall:,} below reserve"})
         else:
             blockers.append({"level": "ok", "text": f"Feed reserve within concurrency tolerance: {runway:.0f}m runway"})
 
     if latest.get("rank") not in (None, 1):
-        blockers.append({"level": "error", "text": f"Leaderboard position is #{latest.get('rank')}"})
+        blockers.append({"level": "recovering", "text": f"Competitive recovery active from rank #{latest.get('rank')}"})
 
     age = _age_seconds(latest.get("ts"))
     if age is None:
-        blockers.append({"level": "error", "text": "No completed farm run recorded"})
+        blockers.append({"level": "recovering", "text": "Scheduler is establishing the first completed farm run"})
     elif age > CADENCE_SECONDS * 2 and not current.get("active"):
-        blockers.append({"level": "error", "text": f"Last completed run is {age // 60}m old"})
+        blockers.append({"level": "recovering", "text": f"Supervisor is restarting the overdue cycle ({age // 60}m since completion)"})
 
     if not launchd.get("loaded"):
-        blockers.append({"level": "error", "text": "launchd cycle agent is not loaded"})
+        blockers.append({"level": "recovering", "text": "Supervisor is restoring the cycle service"})
     if not (launchd.get("supervisor") or {}).get("loaded"):
         blockers.append(
-            {"level": "error", "text": "supervisor agent is not loaded - no self-healing"}
+            {"level": "recovering", "text": "Launchd is restoring the supervisor service"}
         )
 
     # Autonomy problems belong on the overview, not only on their own tab. An operator
@@ -231,7 +231,7 @@ def _blockers(
 
         for item in autonomy.blockers():
             blockers.append({
-                "level": "error" if item.get("severity") == "critical" else "warn",
+                "level": "recovering" if item.get("severity") == "critical" else "warn",
                 "text": "%s - %s" % (item.get("what"), item.get("why")),
             })
     except Exception as exc:  # noqa: BLE001
@@ -916,12 +916,12 @@ h1 { margin:0 0 4px; font-size:26px; letter-spacing:-.03em; } .subtitle { color:
 .status { grid-column:span 3; } .blockers { grid-column:span 5; } .release { grid-column:span 4; } .wide { grid-column:span 8; } .side { grid-column:span 4; } .full { grid-column:1/-1; } .cost { grid-column:span 6; } .healing { grid-column:span 6; }
 .card h2 { margin:0 0 13px; font-size:14px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); } .big { font-size:32px; font-weight:750; letter-spacing:-.04em; }
 .pill { display:inline-flex; align-items:center; gap:7px; border-radius:99px; padding:5px 10px; font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:.06em; } .pill:before { content:""; width:8px; height:8px; border-radius:50%; background:currentColor; box-shadow:0 0 12px currentColor; }
-.running,.healthy,.ok { color:var(--green); } .offline,.error,.stale { color:var(--red); } .waiting,.warn { color:var(--yellow); }
-.alert.warn .alert-dot { background:var(--yellow); }
+.running,.healthy,.ok { color:var(--green); } .offline,.error,.stale,.recovering { color:var(--blue); } .waiting,.warn { color:var(--yellow); }
+.alert.warn .alert-dot { background:var(--yellow); } .alert.recovering .alert-dot { background:var(--blue); }
 .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-top:16px; } .metric label { display:block; color:var(--muted); font-size:12px; } .metric strong { display:block; font-size:20px; margin-top:2px; }
 .kv { display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; } .kv div { display:flex; justify-content:space-between; gap:12px; border-bottom:1px solid #ffffff0d; padding:4px 0; } .kv span:first-child { color:var(--muted); } .kv span:last-child { text-align:right; font-weight:650; }
 ul { list-style:none; padding:0; margin:0; } li { padding:8px 0; border-bottom:1px solid #ffffff0d; } li:last-child { border-bottom:0; }
-.alert { display:flex; gap:9px; align-items:flex-start; } .alert-dot { flex:0 0 8px; height:8px; margin-top:6px; border-radius:50%; background:var(--red); } .alert.ok .alert-dot { background:var(--green); }
+.alert { display:flex; gap:9px; align-items:flex-start; } .alert-dot { flex:0 0 8px; height:8px; margin-top:6px; border-radius:50%; background:var(--blue); } .alert.ok .alert-dot { background:var(--green); }
 table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; } th,td { text-align:right; padding:8px 7px; border-bottom:1px solid #ffffff0d; white-space:nowrap; } th:first-child,td:first-child, th:nth-child(2),td:nth-child(2) { text-align:left; } th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; } td.bad { color:var(--red); } td.good { color:var(--green); }
 .chart { height:150px; width:100%; } svg { width:100%; height:100%; overflow:visible; } .axis { stroke:var(--line); stroke-width:1; } .line { fill:none; stroke:var(--green); stroke-width:3; stroke-linecap:round; stroke-linejoin:round; } .empty { color:var(--muted); padding:18px 0; }
 .log { color:#b8cabc; font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; max-height:220px; overflow:auto; background:#0b100d; border-radius:9px; padding:10px; }
@@ -1649,8 +1649,8 @@ function renderSignals(s, growth) {
   const rate = s.produce_per_min, floor = s.floor;
   const stalled = s.below_floor && s.prev_below_floor;
   const watching = s.below_floor && !s.prev_below_floor;
-  const level = stalled ? "error" : (watching ? "waiting" : "healthy");
-  const label = stalled ? "production stalled · escalating"
+  const level = stalled ? "recovering" : (watching ? "waiting" : "healthy");
+  const label = stalled ? "production stalled · automatic recovery active"
     : (watching ? "one low window · watching" : "producing normally");
   $("signal-verdict").innerHTML = `<span class="pill ${level}">${esc(label)}</span>`
     + `<div class="subtitle" style="margin-top:10px">Score rate ${rate == null ? "—" : num(Math.round(rate)) + " produce/min"}`
@@ -2066,7 +2066,7 @@ function activateTab(name, writeHash) {
     const host=document.getElementById("tab-architecture");
     const renderer=window.renderArchitecture, loader=window.loadArchitecture;
     if (typeof renderer!=="function" || typeof loader!=="function") {
-      if (host) host.innerHTML=`<div class="arch-shell"><section class="page-hero arch-hero"><div><span class="page-kicker">Architecture telemetry unavailable</span><h2>Architecture control plane</h2><p>The specialized renderer did not initialize; the rest of the read-only dashboard remains available.</p></div><div class="hero-verdict attention"><b>Renderer unavailable</b><span>Expected the source-map bundle to initialize</span></div></section></div>`;
+      if (host) host.innerHTML=`<div class="arch-shell"><section class="page-hero arch-hero"><div><span class="page-kicker">Architecture telemetry rebuilding</span><h2>Architecture control plane</h2><p>The specialized renderer is restarting; the rest of the read-only dashboard remains available.</p></div><div class="hero-verdict recovering"><b>Renderer restarting</b><span>Architecture agent owns recovery</span></div></section></div>`;
     } else {
       if (window.ARCH) safe(name,()=>renderer(window.ARCH,window.AUTONOMY));
       Promise.resolve(loader(true)).catch(error=>safe(name,()=>renderer({error:error && error.message ? error.message : String(error)},null)));

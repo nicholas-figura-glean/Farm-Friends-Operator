@@ -171,9 +171,15 @@ check("a failed section is surfaced as a blocker",
           for b in autonomy.blockers({"vcs": {"error": "synthetic"}})))
 operator_source = (PROJECT / "dashboard" / "operator.js").read_text(encoding="utf-8")
 architecture_source = (PROJECT / "dashboard" / "architecture.js").read_text(encoding="utf-8")
+operator_css = (PROJECT / "dashboard" / "operator.css").read_text(encoding="utf-8")
+architecture_css = (PROJECT / "dashboard" / "architecture.css").read_text(encoding="utf-8")
 monitor_source = (PROJECT / "monitor.py").read_text(encoding="utf-8")
-check("critical status names autonomous recovery rather than operator attention",
-      "Autonomous recovery active" in operator_source and "Attention required" not in operator_source)
+check("critical status reports self-healing without paging language",
+      'critical ? "Self-healing"' in operator_source)
+check("served control surfaces have no operator-attention state token",
+      all("attention" not in source.lower() for source in (
+          operator_source, architecture_source, operator_css, architecture_css, monitor_source,
+      )))
 check("architecture assigns recovery ownership instead of operator action",
       "Recovery ownership" in architecture_source and "Operator action" not in architecture_source)
 check("overview queue is agent-owned rather than an attention queue",
@@ -591,8 +597,8 @@ check("architecture code is outside the Switchboard block",
 check("the served panel is never statically empty", "data-arch-loading" in composed)
 check("tab activation checks the global async loader",
       'typeof loader!=="function"' in composed and "window.loadArchitecture" in composed)
-check("loader failure becomes visible operator guidance",
-      "Renderer unavailable" in composed and "Architecture control plane" in composed)
+check("loader failure remains visible and recovery-owned",
+      "Renderer restarting" in composed and "Architecture agent owns recovery" in composed)
 check("an open Findings or History tab refreshes on its own",
       "EVIDENCE_REFRESH_MS = 60000" in composed and "EVIDENCE_LAST_FETCH_MS" in composed)
 check("an open Architecture tab refreshes its model and liveness overlay",

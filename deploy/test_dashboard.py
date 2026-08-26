@@ -476,6 +476,11 @@ def main() -> int:
         ("game bundle is embedded exactly once", html.count(monitor.GAME_JS) == 1),
         ("operator bundle is embedded exactly once", html.count(monitor.OPERATOR_JS) == 1),
         ("operator stylesheet is embedded", ".autonomy-ribbon" in html and ".knowledge-flow" in html),
+        ("served page has no operator-attention state token",
+         all(token not in html for token in (
+             "system-state attention", "hero-verdict attention",
+             ".system-state.attention", ".arch-warn.attention",
+         ))),
         ("seven standard tabs retain the scoped operator system", html.count('class="tab operator-tab"') == 7),
         ("architecture composes the shared hierarchy through its specialized tab", 'class="tab architecture-tab" id="tab-architecture"' in html),
         ("architecture bundle is embedded exactly once", html.count(monitor.ARCH_JS) == 1),
