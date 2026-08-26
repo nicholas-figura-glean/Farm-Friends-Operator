@@ -379,6 +379,18 @@ def signature(nodes: Iterable[Dict[str, Any]], edges: Iterable[Dict[str, str]],
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _dirty_release_source() -> List[str]:
+    """Release-source paths that differ from HEAD; runtime journals are excluded."""
+    paths: List[str] = []
+    for line in _git(["status", "--porcelain", "--untracked-files=all"]).splitlines():
+        if len(line) < 4:
+            continue
+        rel = line[3:].strip().split(" -> ")[-1]
+        if control.is_release_source(rel):
+            paths.append(rel)
+    return sorted(set(paths))
+
+
 def snapshot() -> Dict[str, Any]:
     """The architecture as it exists right now."""
     agents = _agents()
@@ -420,6 +432,10 @@ def snapshot() -> Dict[str, Any]:
         },
         "commit": _git(["rev-parse", "--short", "HEAD"]) or None,
         "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
+        # Scheduled scans can observe a human or agent midway through a working-tree
+        # edit. Preserve those shapes as evidence, but label them so release
+        # oscillation gates do not mistake development churn for deployed A->B->A.
+        "dirty_source": _dirty_release_source(),
         # Recorded so that a scan taken from the wrong root is visible in the ledger
         # rather than silently producing a different shape. This is how the
         # release-versus-working-tree flip-flop was eventually diagnosed.
@@ -468,6 +484,7 @@ def record(snap: Optional[Dict[str, Any]] = None, trigger: str = "scan",
         "commit": snap.get("commit"),
         "trigger": trigger,
         "root": snap.get("root"),
+        "dirty_source": list(snap.get("dirty_source") or []),
         "stats": snap["stats"],
         # The full node and edge set is stored, not just the diff, so any past version
         # can be rendered without replaying history from version 1.

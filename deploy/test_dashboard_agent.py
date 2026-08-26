@@ -361,6 +361,10 @@ check("the resolved root is the git checkout",
 check("the root is not a release copy",
       "releases/" not in str(architecture.PROJECT), str(architecture.PROJECT))
 check("a snapshot records the root it scanned", bool(snap.get("root")))
+check("a snapshot labels release-source dirtiness",
+      isinstance(snap.get("dirty_source"), list))
+check("the live strategy journal is not release-source dirtiness",
+      "farm-strategy-journal.md" not in (snap.get("dirty_source") or []))
 
 # The decisive check: run the resolver with the module living inside a release-shaped
 # directory and confirm it still finds the project rather than the copy.
@@ -411,6 +415,11 @@ for row in rows_all:
 # that instead of a version cutoff means this check keeps working as the ledger grows,
 # and it caught two further oscillations while the fix was still unreleased.
 by_version = {r.get("version"): r for r in rows_all}
+first_signature_by_commit = {}
+for row in rows_all:
+    commit = row.get("commit")
+    if commit and commit not in first_signature_by_commit:
+        first_signature_by_commit[commit] = row.get("signature")
 
 
 def _pre_fix(version: int) -> bool:
@@ -418,8 +427,24 @@ def _pre_fix(version: int) -> bool:
     return (not root) or ("releases/" in root)
 
 
-suspect = [o for o in oscillating if not (_pre_fix(o[0]) or _pre_fix(o[1]))]
-check("no architecture version recurs once scans share a root", not suspect,
+def _dirty_scan(version: int) -> bool:
+    row = by_version.get(version) or {}
+    if "dirty_source" in row:
+        return bool(row.get("dirty_source"))
+    # Before dirty_source was recorded, multiple shapes under one unchanged commit
+    # were scheduled scans of an in-progress working tree. The first observed shape
+    # is the committed baseline; later different shapes are retained but not treated
+    # as deployed policy oscillation.
+    commit = row.get("commit")
+    return bool(commit and row.get("signature") != first_signature_by_commit.get(commit))
+
+
+suspect = [
+    item for item in oscillating
+    if not (_pre_fix(item[0]) or _pre_fix(item[1])
+            or _dirty_scan(item[0]) or _dirty_scan(item[1]))
+]
+check("no clean architecture version recurs once scans share a root", not suspect,
       "recurring: %s" % (suspect[:3],))
 if oscillating:
     # Reported, not asserted away. Rewriting the ledger to make a test pass would
