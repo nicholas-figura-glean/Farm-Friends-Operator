@@ -662,7 +662,7 @@ function archEventHtml(event) {
   return '<div class="arch-ev" data-kind="' + archEscape(event.kind) + '"><span class="when">' +
     archEscape(when) + '</span><span class="what"><span class="title"><span class="kind">' +
     archEscape(event.kind) + '</span>' + archEscape(event.title) + archEscape(mark) + '</span>' +
-    (event.detail ? '<div class="detail">' + archEscape(event.detail) + '</div>' : "") + changes + '</span></div>';
+    (event.detail ? '<div class="arch-ev-detail">' + archEscape(event.detail) + '</div>' : "") + changes + '</span></div>';
 }
 
 function archEventsHtml(events, filter) {

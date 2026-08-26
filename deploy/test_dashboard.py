@@ -481,6 +481,9 @@ def main() -> int:
         ("architecture bundle is embedded exactly once", html.count(monitor.ARCH_JS) == 1),
         ("architecture stylesheet includes operator summary and inspector posture",
          ".arch-situation" in html and ".arch-component-posture" in html),
+        ("architecture audit descriptions cannot inherit global detail-card spacing",
+         'class="arch-ev-detail"' in monitor.ARCH_JS and ".arch-ev-detail" in monitor.ARCH_CSS
+         and 'class="detail"' not in monitor.ARCH_JS),
         ("architecture answers the four operator questions before the graph",
          all(text in monitor.ARCH_JS for text in ("Happening now", "What changed", "Autonomous action", "Operator action"))),
         ("architecture history defaults to progressive disclosure", 'arch-history audit-drawer' in monitor.ARCH_JS),

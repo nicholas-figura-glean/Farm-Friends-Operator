@@ -218,6 +218,9 @@ ok(archEventsHtml([],"all").indexOf("No events") !== -1, "empty history explains
 ok(events.indexOf("architecture v2") < events.indexOf("release 20260825T213240Z"), "server chronology is preserved");
 ok(archEventHtml({ts:"x",kind:"canary",title:"reverted",ok:false}).indexOf("✗") !== -1, "failed canary is marked failed");
 ok(archEventHtml({ts:"x",kind:"canary",title:"kept",ok:true}).indexOf("✓") !== -1, "successful canary is marked successful");
+var detailedEvent = archEventHtml({ts:"x",kind:"release",title:"release 1",detail:"short release note"});
+ok(detailedEvent.indexOf('class="arch-ev-detail"') !== -1 && detailedEvent.indexOf('class="detail"') === -1,
+   "audit descriptions cannot inherit the global run-detail card spacing");
 function filterButton(name) {
   return {pressed:null,getAttribute:function (attribute) { return attribute === "data-arch-filter" ? name : null; },
     setAttribute:function (attribute, value) { if (attribute === "aria-pressed") this.pressed = value; }};
