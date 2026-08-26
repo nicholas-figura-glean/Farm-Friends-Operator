@@ -67,6 +67,7 @@ fi
 /usr/bin/python3 deploy/test_evidence.py
 /usr/bin/python3 deploy/test_tool_trace.py
 /usr/bin/python3 deploy/test_topology.py
+/usr/bin/python3 deploy/test_architecture.py
 /usr/bin/python3 deploy/test_dashboard.py
 /usr/bin/python3 deploy/test_recovery_watch.py
 # The self-healing loop is now part of the runtime, so its suites gate releases

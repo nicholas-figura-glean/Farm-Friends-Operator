@@ -1,10 +1,8 @@
-/* Architecture tab tests.
+/* Headless architecture explorer tests.
  *
- * The architecture view is the one panel whose whole purpose is to be trustworthy
- * about the system's own shape, which makes a plausible-but-wrong render the worst
- * possible outcome: an operator who believes a locked file is editable, or that a dead
- * agent is running, is worse off than one with no diagram at all. Every check here
- * exists to make one of those specific lies impossible.
+ * The view must never invent execution from imports, hide a dead agent, or understate
+ * the blast radius of changing a protected component. These checks exercise the same
+ * pure graph model, layout, SVG and inspector HTML used by the browser.
  *
  * Usage: osascript -l JavaScript dashboard/test_architecture.js
  */
@@ -18,186 +16,226 @@ function ok(cond, label, detail) {
   if (!cond) fails++;
 }
 function count(text, needle) { return String(text).split(needle).length - 1; }
+function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
-/* The asset expects a browser: it declares `async function` and touches `document`
- * and `fetch` at call time. Only the pure render helpers are under test, so the file
- * is loaded with stubs standing in for the DOM rather than being rewritten for it. */
-var document = {
-  getElementById: function () { return null; }
-};
+var HOST = null;
+var document = { getElementById: function () { return HOST; } };
 var window = {};
 function safe(name, fn) { return fn(); }
 function fetch() { throw new Error("fetch must not be called by render code"); }
-
-var globalThisRef = this;
 eval(slurp("dashboard/architecture.js"));
 
 var CURRENT = {
-  short: "abc123def456",
-  commit: "deadbee",
-  branch: "main",
+  short: "abc123def456", commit: "deadbee", branch: "main",
   layers: [
-    { id: "world", name: "The game", note: "outside our control" },
-    { id: "play", name: "Play loop", note: "deterministic" },
-    { id: "guard", name: "Safety & rollback", note: "agents may not modify" },
-    { id: "decide", name: "Authoring & research", note: "may call a model" },
-    { id: "operate", name: "Scheduling", note: "keeps it running" }
+    {id:"world", name:"The game", note:"outside our control"},
+    {id:"play", name:"Play loop", note:"deterministic"},
+    {id:"observe", name:"Observation & evidence", note:"measurements"},
+    {id:"guard", name:"Safety & rollback", note:"agents may not modify"},
+    {id:"decide", name:"Authoring & research", note:"may call a model"},
+    {id:"operate", name:"Scheduling", note:"keeps it running"}
   ],
   nodes: [
-    { id: "cycle", kind: "module", layer: "play", path: "farm/cycle.py", loc: 400, protected: false, doc: "Plays one turn." },
-    { id: "rules", kind: "module", layer: "play", path: "farm/rules.py", loc: 600, protected: true },
-    { id: "canary", kind: "module", layer: "guard", path: "farm/canary.py", loc: 500, protected: true },
-    { id: "author_agent", kind: "agent", layer: "decide", path: "experiments/author_agent.py", loc: 900, protected: true },
-    { id: "research_agent", kind: "agent", layer: "decide", path: "experiments/research_agent.py", loc: 300, protected: true },
-    { id: "scheduler", kind: "module", layer: "operate", path: "farm/scheduler.py", loc: 200, protected: false }
+    {id:"cycle",kind:"module",layer:"play",path:"farm/cycle.py",loc:400,protected:false,doc:"Plays one turn."},
+    {id:"rules",kind:"module",layer:"play",path:"farm/rules.py",loc:600,protected:true,doc:"Pure decisions."},
+    {id:"mcp",kind:"module",layer:"play",path:"farm/mcp.py",loc:260,protected:false,doc:"The external boundary."},
+    {id:"ledger",kind:"module",layer:"observe",path:"farm/ledger.py",loc:180,protected:false},
+    {id:"canary",kind:"module",layer:"guard",path:"farm/canary.py",loc:500,protected:true},
+    {id:"author_agent",kind:"agent",layer:"decide",path:"experiments/author_agent.py",loc:900,protected:true},
+    {id:"research_agent",kind:"agent",layer:"decide",path:"experiments/research_agent.py",loc:300,protected:true},
+    {id:"scheduler",kind:"module",layer:"operate",path:"farm/scheduler.py",loc:200,protected:false}
   ],
   edges: [
-    { source: "cycle", target: "rules" },
-    { source: "author_agent", target: "canary" },
-    { source: "author_agent", target: "rules" }
+    {source:"cycle",target:"rules"},
+    {source:"cycle",target:"mcp"},
+    {source:"author_agent",target:"canary"},
+    {source:"author_agent",target:"rules"},
+    {source:"scheduler",target:"author_agent"}
   ],
+  runtime_steps: [
+    {name:"tools",order:0,modules:["ledger","mcp"],tools:["tools/list"]},
+    {name:"collect",order:1,modules:["cycle","ledger","mcp"],tools:["collect_produce"]},
+    {name:"verify",order:2,modules:["cycle","mcp","rules"],tools:["list_farm"]},
+    {name:"finish",order:3,modules:["cycle","rules"],tools:[]}
+  ],
+  runtime_edges: [
+    {source:"cycle",target:"mcp",kind:"call",steps:["collect","verify"]},
+    {source:"cycle",target:"rules",kind:"call",steps:["verify","finish"]},
+    {source:"cycle",target:"ledger",kind:"call",steps:["collect"]},
+    {source:"mcp",target:"tool:collect_produce",kind:"tool",steps:["collect"]},
+    {source:"mcp",target:"tool:list_farm",kind:"tool",steps:["verify"]},
+    {source:"mcp",target:"tool:tools/list",kind:"tool",steps:["tools"]}
+  ],
+  runtime_errors: [],
   agents: [
-    { label: "com.nickfigura.farmfriends.author", entry: "experiments/author_agent.py", interval_seconds: 600 },
-    { label: "com.nickfigura.farmfriends.research", entry: "experiments/research_agent.py", interval_seconds: 3600 }
+    {label:"com.nickfigura.farmfriends.author",entry:"experiments/author_agent.py",interval_seconds:600},
+    {label:"com.nickfigura.farmfriends.research",entry:"experiments/research_agent.py",interval_seconds:3600}
   ],
-  tools: ["list_farm", "collect_produce", "call_fbi"],
-  stores: [],
-  unmapped: [],
-  stats: { modules: 4, agent_modules: 2, launch_agents: 2, protected: 4, edges: 3, tools: 3, loc: 2700 }
+  tools:["collect_produce","list_farm","tools/list","call_fbi"],
+  stores:[{name:"history.ndjson",bytes:1200,kind:"append-only"}], unmapped:[],
+  stats:{modules:6,agent_modules:2,launch_agents:2,protected:4,edges:5,tools:4,loc:3340}
 };
-
 var PAYLOAD = {
-  current: CURRENT,
-  versions: 2,
-  live_matches_recorded: true,
-  events: [
-    { ts: "2026-08-25T21:54:00Z", kind: "version", structural: true, title: "architecture v2",
-      detail: "architecture tab added", added: ["autonomy", "architecture"], removed: [], agents_added: [] },
-    { ts: "2026-08-25T21:32:00Z", kind: "release", structural: false, title: "release 20260825T213240Z",
-      detail: "Show the figure the canary decides on" },
-    { ts: "2026-08-25T21:00:00Z", kind: "canary", structural: false, title: "canary resolved rev1", detail: "healthy", ok: true },
-    { ts: "2026-08-25T20:41:00Z", kind: "order", structural: false, title: "published fix-evidence", detail: "bad fit", ok: true },
-    { ts: "2026-08-25T20:34:00Z", kind: "finding", structural: false, title: "contract_finding: call_fbi", detail: "aliens", errors: 1 }
+  current:CURRENT, versions:2, live_matches_recorded:true,
+  events:[
+    {ts:"2026-08-25T21:54:00Z",kind:"version",structural:true,title:"architecture v2",detail:"architecture tab added",added:["autonomy","architecture"],removed:[],agents_added:[]},
+    {ts:"2026-08-25T21:32:00Z",kind:"release",structural:false,title:"release 20260825T213240Z",detail:"Show the figure the canary decides on"},
+    {ts:"2026-08-25T21:00:00Z",kind:"canary",structural:false,title:"canary resolved rev1",detail:"healthy",ok:true},
+    {ts:"2026-08-25T20:41:00Z",kind:"order",structural:false,title:"published fix-evidence",detail:"bad fit",ok:true},
+    {ts:"2026-08-25T20:34:00Z",kind:"finding",structural:false,title:"contract_finding: call_fbi",detail:"aliens",errors:1}
   ]
 };
+var HEALTH_DOWN = {agents:{agents:[
+  {label:"com.nickfigura.farmfriends.author",loaded:false,state:"unknown",role:"writes repairs"},
+  {label:"com.nickfigura.farmfriends.research",loaded:true,state:"waiting",role:"finds strategy"}
+]}};
 
-/* ---- layered diagram --------------------------------------------------- */
-var layers = archLayersHtml(CURRENT, {});
-ok(count(layers, 'class="arch-layer"') === 5, "every populated layer is drawn",
-   String(count(layers, 'class="arch-layer"')));
-ok(layers.indexOf('data-layer="world"') !== -1, "the game is on the diagram");
-ok(layers.indexOf("call_fbi") !== -1, "live MCP tools appear in the world layer");
-ok(layers.indexOf("list_farm") < layers.indexOf("cycle"),
-   "the game is drawn above our own code");
+/* ---- compact fallback and protected-file truth ------------------------- */
+var layers = archLayersHtml(CURRENT);
+ok(count(layers, 'class="arch-layer"') === 6, "every populated layer is drawn", String(count(layers, 'class="arch-layer"')));
+ok(layers.indexOf('data-layer="world"') !== -1 && layers.indexOf("call_fbi") !== -1, "captured MCP contract remains visible in fallback");
+ok(layers.indexOf("list_farm") < layers.indexOf("cycle"), "the external system is ordered before our code");
+ok(archNodeClass({kind:"module",protected:true}).indexOf("protected") !== -1, "a locked file is marked locked");
+ok(archNodeClass({kind:"module",protected:false}).indexOf("protected") === -1, "an editable file is not marked locked");
+ok(archNodeHtml({id:"rules",kind:"module",protected:true,loc:600}).indexOf("protected") !== -1, "locked marking reaches rendered fallback node");
 
-/* A layer with no members must be omitted, not drawn empty. */
-var sparse = {
-  layers: CURRENT.layers,
-  nodes: [{ id: "cycle", kind: "module", layer: "play", path: "farm/cycle.py", loc: 10 }],
-  edges: [], tools: []
-};
-ok(count(archLayersHtml(sparse, {}), 'class="arch-layer"') === 2,
-   "empty layers are omitted rather than drawn hollow");
-
-/* ---- the protected-file marking, which must never be wrong -------------- */
-ok(archNodeClass({ id: "rules", kind: "module", protected: true }, {}).indexOf("protected") !== -1,
-   "a locked file is marked locked");
-ok(archNodeClass({ id: "cycle", kind: "module", protected: false }, {}).indexOf("protected") === -1,
-   "an editable file is not marked locked");
-ok(archNodeHtml({ id: "rules", kind: "module", protected: true, loc: 600 }, {}).indexOf("protected") !== -1,
-   "the locked marking survives into the rendered node");
-
-/* ---- liveness overlay -------------------------------------------------- */
-var HEALTH_DOWN = {
-  agents: { agents: [
-    { label: "com.nickfigura.farmfriends.author", loaded: false, state: "unknown", role: "writes the repairs" },
-    { label: "com.nickfigura.farmfriends.research", loaded: true, state: "waiting", role: "finds strategy" }
-  ] }
-};
+/* ---- health overlay ---------------------------------------------------- */
 var health = archAgentHealth(HEALTH_DOWN);
 ok(health["com.nickfigura.farmfriends.author"].loaded === false, "a down agent is read as down");
 ok(health["com.nickfigura.farmfriends.research"].loaded === true, "a live agent is read as live");
-ok(archNodeClass({ id: "author_agent", kind: "agent", down: true }, health).indexOf("down") !== -1,
-   "a down agent module is drawn as down");
-ok(archNodeClass({ id: "research_agent", kind: "agent" }, health).indexOf("down") === -1,
-   "a live agent module is not drawn as down");
-/* A plain module has no process of its own, so it can never be "down". Marking one
- * down would invent an outage that does not exist. */
-ok(archNodeClass({ id: "canary", kind: "module", down: true }, health).indexOf("down") === -1,
-   "a library module is never drawn as down");
-ok(archAgentHealth(null) && Object.keys(archAgentHealth(null)).length === 0,
-   "a missing autonomy payload yields no health claims");
+var healthyCurrent = archApplyHealth(CURRENT, HEALTH_DOWN);
+var healthyById = {}; healthyCurrent.nodes.forEach(function (node) { healthyById[node.id] = node; });
+ok(healthyById.author_agent.down === true && !healthyById.research_agent.down, "only the unloaded agent is marked down");
+ok(archNodeClass(healthyById.author_agent).indexOf("down") !== -1, "down state reaches node styling");
+ok(archNodeClass({kind:"module",down:true}).indexOf("down") === -1, "a library module is never claimed down");
+ok(Object.keys(archAgentHealth(null)).length === 0, "missing autonomy yields no health claims");
 
-/* ---- component detail -------------------------------------------------- */
-var detail = archDetailHtml(CURRENT, "canary");
-ok(detail.indexOf("farm/canary.py") !== -1, "detail names the real path");
-ok(detail.indexOf("author_agent") !== -1, "detail lists reverse dependencies");
-ok(detail.indexOf("may not edit") !== -1, "detail states a locked file is unwritable");
-var editable = archDetailHtml(CURRENT, "cycle");
-ok(editable.indexOf("may patch this") !== -1, "detail states an editable file is patchable");
-ok(editable.indexOf("rules") !== -1, "detail lists forward dependencies");
-ok(archDetailHtml(CURRENT, null).indexOf("Select a component") !== -1,
-   "no selection shows guidance rather than an empty box");
-ok(archDetailHtml(CURRENT, "nonexistent").indexOf("Select a component") !== -1,
-   "an unknown id falls back to guidance");
+/* ---- separate runtime and structure lenses ----------------------------- */
+var runtime = archGraphModel(CURRENT, "runtime", "all", null, "");
+ok(!!runtime.byId["tool:collect_produce"], "runtime lens promotes reached MCP tools to nodes");
+ok(!runtime.byId.author_agent, "runtime lens omits background agents not reached by a cycle");
+ok(runtime.byId.cycle && runtime.byId.mcp && runtime.byId.rules, "runtime lens keeps reached modules");
+ok(runtime.edges.length === 6, "runtime lens uses only runtime call edges", String(runtime.edges.length));
+ok(runtime.layers[0].id === "world", "external tools form the first runtime layer");
+ok(runtime.positions.cycle && runtime.positions["tool:list_farm"], "every runtime node receives a stable SVG position");
+
+var structure = archGraphModel(CURRENT, "structure", "all", null, "");
+ok(!!structure.byId.author_agent && !!structure.byId.scheduler, "system map includes background architecture");
+ok(!structure.byId["tool:collect_produce"], "system map does not disguise tool calls as imports");
+ok(structure.edges.every(function (edge) { return edge.kind === "dependency"; }), "system map labels every relation as a dependency");
+
+var collect = archGraphModel(CURRENT, "runtime", "collect", null, "");
+ok(!!collect.byId["tool:collect_produce"] && !collect.byId["tool:list_farm"], "choosing a run stage narrows external tools");
+ok(collect.edges.every(function (edge) { return edge.steps.indexOf("collect") !== -1; }), "stage view keeps only paths reachable in that stage");
+ok(collect.byId.ledger && !collect.byId.rules, "stage view narrows modules as well as tools");
+
+/* ---- selection, search, and blast radius ------------------------------- */
+var selected = archGraphModel(CURRENT, "structure", "all", "canary", "");
+ok(selected.directIn.author_agent, "selection identifies direct reverse dependencies");
+ok(selected.impact.scheduler, "selection computes transitive change impact");
+ok(archNodeStateClass(selected, "canary").indexOf("selected") !== -1, "selected node receives focus styling");
+ok(archNodeStateClass(selected, "scheduler").indexOf("impact") !== -1, "transitive dependent receives impact styling");
+ok(archNodeStateClass(selected, "cycle").indexOf("dim") !== -1, "unrelated nodes are de-emphasized");
+
+var searched = archGraphModel(CURRENT, "structure", "all", null, "canary");
+ok(searched.queryMatches.canary, "search matches component metadata");
+ok(searched.queryNeighbors.author_agent, "search preserves a matching node's direct context");
+ok(archNodeStateClass(searched, "cycle").indexOf("dim") !== -1, "search quiets unrelated nodes");
+
+/* ---- actual SVG graph -------------------------------------------------- */
+var runtimeSelected = archGraphModel(healthyCurrent, "runtime", "verify", "mcp", "");
+var svg = archGraphHtml(runtimeSelected);
+ok(svg.indexOf('<svg class="arch-map-svg"') !== -1, "graph renders as an SVG exploration surface");
+ok(count(svg, 'class="arch-edge ') === runtimeSelected.edges.length, "every derived relationship gets one directional path");
+ok(svg.indexOf('marker-end="url(#arch-arrow') !== -1, "relationships carry arrowheads");
+ok(svg.indexOf('data-arch-node="mcp"') !== -1 && svg.indexOf('data-arch-node="tool:list_farm"') !== -1, "modules and external tools are selectable");
+ok(svg.indexOf("selected-out") !== -1, "selecting a node highlights its outgoing route");
+ok(svg.indexOf("LOCKED") !== -1, "protected status remains visible inside the map");
+
+/* ---- inspector --------------------------------------------------------- */
+var detail = archDetailHtml(CURRENT, "canary", selected);
+ok(detail.indexOf("farm/canary.py") !== -1, "inspector names the real source path");
+ok(detail.indexOf("author_agent") !== -1, "inspector lists reverse dependencies");
+ok(detail.indexOf("2</b><span>components") !== -1, "inspector reports the transitive change radius");
+ok(detail.indexOf("agents may not edit this file") !== -1, "inspector states protected change policy");
+var editable = archDetailHtml(CURRENT, "cycle", archGraphModel(CURRENT,"structure","all","cycle",""));
+ok(editable.indexOf("author agent may patch this file") !== -1, "inspector states editable change policy");
+ok(editable.indexOf("rules") !== -1 && editable.indexOf("mcp") !== -1, "inspector exposes forward dependencies");
+ok(archDetailHtml(CURRENT, null, structure).indexOf("Select any component") !== -1, "empty inspector teaches the interaction");
+ok(archDetailHtml(CURRENT, "nonexistent", structure).indexOf("Explore the live model") !== -1, "unknown ids degrade to guidance");
+var toolDetail = archDetailHtml(CURRENT, "tool:list_farm", archGraphModel(CURRENT,"runtime","verify","tool:list_farm",""));
+ok(toolDetail.indexOf("External game capability") !== -1 && toolDetail.indexOf("verify") !== -1, "tool inspector connects the boundary to run stages");
+
+/* ---- controls and progressive disclosure ------------------------------ */
+ARCH_STEP = "collect";
+var rail = archStepRailHtml(CURRENT);
+ok(count(rail, "data-arch-step=") === 5, "run rail exposes the whole run plus every stage");
+ok(rail.indexOf('data-arch-step="collect" aria-pressed="true"') !== -1, "active run stage is explicit");
+ARCH_STEP = "all";
+ARCH_VIEW = "runtime";
+var toolbar = archToolbarHtml(CURRENT, runtime);
+ok(toolbar.indexOf("How it runs") !== -1 && toolbar.indexOf("System map") !== -1, "relationship lenses are switchable");
+ok(toolbar.indexOf("data-arch-search") !== -1 && toolbar.indexOf("data-arch-zoom") !== -1, "map supports search and zoom");
 
 /* ---- version history --------------------------------------------------- */
 var events = archEventsHtml(PAYLOAD.events, "all");
 ok(count(events, 'class="arch-ev"') === 5, "every event is listed", String(count(events, 'class="arch-ev"')));
-ok(events.indexOf("+autonomy, +architecture") !== -1, "a structural version shows what was added");
-ok(archEventsHtml(PAYLOAD.events, "structural").indexOf('data-kind="release"') === -1,
-   "the structural filter excludes non-structural events");
-ok(count(archEventsHtml(PAYLOAD.events, "structural"), 'class="arch-ev"') === 1,
-   "the structural filter keeps only the version");
-ok(count(archEventsHtml(PAYLOAD.events, "canary"), 'class="arch-ev"') === 1,
-   "a kind filter selects that kind");
-ok(archEventsHtml([], "all").indexOf("No events") !== -1,
-   "an empty history says so rather than rendering nothing");
+ok(events.indexOf("+autonomy, +architecture") !== -1, "structural version names additions");
+ok(count(archEventsHtml(PAYLOAD.events,"structural"),'class="arch-ev"') === 1, "structural filter excludes behavioral events");
+ok(count(archEventsHtml(PAYLOAD.events,"canary"),'class="arch-ev"') === 1, "kind filter selects that kind");
+ok(archEventsHtml([],"all").indexOf("No events") !== -1, "empty history explains itself");
+ok(events.indexOf("architecture v2") < events.indexOf("release 20260825T213240Z"), "server chronology is preserved");
+ok(archEventHtml({ts:"x",kind:"canary",title:"reverted",ok:false}).indexOf("✗") !== -1, "failed canary is marked failed");
+ok(archEventHtml({ts:"x",kind:"canary",title:"kept",ok:true}).indexOf("✓") !== -1, "successful canary is marked successful");
 
-/* Chronology must be preserved exactly as the server ordered it. Re-sorting in the
- * client would risk reintroducing the timezone bug that put releases hours before
- * the findings they followed. */
-var first = events.indexOf("architecture v2");
-var second = events.indexOf("release 20260825T213240Z");
-ok(first !== -1 && second !== -1 && first < second,
-   "server ordering is preserved, newest first");
+/* ---- full render and delegated interaction ----------------------------- */
+HOST = {innerHTML:"",className:""};
+ARCH_VIEW = "runtime"; ARCH_STEP = "all"; ARCH_SELECTED = null; ARCH_QUERY = ""; ARCH_FILTER = "all"; archResetCamera();
+renderArchitecture(PAYLOAD, HEALTH_DOWN);
+ok(HOST.innerHTML.indexOf("Explore how Farm Friends works") !== -1, "full render leads with an explanatory architecture workspace");
+ok(HOST.innerHTML.indexOf('id="arch-map-svg"') !== -1, "full render includes the interactive graph");
+ok(HOST.innerHTML.indexOf("Architecture change history") !== -1, "history remains available as secondary detail");
+ok(typeof HOST.onclick === "function" && typeof HOST.onwheel === "function", "render binds click, pan, zoom, and wheel interaction");
+function targetWith(attribute, value) {
+  return {parentNode:HOST,getAttribute:function (name) { return name === attribute ? value : null; }};
+}
+HOST.onclick({target:targetWith("data-arch-node","mcp")});
+ok(ARCH_SELECTED === "mcp" && HOST.innerHTML.indexOf("selected-out") !== -1, "clicking a node focuses its relationships");
+HOST.oninput({target:{value:"cycle",getAttribute:function (name) { return name === "data-arch-search" ? "" : null; }}});
+ok(ARCH_QUERY === "cycle" && ARCH_SELECTED === null && HOST.innerHTML.indexOf("search-match") !== -1,
+   "typing a search immediately replaces node focus with search focus");
+ARCH_QUERY = "";
+HOST.onclick({target:targetWith("data-arch-view","structure")});
+ok(ARCH_VIEW === "structure" && HOST.innerHTML.indexOf("Dependency lens") !== -1, "lens switch rerenders without a fetch");
+HOST.onclick({target:targetWith("data-arch-step","verify")});
+ok(ARCH_VIEW === "runtime" && ARCH_STEP === "verify" && HOST.innerHTML.indexOf("Run stage") !== -1, "stage selection drills into execution");
+HOST.onclick({target:targetWith("data-arch-zoom","in")});
+ok(ARCH_CAMERA.scale === 1.25, "zoom controls change the camera");
+HOST.onclick({target:targetWith("data-arch-filter","canary")});
+ok(ARCH_FILTER === "canary" && count(HOST.innerHTML,'class="arch-ev"') === 1, "history filtering remains interactive");
 
-/* A failed canary or order must read as failed. */
-ok(archEventHtml({ ts: "2026-08-25T21:00:00Z", kind: "canary", title: "reverted", ok: false })
-   .indexOf("\u2717") !== -1, "a failed event is marked failed");
-ok(archEventHtml({ ts: "2026-08-25T21:00:00Z", kind: "canary", title: "kept", ok: true })
-   .indexOf("\u2713") !== -1, "a successful event is marked successful");
-
-/* ---- stats ------------------------------------------------------------- */
+/* ---- stats and escaping ------------------------------------------------ */
 var stats = archStatsHtml(CURRENT);
-ok(count(stats, 'class="arch-stat"') === 6, "all six headline stats render");
-ok(stats.indexOf("2,700") !== -1, "large counts are thousands-separated");
-ok(archStatsHtml({ stats: {} }).indexOf("-") !== -1, "a missing stat shows a dash, not NaN");
-
-/* ---- escaping ---------------------------------------------------------- */
+ok(count(stats,'class="arch-stat"') === 6, "all headline stats render");
+ok(stats.indexOf("3,340") !== -1, "large values are thousands-separated");
+ok(archStatsHtml({stats:{}}).indexOf("-") !== -1, "missing stats show a dash, not NaN");
 ok(archEscape('<script>x</script>') === "&lt;script&gt;x&lt;/script&gt;", "markup is escaped");
 ok(archEscape(null) === "", "null escapes to empty");
-var hostile = archDetailHtml({
-  nodes: [{ id: "<img src=x onerror=1>", kind: "module", layer: "play", path: "a\"b", loc: 1 }],
-  edges: []
-}, "<img src=x onerror=1>");
-ok(hostile.indexOf("<img") === -1, "a hostile component name cannot inject markup");
-ok(archEventHtml({ ts: "x", kind: "finding", title: "<b>no</b>", detail: "<i>no</i>" }).indexOf("<b>") === -1,
-   "a hostile event title cannot inject markup");
+var hostileCurrent = clone(CURRENT);
+hostileCurrent.nodes.push({id:'<img src=x onerror=1>',kind:"module",layer:"play",path:'a"b',loc:1});
+hostileCurrent.edges.push({source:'<img src=x onerror=1>',target:"cycle"});
+var hostileModel = archGraphModel(hostileCurrent,"structure","all",null,"");
+ok(archGraphHtml(hostileModel).indexOf("<img") === -1, "hostile component names cannot inject SVG markup");
+ok(archEventHtml({ts:"x",kind:"version",title:"<b>no</b>",added:["<img>"]}).indexOf("<img>") === -1, "event titles and diffs cannot inject markup");
 
-/* ---- degradation ------------------------------------------------------- */
+/* ---- malformed data must never blank the dashboard --------------------- */
 var threw = null;
 try {
-  archLayersHtml({}, {});
-  archLayersHtml({ layers: null, nodes: null, tools: null }, null);
-  archDetailHtml({}, "x");
-  archEventsHtml(null, "all");
-  archStatsHtml({});
-  archAgentHealth({});
-  archEventHtml({});
-  renderArchitecture(null, null);
-  renderArchitecture({ error: "boom" }, null);
-  renderArchitecture(PAYLOAD, HEALTH_DOWN);
+  archLayersHtml({}); archLayersHtml({layers:null,nodes:null,tools:null});
+  archGraphIndex({},"runtime","all"); archGraphModel({},"runtime","all",null,"");
+  archGraphHtml(archGraphModel({},"structure","all",null,""));
+  archDetailHtml({},"x"); archEventsHtml(null,"all"); archStatsHtml({}); archAgentHealth({}); archEventHtml({});
+  renderArchitecture(null,null); renderArchitecture({error:"boom"},null); renderArchitecture(PAYLOAD,HEALTH_DOWN);
 } catch (error) { threw = error.message || String(error); }
 ok(threw === null, "malformed payloads degrade without throwing", threw || "");
 

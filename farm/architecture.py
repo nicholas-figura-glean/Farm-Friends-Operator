@@ -199,6 +199,76 @@ def _tools() -> List[str]:
         return []
 
 
+def _runtime_topology() -> Dict[str, Any]:
+    """Aggregate the function graph into honest module-level execution paths.
+
+    The architecture map answers two different questions. Import edges explain
+    structure ("what depends on this?"); this projection explains execution
+    ("what does a run call on its way to the game?"). Both are derived from source,
+    but they are deliberately kept as separate edge sets so the UI never presents an
+    import as measured control flow.
+
+    `topology` includes function-level semantic shortcuts from cycle methods straight
+    to MCP tool nodes as well as the shared Client transport path. At subsystem scale
+    every external call crosses `farm/mcp.py`, so tool edges are anchored there. This
+    removes duplicate long edges while preserving the real boundary and each step that
+    can reach it.
+    """
+    try:
+        from farm import topology
+
+        graph = topology.cached_graph() or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"edges": [], "steps": [], "errors": [str(exc)[:160]], "stats": {}}
+
+    nodes = {str(n.get("id")): n for n in (graph.get("nodes") or []) if n.get("id")}
+    merged: Dict[Tuple[str, str, str], set] = {}
+    for edge in graph.get("edges") or []:
+        source = nodes.get(str(edge.get("source")))
+        target = nodes.get(str(edge.get("target")))
+        if not source or not target:
+            continue
+        source_module = str(source.get("module") or "")
+        target_kind = str(target.get("kind") or "")
+        if target_kind == "tool":
+            source_id = "mcp"
+            target_id = "tool:%s" % str(target.get("label") or "")
+            kind = "tool"
+        elif target_kind == "func":
+            source_id = source_module
+            target_id = str(target.get("module") or "")
+            kind = "call"
+        else:
+            continue
+        if not source_id or not target_id or source_id == target_id:
+            continue
+
+        source_steps = set(str(s) for s in (source.get("steps") or []))
+        target_steps = set(str(s) for s in (target.get("steps") or []))
+        steps = source_steps & target_steps or source_steps or target_steps
+        if str(source.get("kind") or "") == "step":
+            steps.add(str(source.get("label") or ""))
+        merged.setdefault((source_id, target_id, kind), set()).update(s for s in steps if s)
+
+    runtime_edges = [
+        {"source": source, "target": target, "kind": kind, "steps": sorted(steps)}
+        for (source, target, kind), steps in sorted(merged.items())
+    ]
+    runtime_steps = [
+        {"name": str(step.get("name") or ""),
+         "order": int(step.get("order") or 0),
+         "modules": sorted(str(m) for m in (step.get("modules") or [])),
+         "tools": sorted(str(t) for t in (step.get("tools") or []))}
+        for step in (graph.get("steps") or []) if step.get("name")
+    ]
+    return {
+        "edges": runtime_edges,
+        "steps": runtime_steps,
+        "errors": [str(e) for e in (graph.get("errors") or [])],
+        "stats": graph.get("stats") or {},
+    }
+
+
 def _modules() -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], List[str]]:
     """Module components and the import edges between them."""
     nodes: List[Dict[str, Any]] = []
@@ -270,6 +340,7 @@ def snapshot() -> Dict[str, Any]:
     agents = _agents()
     tools = _tools()
     stores = _stores()
+    runtime = _runtime_topology()
     sig = signature(nodes, edges, agents)
 
     by_layer: Dict[str, int] = {}
@@ -286,6 +357,10 @@ def snapshot() -> Dict[str, Any]:
         "agents": agents,
         "tools": tools,
         "stores": stores,
+        "runtime_edges": runtime["edges"],
+        "runtime_steps": runtime["steps"],
+        "runtime_errors": runtime["errors"],
+        "runtime_stats": runtime["stats"],
         "unmapped": unmapped,
         "stats": {
             "modules": sum(1 for n in nodes if n["kind"] == "module"),
