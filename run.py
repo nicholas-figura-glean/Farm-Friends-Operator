@@ -464,7 +464,7 @@ def do_supervise(cadence: int = 300) -> int:
 
     def accepted_compaction_reader() -> bool:
         state = analysis.state_dir()
-        live = state.parent / "release"
+        live = control.project_root() / "release"
         compatible = compaction.compatibility(state)
         return (
             (live / "farm" / "compaction.py").is_file()
@@ -828,7 +828,7 @@ def do_compaction(run: bool = False) -> int:
     state = analysis.state_dir()
     if run:
         canary_store = str(state / "canary.json")
-        live_release = state.parent / "release"
+        live_release = control.project_root() / "release"
         live_compactor = live_release / "farm" / "compaction.py"
         if canary.active(canary_store):
             print("COMPACTION REFUSED: a release is still provisional")

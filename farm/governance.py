@@ -105,7 +105,7 @@ def collect_snapshot(run: int) -> Dict[str, Any]:
     experiments = analysis.read_ndjson(state / "experiments.ndjson", limit=200)
     question_rows = questions.load_all()
     order_rows = list(workorders.current().values())
-    live_release = state.parent / "release"
+    live_release = control.project_root() / "release"
     live_revision = os.path.basename(os.path.realpath(str(live_release)))
 
     return {

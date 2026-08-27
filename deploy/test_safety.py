@@ -435,6 +435,11 @@ def main() -> int:
         suite.check("publish and accept a compaction-capable release first" in supervisor_source
                     and "compaction.compatibility(state)" in supervisor_source,
                     "manual compaction enforces the accepted-reader compatibility watermark")
+        suite.check(
+            supervisor_source.count('control.project_root() / "release"') >= 2
+            and 'state.parent / "release"' not in supervisor_source,
+            "working-tree and deployed compaction resolve the canonical release pointer",
+        )
 
     finally:
         os.environ.clear()

@@ -183,6 +183,9 @@ def main() -> int:
                 "governance tests gate autonomous releases")
     suite.check("governance.run_review" in run_source and "--governance-status" in run_source,
                 "the supervisor and CLI expose the periodic review")
+    governance_source = (PROJECT / "farm" / "governance.py").read_text(encoding="utf-8")
+    suite.check('control.project_root() / "release"' in governance_source,
+                "deployed governance resolves the canonical release pointer")
 
     print()
     if suite.failures:
