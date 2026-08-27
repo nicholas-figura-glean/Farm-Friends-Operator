@@ -224,6 +224,25 @@ finally:
 check("a flat canary status preserves the live and rollback revisions",
       canary_view.get("revision") == "rev-new" and canary_view.get("previous") == "rev-old",
       str(canary_view))
+original_canary_status = canary.status
+try:
+    canary.status = lambda: {
+        "status": canary.REGRESSED, "revision": "rev-bad", "previous": "rev-good",
+        "resolved_ts": "2026-08-27T16:54:38Z",
+        "resolution": "observed 0.1197 below floor 0.1237",
+        "verdict": {"status": canary.REGRESSED, "runs_observed": 3,
+                    "baseline_per_animal": 0.1650, "observed_per_animal": 0.1197,
+                    "threshold": 0.1237},
+    }
+    resolved_canary_view = autonomy.canary_state()
+finally:
+    canary.status = original_canary_status
+check("a resolved canary keeps its explanatory metrics in the dashboard projection",
+      resolved_canary_view.get("status") == canary.REGRESSED
+      and resolved_canary_view.get("runs_observed") == 3
+      and resolved_canary_view.get("threshold") == 0.1237
+      and resolved_canary_view.get("resolved_ts") == "2026-08-27T16:54:38Z",
+      str(resolved_canary_view))
 research_only = {
     "orders": {"summary": {"open": 4, "repair_open": 0, "research_open": 4,
                              "oldest_open_age_seconds": 99999}},

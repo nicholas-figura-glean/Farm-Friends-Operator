@@ -469,10 +469,17 @@ def resolve(
 
     # Clear either way. A regressed canary must not stay armed, or the next
     # supervisor pass would try to revert again and walk the pointer backwards.
-    _write_json(store, dict(record, status=status, resolved_ts=_utcnow(),
+    resolved_ts = _utcnow()
+    # Preserve the structured decision after probation ends. Without it the
+    # dashboard can say only "regressed" and loses the measured baseline, observed
+    # value, threshold, excluded runs, and sample count that explain why.
+    durable_verdict = dict(verdict)
+    _write_json(store, dict(record, status=status, resolved_ts=resolved_ts,
                             resolution=verdict.get("reason", "")[:300],
+                            verdict=durable_verdict,
                             efficacy=verdict.get("efficacy") or {}))
-    _append(history, dict(outcome, event="resolved", ts=_utcnow(),
+    _append(history, dict(outcome, event="resolved", ts=resolved_ts,
+                          verdict=durable_verdict,
                           efficacy=verdict.get("efficacy") or {}))
     try:
         evaluation.record_resolution(record, verdict, store)
@@ -618,6 +625,7 @@ def status(store: str = STORE, run_history: str = RUN_HISTORY) -> Dict[str, Any]
         "policy_id": record.get("policy_id"),
         "efficacy": record.get("efficacy") or {},
         "champion": evaluation.champion(store),
+        "verdict": record.get("verdict") or {},
     }
     if out["armed"]:
         out["verdict"] = evaluate(store, run_history)

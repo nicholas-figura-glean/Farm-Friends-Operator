@@ -719,6 +719,12 @@ canary.arm("revB", "revA", store=store, history=hist, run_history=runs)
 write_runs(base + [{"run": n, "produce_per_min": 40.0, "collected": 10} for n in range(7, 10)])
 first = canary.resolve(canary.evaluate(store, runs), rev, store, hist)
 check("a regressed canary acts", first.get("acted") is True, str(first))
+with open(store, encoding="utf-8") as handle:
+    resolved_record = json.load(handle)
+check("resolution preserves the structured verdict for operator explanation",
+      (resolved_record.get("verdict") or {}).get("status") == canary.REGRESSED
+      and (resolved_record.get("verdict") or {}).get("runs_observed") == 3,
+      str(resolved_record.get("verdict")))
 second = canary.evaluate(store, runs)
 check("after resolution the canary is inactive", second["status"] == canary.INACTIVE, str(second))
 check("a resolved canary cannot revert again",

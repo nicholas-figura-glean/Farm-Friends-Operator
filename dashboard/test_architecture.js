@@ -135,6 +135,32 @@ ok(situation.indexOf("Happening now") !== -1 && situation.indexOf("What changed"
    situation.indexOf("Autonomous action") !== -1 && situation.indexOf("Recovery ownership") !== -1,
    "headless ownership is named explicitly");
 ok(situation.indexOf("Published bounded architecture repair") !== -1, "latest autonomous action is projected without inventing activity");
+var FAILED_CANARY_VIEW = clone(HEALTH_OK);
+FAILED_CANARY_VIEW.canary = {
+  status:"regressed", revision:"rev-bad", previous:"rev-good", runs_observed:3,
+  baseline_per_animal:0.1650, observed_per_animal:0.1197, threshold:0.1237,
+  resolution:"per-animal produce 0.1197 vs baseline 0.1650 (floor 0.1237) over 3 run(s)",
+  resolved_ts:"2026-08-27T16:54:38Z"
+};
+var failedPosture = archPosture(PAYLOAD,cleanCurrent,FAILED_CANARY_VIEW);
+ok(failedPosture.tone === "watch" && failedPosture.label.indexOf("last canary rolled back") !== -1,
+   "a resolved regression remains visible without claiming rollback is still running");
+var failedCanary = archCanaryHtml(FAILED_CANARY_VIEW);
+ok(failedCanary.indexOf("Canary failed · rollback completed") !== -1 &&
+   failedCanary.indexOf("Rejected rev-bad and restored rev-good") !== -1,
+   "failed canary card states the decision and rollback action");
+ok(failedCanary.indexOf("0.1197") !== -1 && failedCanary.indexOf("0.1237") !== -1 &&
+   failedCanary.indexOf("per-animal produce 0.1197") !== -1,
+   "failed canary card shows observed value, failure floor, and exact reason");
+var SUCCEEDED_CANARY_VIEW = clone(HEALTH_OK);
+SUCCEEDED_CANARY_VIEW.canary = {status:"healthy",revision:"rev-kept",previous:"rev-old",runs_observed:10,
+  resolution:"reliability effect 3.2% is inside the operational band",resolved_ts:"2026-08-27T06:05:09Z"};
+ok(archCanaryHtml(SUCCEEDED_CANARY_VIEW).indexOf("Canary succeeded · release kept") !== -1 &&
+   archCanaryHtml(SUCCEEDED_CANARY_VIEW).indexOf("reliability effect 3.2%") !== -1,
+   "successful canary card explains why the candidate was kept");
+ok(archCanaryHtml(WATCH_VIEW).indexOf("Canary watching") !== -1 &&
+   archCanaryHtml(WATCH_VIEW).indexOf("Candidate is provisional") !== -1,
+   "active canary card names probation and rollback ownership");
 var UNCHANGED_VERSION = {events:[{ts:"2026-08-26T15:00:00Z",kind:"version",structural:true,title:"architecture v3",detail:"scheduled scan",added:[],removed:[]}]};
 ok(archSituationHtml(UNCHANGED_VERSION,cleanCurrent,HEALTH_OK,cleanPosture).indexOf("no component additions or removals") !== -1,
    "a recorded version with unchanged component membership says so explicitly");
@@ -241,6 +267,8 @@ ARCH_VIEW = "runtime"; ARCH_STEP = "all"; ARCH_SELECTED = null; ARCH_QUERY = "";
 renderArchitecture(PAYLOAD, HEALTH_DOWN);
 ok(HOST.innerHTML.indexOf("Architecture control plane") !== -1 && HOST.innerHTML.indexOf("Happening now") !== -1,
    "full render leads with an operator architecture summary");
+ok(HOST.innerHTML.indexOf('aria-label="Canary decision"') !== -1,
+   "full architecture render exposes the canary decision without another tab");
 ok(HOST.innerHTML.indexOf('id="arch-map-svg"') !== -1, "full render includes the interactive graph");
 ok(HOST.innerHTML.indexOf("Architecture audit trail") !== -1, "history remains available as secondary detail");
 ok(typeof HOST.onclick === "function" && typeof HOST.onwheel === "function", "render binds click, pan, zoom, and wheel interaction");

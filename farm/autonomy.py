@@ -135,8 +135,12 @@ def canary_state() -> Dict[str, Any]:
         "threshold": verdict.get("threshold"),
         "excluded_runs": verdict.get("excluded_runs") or [],
         "excluded_reason": verdict.get("excluded_reason"),
+        "armed_ts": info.get("armed_ts"),
+        "resolved_ts": info.get("resolved_ts"),
         "armed_age_seconds": _age_seconds(info.get("armed_ts")),
         "resolution": info.get("resolution"),
+        "change_class": info.get("change_class") or "reliability",
+        "efficacy": info.get("efficacy") or {},
     }
 
 

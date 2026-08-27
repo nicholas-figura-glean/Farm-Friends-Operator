@@ -98,16 +98,16 @@ function archPosture(payload, current, autonomyView) {
   var dirtySources = archList(vcs.dirty_source_paths).length;
   var canary = (autonomyView || {}).canary || {};
   var canaryStatus = String(canary.status || "").toLowerCase();
-  var canaryBad = ["failed", "reverted", "unhealthy", "rollback"].indexOf(canaryStatus) !== -1;
+  var canaryBad = ["regressed", "failed", "reverted", "unhealthy", "rollback"].indexOf(canaryStatus) !== -1;
   var canaryWatching = canaryStatus === "watching" || canaryStatus === "probation";
-  var tone = drift || downAgents || unmapped || runtimeErrors || canaryBad ? "recovering" :
-    (dirtySources || canaryWatching ? "watch" : "good");
+  var tone = drift || downAgents || unmapped || runtimeErrors ? "recovering" :
+    (dirtySources || canaryWatching || canaryBad ? "watch" : "good");
   var intervention = "No recovery work queued";
   if (drift) intervention = "Architecture agent is recording the live topology before promotion";
   else if (downAgents) intervention = "Supervisor is restoring " + downAgents + " unloaded service" + (downAgents === 1 ? "" : "s");
   else if (unmapped) intervention = "Architecture agent is classifying " + unmapped + " unmapped module" + (unmapped === 1 ? "" : "s");
   else if (runtimeErrors) intervention = "Architecture agent is isolating " + runtimeErrors + " path derivation error" + (runtimeErrors === 1 ? "" : "s");
-  else if (canaryBad) intervention = "Canary is rolling back the failed architecture release";
+  else if (canaryBad) intervention = "Canary rejected " + (canary.revision || "the candidate") + " and rolled back to " + (canary.previous || "the prior release");
   else if (dirtySources) intervention = "Release automation is containing " + dirtySources + " changed source file" + (dirtySources === 1 ? "" : "s") + " until gates pass";
   else if (canaryWatching) intervention = "Canary owns observation and automatic rollback";
   var version = Number(payload.versions) || 0;
@@ -116,7 +116,8 @@ function archPosture(payload, current, autonomyView) {
   return {
     tone: tone,
     label: tone === "recovering" ? "Architecture self-healing" :
-      (tone === "watch" ? "Architecture coherent · automation watching" : "Architecture coherent"),
+      (canaryBad ? "Architecture coherent · last canary rolled back" :
+        (tone === "watch" ? "Architecture coherent · automation watching" : "Architecture coherent")),
     intervention: intervention,
     liveTitle: liveTitle,
     liveDetail: (generatedAge ? "Derived " + generatedAge : "Derived from the current source tree") +
@@ -132,6 +133,46 @@ function archPosture(payload, current, autonomyView) {
     downAgents: downAgents,
     protectedCount: Number(stats.protected) || 0
   };
+}
+
+function archCanaryHtml(autonomyView) {
+  var canary = (autonomyView || {}).canary || {};
+  var status = String(canary.status || "inactive").toLowerCase();
+  var watching = status === "watching" || status === "probation";
+  var failed = ["regressed", "failed", "reverted", "unhealthy", "rollback"].indexOf(status) !== -1;
+  var succeeded = ["healthy", "succeeded", "passed", "kept"].indexOf(status) !== -1;
+  var tone = failed ? "recovering" : (watching ? "watch" : (succeeded ? "good" : "neutral"));
+  var candidate = canary.revision || "No candidate recorded";
+  var previous = canary.previous || "No rollback target recorded";
+  var reason = canary.reason || canary.resolution ||
+    (watching ? "Waiting for production evidence" : "No canary decision has been recorded");
+  var headline = watching ? "Canary watching " + candidate :
+    (failed ? "Canary failed · rollback completed" :
+      (succeeded ? "Canary succeeded · release kept" : "No active canary"));
+  var action = watching ? "Candidate is provisional; rollback target " + previous :
+    (failed ? "Rejected " + candidate + " and restored " + previous :
+      (succeeded ? "Promoted " + candidate + " after its evidence window" : "No release is on probation"));
+  function number(value) {
+    var parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed.toFixed(4) : "—";
+  }
+  function metric(label, value) {
+    return '<span><small>' + archEscape(label) + '</small><b>' + archEscape(value == null ? "—" : value) + '</b></span>';
+  }
+  var observed = canary.runs_observed == null ? "—" : String(canary.runs_observed);
+  var excluded = archList(canary.excluded_runs);
+  var timestamp = watching ? canary.armed_ts : canary.resolved_ts;
+  var timeDetail = timestamp ? (watching ? "Armed " : "Resolved ") + (archAge(timestamp) || timestamp) : "Decision time unavailable";
+  return '<section class="card arch-canary ' + tone + '" aria-label="Canary decision"><div class="arch-canary-head"><div>' +
+    '<span class="page-kicker">Canary decision</span><h3>' + archEscape(headline) + '</h3><p>' + archEscape(action) +
+    '</p></div><strong>' + archEscape(status) + '</strong></div><div class="arch-canary-reason"><small>Why</small><b>' +
+    archEscape(reason) + '</b></div><div class="arch-canary-metrics">' +
+    metric("candidate", candidate) + metric("rollback target", previous) + metric("runs observed", observed) +
+    metric("baseline / animal", number(canary.baseline_per_animal)) +
+    metric("observed / animal", number(canary.observed_per_animal)) +
+    metric("failure floor", number(canary.threshold)) + '</div><p class="arch-canary-foot">' + archEscape(timeDetail) +
+    (excluded.length ? ' · Excluded runs ' + archEscape(excluded.join(", ")) +
+      (canary.excluded_reason ? ' (' + archEscape(canary.excluded_reason) + ')' : '') : '') + '</p></section>';
 }
 
 function archSituationHtml(payload, current, autonomyView, posture) {
@@ -785,7 +826,7 @@ function renderArchitecture(payload, autonomyView) {
       revision + '</code>.</p><div class="delta-row">' + archStatsHtml(current, posture) + '</div></div>' +
       '<div class="hero-verdict ' + posture.tone + '"><b>' + archEscape(posture.label) + '</b><span>' +
       archEscape(posture.intervention) + '</span></div></section>' +
-    archSituationHtml(payload, current, autonomyView, posture) + drift + unmapped + runtimeWarning +
+    archSituationHtml(payload, current, autonomyView, posture) + archCanaryHtml(autonomyView) + drift + unmapped + runtimeWarning +
     archToolbarHtml(current, model) +
     '<div class="arch-workspace"><section class="arch-map-card" aria-label="Interactive architecture map">' + context +
       '<div class="arch-map-legend"><span><i class="module"></i>module</span><span><i class="agent"></i>service</span>' +
