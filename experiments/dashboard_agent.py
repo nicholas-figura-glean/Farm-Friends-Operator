@@ -313,14 +313,19 @@ def _resolve_healthy_orders(
     results: List[Dict[str, Any]],
     problems: List[Dict[str, Any]],
     path: str = workorders.QUEUE,
+    healthy_sources: Optional[List[str]] = None,
 ) -> List[str]:
     """Close readout repairs whose exact source is healthy again."""
     unhealthy = {str(problem.get("source") or "") for problem in problems}
     current = workorders.current(path)
     resolved: List[str] = []
-    for result in results:
-        source = str(result.get("source") or "")
-        if not source or source in unhealthy or not result.get("ok"):
+    healthy = {
+        str(result.get("source") or "")
+        for result in results if result.get("ok")
+    }
+    healthy.update(str(source) for source in (healthy_sources or []) if source)
+    for source in sorted(healthy):
+        if not source or source in unhealthy:
             continue
         order_id = "dashboard-%s" % source.replace(".", "-")
         order = current.get(order_id)
@@ -401,6 +406,7 @@ def main() -> int:
             })
 
     stale = _staleness()
+    healthy_staleness: List[str] = []
     for key, value in stale.items():
         if not key.endswith("_error"):
             continue
@@ -422,6 +428,8 @@ def main() -> int:
                 "why": "its writer should run well inside %ds" % budget,
                 "source": key,
             })
+        elif isinstance(age, int):
+            healthy_staleness.append(key)
 
     # Architecture versioning. Recorded after the probes so that a snapshot which
     # cannot even be computed is reported as a broken readout first.
@@ -454,7 +462,9 @@ def main() -> int:
     # Healthy verification is also a transition. Without closing stale repairs, an
     # already-recovered readout permanently poisons repair-flow reviews and consumes
     # future author budget.
-    resolved = _resolve_healthy_orders(results, problems)
+    resolved = _resolve_healthy_orders(
+        results, problems, healthy_sources=healthy_staleness,
+    )
 
     # One order per distinct broken readout. The change id is derived from the source
     # so a readout that stays broken updates its existing order instead of filing a new

@@ -855,6 +855,21 @@ with tempfile.TemporaryDirectory() as tmp:
           bool(reopened) and held == []
           and workorders.current(queue)["dashboard-test-probe"]["status"] == workorders.OPEN,
           str(held))
+    freshness_change = {
+        "id": "dashboard-cycle_age", "kind": "dashboard_readout",
+        "severity": "degraded", "summary": "synthetic stale cycle", "tool": "cycle_age",
+    }
+    workorders.submit(
+        freshness_change, source="dashboard_agent", intent="restore freshness",
+        acceptance=["cycle is fresh"], files=["monitor.py"], path=queue,
+    )
+    freshness_closed = dashboard_agent._resolve_healthy_orders(
+        [], [], path=queue, healthy_sources=["cycle_age"],
+    )
+    check("a recovered staleness source supersedes its repair order",
+          freshness_closed == ["dashboard-cycle_age"]
+          and workorders.current(queue)["dashboard-cycle_age"]["status"] == workorders.SUPERSEDED,
+          str(freshness_closed))
 
 
 # --------------------------------------------------------------------------
