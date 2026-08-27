@@ -914,6 +914,7 @@ def do_self_test() -> int:
     from farm import novelty as _novelty
     from farm import parse, rules
     from experiments import activity_probe as _activity_probe
+    from experiments import registry as _probe_registry
 
     def text(path):
         d = json.load(open(path))
@@ -1319,6 +1320,25 @@ def do_self_test() -> int:
     checks += 1
     if _probe["accepted_coin_outflow"] != 400_000 or not _probe["material_counterparty_growth"]:
         failures.append("activity probe missed coin transfer followed by counterparty acceleration")
+    _rival_probe = _activity_probe.build([
+        {
+            "run": 20, "rival_herds": {"John": 1_073_100},
+            "rival_coins": {"John": 190_294}, "rivals": {"John": 14_890_978},
+        },
+        {
+            "run": 21, "rival_herds": {"John": 1_073_094},
+            "rival_coins": {"John": 1_013_870}, "rivals": {"John": 15_050_000},
+        },
+    ])
+    checks += 1
+    if not _rival_probe["settled"] or not _rival_probe["material_rival_changes"]:
+        failures.append("zero-call activity replay could not settle a rival cash regime change")
+    checks += 1
+    if (
+        "activity_novelty_rival" not in _probe_registry.PROBES["activity_replay"]["question_classes"]
+        or "activity_novelty_rival" in _probe_registry.PROBES["peek_top_rival"]["question_classes"]
+    ):
+        failures.append("rival novelty was routed to the approval-requiring visit_farm probe")
 
     # Oversell recovery. The inventory read is stale by the time the sell lands --
     # produce spoils, trades ship goods out, and the expand agent runs concurrently --

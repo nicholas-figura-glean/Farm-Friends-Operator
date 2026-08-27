@@ -5,10 +5,17 @@ marked both read_only and autonomous, and every execution still runs under the
 farm lock with a wall-time ceiling.
 """
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 PROBES = {
     "activity_replay": {
         "hypothesis": "New trade activity can be classified from resource flows, neutral alternatives, and subsequent counterparty growth before trade automation resumes.",
-        "question_classes": ["activity_novelty_trade"],
+        "question_classes": ["activity_novelty_trade", "activity_novelty_rival"],
         "subject_patterns": [],
         "command": ["experiments/activity_probe.py"],
         "read_only": True,
@@ -99,7 +106,6 @@ PROBES = {
         "evidence_class": "direct_mechanism",
         "question_classes": [
             "rival_wake", "threat", "rival_growing", "rank_lost", "overtaken",
-            "activity_novelty_rival",
         ],
         "subject_patterns": [],
         "command": ["experiments/registry.py", "--peek-top-rival"],

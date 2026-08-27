@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from farm import analysis, rules
+from farm import analysis, novelty, rules
 
 
 def _state_dir() -> Path:
@@ -29,6 +29,7 @@ def _state_dir() -> Path:
 def build(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     decisions = []
     correlations = []
+    rival_changes = []
     for index, row in enumerate(rows):
         for decision in row.get("trade_decisions") or []:
             item = {
@@ -61,6 +62,46 @@ def build(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                     else None
                 ),
             })
+        if index == 0:
+            continue
+        previous = rows[index - 1]
+        names = set(row.get("rival_herds") or {}) | set(row.get("rival_coins") or {})
+        for name in sorted(names):
+            herd_before = (previous.get("rival_herds") or {}).get(name)
+            herd_after = (row.get("rival_herds") or {}).get(name)
+            coins_before = (previous.get("rival_coins") or {}).get(name)
+            coins_after = (row.get("rival_coins") or {}).get(name)
+            produce_before = (previous.get("rivals") or {}).get(name)
+            produce_after = (row.get("rivals") or {}).get(name)
+            herd_delta = (
+                int(herd_after) - int(herd_before)
+                if isinstance(herd_before, (int, float)) and isinstance(herd_after, (int, float))
+                else 0
+            )
+            coin_delta = (
+                int(coins_after) - int(coins_before)
+                if isinstance(coins_before, (int, float)) and isinstance(coins_after, (int, float))
+                else 0
+            )
+            if herd_delta < rules.RIVAL_HERD_GROWTH_ALARM and coin_delta < novelty.RIVAL_COIN_INFLOW_ALARM:
+                continue
+            rival_changes.append({
+                "run": row.get("run"),
+                "player": name,
+                "herd_before": herd_before,
+                "herd_after": herd_after,
+                "herd_delta": herd_delta,
+                "coins_before": coins_before,
+                "coins_after": coins_after,
+                "coin_delta": coin_delta,
+                "produce_before": produce_before,
+                "produce_after": produce_after,
+                "produce_delta": (
+                    int(produce_after) - int(produce_before)
+                    if isinstance(produce_before, (int, float)) and isinstance(produce_after, (int, float))
+                    else None
+                ),
+            })
 
     accepted_coin_outflow = sum(
         item["want_qty"]
@@ -86,13 +127,16 @@ def build(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "blocked_coin_outflow": blocked_coin_outflow,
         "counterparty_correlations": correlations[-20:],
         "material_counterparty_growth": material_counterparty_growth[-20:],
+        "material_rival_changes": rival_changes[-40:],
         "neutral_feed_price": rules.FEED_COST,
         "finding": (
             "unsafe coin-to-rival transfer observed; retain categorical coin-outflow block"
             if accepted_coin_outflow or material_counterparty_growth
+            else "material rival regime change confirmed from leaderboard deltas"
+            if rival_changes
             else "observed offers were contained by the promoted trade and reserve gates"
         ),
-        "settled": bool(decisions),
+        "settled": bool(decisions or rival_changes),
     }
 
 
