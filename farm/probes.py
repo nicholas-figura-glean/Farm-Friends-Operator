@@ -257,13 +257,27 @@ def _recent_events() -> List[Dict[str, Any]]:
     return analysis.read_ndjson(_ledger())
 
 
+def _cadence_allows(
+    call_budget: int,
+    matching: List[Dict[str, Any]],
+    throttled: bool,
+) -> bool:
+    if not throttled or call_budget <= 0:
+        return True
+    return any(
+        str(question.get("class") or "").startswith("activity_novelty_")
+        for question in matching
+    )
+
+
 def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optional[Dict[str, Any]]:
     """Run at most one autonomous read-only probe.
 
-    Remote probes retain the global cadence because calls and rival inspection
-    are scarce. Pure local replays cost no calls and may settle a fail-closed
-    novelty hold immediately; making them wait twenty runs would turn adaptation
-    into an hour-long outage for no safety benefit.
+    Remote routine probes retain the global cadence because calls and rival
+    inspection are scarce. A newly opened novelty question may spend its own
+    declared bounded budget immediately once, and pure local replays are always
+    immediate; making either wait twenty runs would turn adaptation into an
+    hour-long outage for no safety benefit.
     """
     if not isinstance(run, int) or not open_questions:
         return None
@@ -282,8 +296,6 @@ def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optio
         if not spec.get("read_only") or not spec.get("autonomous"):
             continue
         call_budget = int((spec.get("budget") or {}).get("calls") or 0)
-        if throttled and call_budget > 0:
-            continue
         allowed_classes = set(spec.get("question_classes") or [])
         subject_patterns = [str(value).lower() for value in spec.get("subject_patterns") or []]
         matching = []
@@ -295,6 +307,8 @@ def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optio
                 continue
             matching.append(question)
         if matching:
+            if not _cadence_allows(call_budget, matching, throttled):
+                continue
             return run_probe(
                 probe_id, explicit=False, run=run,
                 question_ids=[str(question.get("id")) for question in matching if question.get("id")],

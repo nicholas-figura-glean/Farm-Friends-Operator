@@ -1295,6 +1295,17 @@ def do_self_test() -> int:
     checks += 1
     if heal.classify("NOVEL ACTIVITY [trade]: test; holding trades pending evidence")[0] != "activity_novelty_trade":
         failures.append("trade novelty is not routed as a strategic question")
+    checks += 1
+    if not probes._cadence_allows(
+        1, [{"class": "activity_novelty_rival"}], throttled=True
+    ):
+        failures.append("bounded rival novelty probe waited behind routine probe cadence")
+    checks += 1
+    if probes._cadence_allows(1, [{"class": "rival_growing"}], throttled=True):
+        failures.append("ordinary remote probe bypassed the global cadence")
+    checks += 1
+    if not probes._cadence_allows(0, [{"class": "activity_novelty_trade"}], throttled=True):
+        failures.append("zero-call novelty replay was unnecessarily throttled")
     _probe = _activity_probe.build([
         {
             "run": 10, "rival_herds": {"John": 100_000},
