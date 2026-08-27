@@ -333,7 +333,14 @@ def _tail_rows(path: Path, wanted: int, block_bytes: int = 64 * 1024) -> List[Di
 def read_rows(path: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Replay valid object rows from archived segments and the active tail."""
     ledger = _path(path)
-    recover(ledger)
+    # The common read path has no interrupted transaction. Avoid taking an
+    # exclusive recovery lock before every bounded dashboard read: an older
+    # reader replaying a large archive may hold a shared lock for seconds, and
+    # serialising behind it creates a lock convoy even when the hot tail suffices.
+    # If a compactor races this check, its exclusive lock completes the atomic
+    # swap before our shared lock is granted.
+    if _transaction_path(ledger).exists():
+        recover(ledger)
     with _open_lock(ledger) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
         try:

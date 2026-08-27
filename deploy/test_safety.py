@@ -86,6 +86,15 @@ def main() -> int:
                         "legacy active path retains only the hot rows")
             suite.check(compaction.read_rows(ledger, limit=3) == expected[-3:],
                         "bounded tail reads cross the segment boundary transparently")
+            saved_recover = compaction.recover
+            try:
+                compaction.recover = lambda unused: (_ for _ in ()).throw(
+                    AssertionError("normal reads took the exclusive recovery path"))
+                no_recovery_tail = compaction.read_rows(ledger, limit=3)
+            finally:
+                compaction.recover = saved_recover
+            suite.check(no_recovery_tail == expected[-3:],
+                        "normal reads avoid the exclusive recovery lock when no transaction exists")
 
             # A dashboard tail read must not parse a 204MB active ledger from byte zero.
             # Include a row larger than the read block and malformed trailing lines so

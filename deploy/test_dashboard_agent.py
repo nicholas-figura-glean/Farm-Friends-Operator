@@ -138,6 +138,9 @@ check("slow state snapshots cannot overlap into a request pileup",
       "if (STATE_LOADING) return;" in monitor_source
       and "STATE_LOADING = true;" in monitor_source
       and "STATE_LOADING = false;" in monitor_source)
+check("trace reads stay inside the compaction hot tail",
+      "_json_lines(TOOL_CALLS, compaction.DEFAULT_HOT_ROWS)" in monitor_source
+      and "calls = boundary[:1000]" in monitor_source)
 check("a release separates gated source from deployment state",
       "FARM_SOURCE_ROOT" in release_source and "FARM_DEPLOY_ROOT" in release_source)
 check("every activated release arms a canary",

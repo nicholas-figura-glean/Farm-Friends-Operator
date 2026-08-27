@@ -584,9 +584,10 @@ def _boundary_calls(pipeline: Dict[str, Any], graph: Dict[str, Any]) -> List[Dic
     run_id = pipeline.get("run")
     calls: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
-    # Read a bounded tail, then filter by exact telemetry context before applying
-    # the display cap. Legacy rows without context retain the time-bound fallback.
-    for row in _json_lines(TOOL_CALLS, 5000):
+    # Read no more than compaction's hot tail. The UI caps at 1,000 paired calls,
+    # so 2,000 start/end rows are sufficient; asking for more would reopen and
+    # parse the entire archived segment on every dashboard poll.
+    for row in _json_lines(TOOL_CALLS, compaction.DEFAULT_HOT_ROWS):
         call_id = str(row.get("id") or "")
         if not call_id:
             continue
