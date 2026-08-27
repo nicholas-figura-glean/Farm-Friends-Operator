@@ -20,7 +20,20 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from . import analysis, compaction, growth, heal, ledger, mcp, parse, policy, progress, rules
+from . import (
+    analysis,
+    compaction,
+    growth,
+    heal,
+    ledger,
+    mcp,
+    novelty,
+    parse,
+    policy,
+    progress,
+    questions,
+    rules,
+)
 from .mcp import Client, McpError, ToolError
 
 STATE_DIR = "state"
@@ -223,13 +236,22 @@ class Cycle(object):
             "trades_sent": 0,
             "trades_accepted": 0,
             "trades_declined": 0,
+            "trade_decisions": [],
+            "trade_coin_outflow": 0,
+            "trade_coin_outflow_blocked": 0,
             "risk_events": [],
             "risk_event_counts": {},
+            "risk_event_signatures": [],
             "risk_charges": 0,
         }
         self.notes: List[str] = []
         # Growth policy for this run, decided in the plan step.
         self.growth: Dict[str, Any] = {}
+        # Pre-action strategic uncertainty. Holds affect only the named domains;
+        # routine collect/feed/sell work continues while research investigates.
+        self.novelty: Dict[str, Any] = {
+            "signals": [], "active_blocks": [], "blocked_domains": []
+        }
         # Soft notes are operational commentary (rate easing, pacing) that belong
         # in the record but must not raise an alert or cost anyone tokens.
         self.notes_soft: List[str] = []
@@ -268,7 +290,16 @@ class Cycle(object):
             self.notes.append("farm_events unavailable: %s" % str(exc)[:100])
             return
         _raw("events", text)
-        events = [event for event in parse.parse_events(text) if event.risk_kind]
+        parsed_events = parse.parse_events(text)
+        self.actions["risk_event_signatures"] = sorted(
+            set(
+                "risk:%s" % event.risk_kind
+                if event.risk_kind
+                else novelty.event_signature(event.text)
+                for event in parsed_events
+            )
+        )
+        events = [event for event in parsed_events if event.risk_kind]
         identities = list(self.meta.get("seen_risk_events") or [])[-500:]
         seen = set(identities)
         new_events = []
@@ -442,24 +473,134 @@ class Cycle(object):
             self.actions["sold"][item] = int(result["qty"])
             self.coins = int(result["coins_after"])
 
-    def handle_incoming_trades(self, farm: parse.Farm) -> None:
-        for trade in farm.incoming:
-            accept = rules.should_accept(
-                trade.offer_item, trade.offer_qty, trade.want_item, trade.want_qty
+    def domain_blocked(self, domain: str) -> bool:
+        return domain in set(self.novelty.get("blocked_domains") or [])
+
+    def assess_novelty(
+        self,
+        run_no: int,
+        tools: List[str],
+        farm: parse.Farm,
+        board: List[parse.LeaderRow],
+    ) -> Dict[str, Any]:
+        rivals = [entry for entry in board if entry.name.strip().lower() != "nick"]
+        snapshot = {
+            "run": run_no,
+            "tools": tools,
+            "trades": [
+                {
+                    "id": trade.id,
+                    "sender": trade.sender,
+                    "recipient": trade.recipient,
+                    "offer_item": trade.offer_item,
+                    "offer_qty": trade.offer_qty,
+                    "want_item": trade.want_item,
+                    "want_qty": trade.want_qty,
+                    "outgoing": trade.outgoing,
+                }
+                for trade in farm.trades
+            ],
+            "rival_herds": {entry.name: entry.animals for entry in rivals},
+            "rival_coins": {entry.name: entry.coins for entry in rivals},
+            "risk_kinds": sorted((self.actions.get("risk_event_counts") or {}).keys()),
+            "event_signatures": self.actions.get("risk_event_signatures") or [],
+        }
+        novelty_state = dict(self.meta.get("novelty") or {})
+        # Bootstrap tool comparison from the pre-sentinel metadata so the first
+        # upgraded run can still fail closed on a capability change.
+        novelty_state.setdefault("tools", self.meta.get("tools") or [])
+        assessed = novelty.assess(
+            snapshot,
+            self.prev,
+            state=novelty_state,
+            question_rows=questions.load_all(),
+        )
+        self.meta["novelty"] = assessed.pop("state")
+        self.novelty = assessed
+        for resolved in self.novelty.get("resolved_blocks") or []:
+            self.notes_soft.append(
+                "novelty hold released: %s (%s)"
+                % (resolved.get("class"), resolved.get("reason"))
             )
-            _intent("respond_to_trade", trade_id=trade.id, accept=accept)
+        if self.novelty.get("blocked_domains"):
+            self.notes_soft.append(
+                "novelty hold active for %s"
+                % ",".join(self.novelty["blocked_domains"])
+            )
+        return self.novelty
+
+    def handle_incoming_trades(self, farm: parse.Farm) -> None:
+        blocked_coin_offers = 0
+        # Evaluate a batch against running balances. Otherwise two offers can
+        # each look safe against the same snapshot but cumulatively consume the
+        # protected feed reserve.
+        balances = dict(farm.inventory)
+        balances["coin"] = farm.coins
+        for trade in farm.incoming:
+            available_qty = balances.get(trade.want_item, 0)
+            if trade.want_item == "coin":
+                protected_qty = rules.RISK_COIN_RESERVE
+            else:
+                protected_qty = (
+                    rules.feed_reserve_target(farm.animal_count, farm.committed_feed)
+                    if trade.want_item == "feed"
+                    else 0
+                )
+            decision = rules.trade_decision(
+                trade.offer_item,
+                trade.offer_qty,
+                trade.want_item,
+                trade.want_qty,
+                available_qty=available_qty,
+                protected_qty=protected_qty,
+            )
+            if self.domain_blocked("trades"):
+                decision["accept"] = False
+                decision["reason"] = (
+                    "trade domain held while novel activity is under evidence review"
+                )
+            accept = bool(decision["accept"])
+            detail = {
+                "trade_id": trade.id,
+                "sender": trade.sender,
+                "offer_item": trade.offer_item,
+                "offer_qty": trade.offer_qty,
+                "want_item": trade.want_item,
+                "want_qty": trade.want_qty,
+                **decision,
+            }
+            self.actions["trade_decisions"].append(detail)
+            if trade.want_item == "coin":
+                if accept:
+                    # This should remain unreachable while the categorical gate in
+                    # rules.trade_decision is enabled. Persist it as an invariant so
+                    # monitoring catches any future policy regression immediately.
+                    self.actions["trade_coin_outflow"] += trade.want_qty
+                else:
+                    blocked_coin_offers += 1
+                    self.actions["trade_coin_outflow_blocked"] += trade.want_qty
+            _intent("respond_to_trade", **detail)
             _raw(
                 "respond_%d" % trade.id,
                 self.c.call("respond_to_trade", trade_id=trade.id, accept=accept),
             )
-            _intent("respond_to_trade_done", trade_id=trade.id, accept=accept)
+            _intent("respond_to_trade_done", **detail)
             if accept:
                 self.actions["trades_accepted"] += 1
+                balances[trade.want_item] = available_qty - trade.want_qty
+                balances[trade.offer_item] = (
+                    balances.get(trade.offer_item, 0) + trade.offer_qty
+                )
             else:
                 self.actions["trades_declined"] += 1
                 key = trade.sender.strip()
                 self.meta.setdefault("declines", {})
                 self.meta["declines"][key] = self.meta["declines"].get(key, 0) + 1
+        if blocked_coin_offers:
+            self.notes_soft.append(
+                "trade guard blocked %d coin-outflow offer(s), preserving %d coins"
+                % (blocked_coin_offers, self.actions["trade_coin_outflow_blocked"])
+            )
 
     def maintain_offers(self, farm: parse.Farm) -> None:
         paused = [
@@ -849,13 +990,37 @@ class Cycle(object):
                 rules.feed_buffer_minutes(state.feed, state.animal_count), 1
             )
 
+        # Observe the competitive and game surface before any strategic mutation.
+        # These reads used to happen after adoption and offers, which meant the
+        # system could notice a new regime only after acting inside it.
+        with self._step("board") as step:
+            board_text = self.c.call("leaderboard")
+            _raw("leaderboard", board_text)
+            board = parse.parse_leaderboard(board_text)
+            me = next((r for r in board if r.name.strip().lower() == "nick"), None)
+            step["rank"] = me.rank if me else None
+            step["produce"] = me.produce if me else None
+
+        with self._step("events") as step:
+            self.read_risk_events()
+            step["new"] = len(self.actions["risk_events"])
+            step["counts"] = self.actions["risk_event_counts"]
+            step["charges"] = self.actions["risk_charges"]
+
+        with self._step("novelty") as step:
+            assessed = self.assess_novelty(run_no, tools, state, board)
+            step["signals"] = len(assessed.get("signals") or [])
+            step["blocked"] = assessed.get("blocked_domains") or []
+
         if state.incoming:
             with self._step("trades") as step:
                 self.handle_incoming_trades(state)
                 step["accepted"] = self.actions["trades_accepted"]
                 step["declined"] = self.actions["trades_declined"]
-            if self.actions["trades_accepted"]:
-                state = self.read_state("posttrade")  # a trade changed inventory
+            if self.actions["trade_decisions"]:
+                # Accept and decline both remove an open offer. Re-read so the
+                # final row does not report a handled trade as still pending.
+                state = self.read_state("posttrade")
         else:
             self._skip("trades", "no incoming offers")
 
@@ -876,6 +1041,10 @@ class Cycle(object):
                 state.committed_feed,
                 cap=decision["cap"],
             )
+            if self.domain_blocked("adopt") and plan["adopt"] > 0:
+                plan["adopt_before_novelty_hold"] = plan["adopt"]
+                plan["adopt"] = 0
+                plan["novelty_hold"] = "adopt"
             step["adopt"] = plan["adopt"]
             step["buy_feed"] = plan["buy_feed"]
             step["growth"] = "saturated" if decision["verdict"].get("saturated") else "growing"
@@ -914,26 +1083,14 @@ class Cycle(object):
                 if count >= rules.DECLINE_PAUSE_THRESHOLD
             ],
         )
-        if offer_targets:
+        if self.domain_blocked("offers"):
+            self._skip("offers", "novel activity hold")
+        elif offer_targets:
             with self._step("offers") as step:
                 self.maintain_offers(state)
                 step["sent"] = self.actions["trades_sent"]
         else:
             self._skip("offers", "offer slots already full")
-
-        with self._step("board") as step:
-            board_text = self.c.call("leaderboard")
-            _raw("leaderboard", board_text)
-            board = parse.parse_leaderboard(board_text)
-            me = next((r for r in board if r.name.strip().lower() == "nick"), None)
-            step["rank"] = me.rank if me else None
-            step["produce"] = me.produce if me else None
-
-        with self._step("events") as step:
-            self.read_risk_events()
-            step["new"] = len(self.actions["risk_events"])
-            step["counts"] = self.actions["risk_event_counts"]
-            step["charges"] = self.actions["risk_charges"]
 
         must_verify = (
             run_no % rules.VERIFY_EVERY == 0
@@ -1080,6 +1237,7 @@ class Cycle(object):
             "fed": self.actions["fed"],
             "risk_events": self.actions["risk_events"],
             "risk_event_counts": self.actions["risk_event_counts"],
+            "risk_event_signatures": self.actions["risk_event_signatures"],
             "risk_charges": self.actions["risk_charges"],
             "risk_coin_reserve": rules.RISK_COIN_RESERVE,
             "harvested": self.actions["harvested"],
@@ -1088,6 +1246,9 @@ class Cycle(object):
             "trades_sent": self.actions["trades_sent"],
             "trades_accepted": self.actions["trades_accepted"],
             "trades_declined": self.actions["trades_declined"],
+            "trade_decisions": self.actions["trade_decisions"],
+            "trade_coin_outflow": self.actions["trade_coin_outflow"],
+            "trade_coin_outflow_blocked": self.actions["trade_coin_outflow_blocked"],
             "rivals": {r.name: r.produce for r in rivals},
             # Herd and coins for every rival, not just produce. The leaderboard
             # reported all three the whole time and we only ever read produce,
@@ -1144,6 +1305,7 @@ class Cycle(object):
             "claim_validated_runs": dict(self.policy.get("claim_validated_runs") or {}),
             "reentry": self.reentry,
             "recon_findings": list(self.recon_findings),
+            "novelty": self.novelty,
         }
         row["decision_trace"] = policy.decision_trace(
             plan,

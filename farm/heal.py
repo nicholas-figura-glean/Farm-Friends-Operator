@@ -228,9 +228,14 @@ CLASSES: List[Tuple[str, str, Optional[Remedy]]] = [
     ("knob_age", r"^KNOB AGE:", None),
     ("model_drift", r"^MODEL DRIFT:", None),
     ("policy_drift", r"^POLICY DRIFT:", None),
+    ("activity_novelty_trade", r"^NOVEL ACTIVITY \[trade\]:", None),
+    ("activity_novelty_rival", r"^NOVEL ACTIVITY \[rival\]:", None),
+    ("activity_novelty_risk", r"^NOVEL ACTIVITY \[risk\]:", None),
+    ("activity_novelty_tools", r"^NOVEL ACTIVITY \[tools\]:", None),
     ("tools_changed", r"tools/list changed", None),
     ("animals_fell", r"animal count fell", None),
     ("count_mismatch", r"animal count \d+ != expected", None),
+    ("trade_policy_breach", r"^TRADE POLICY BREACH:", None),
     ("trades_in", r"incoming trade\(s\) pending review", None),
     ("stale_loop", r"primary loop stale", _heal_stale),
     ("hunger", r"^hunger \d+ at/above alarm", _heal_hunger),
@@ -252,6 +257,9 @@ STRATEGY_CLASSES = {
     "rank_lost", "no_path_to_win", "win_eta", "threat", "overtaken",
     "rival_growing", "rival_wake", "strategy_stale", "idle_capital",
     "knob_age", "model_drift", "policy_drift", "tools_changed",
+    "trade_policy_breach", "activity_novelty_trade",
+    "activity_novelty_rival", "activity_novelty_risk",
+    "activity_novelty_tools",
 }
 
 
