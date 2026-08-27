@@ -327,7 +327,13 @@ LLM_AUTHOR_MODELS = (
 AUTHOR_MAX_FILES_PER_ORDER = 3
 AUTHOR_MAX_ATTEMPTS_PER_ORDER = 2      # one retry with the gate failure fed back
 AUTHOR_MIN_INTERVAL_RUNS = 5           # never author on consecutive cycles
-AUTHOR_MAX_ORDERS_PER_DAY = 8          # a runaway loop cannot bankrupt the ledger
+# Eight passes is the normal exploration quota, not an operator dependency. Urgent
+# repairs may draw from a bounded surge pool; aged backlog earns surge capacity in
+# proportion to queue pressure. Cost, canary, interval, and gate limits remain hard.
+AUTHOR_MAX_ORDERS_PER_DAY = 8
+AUTHOR_MAX_SURGE_ORDERS_PER_DAY = 24   # absolute 24h blast-radius ceiling
+AUTHOR_BACKLOG_SURGE_AGE_SECONDS = 4 * 60 * 60
+AUTHOR_SURGE_PASSES_PER_QUEUED_ORDER = 2
 AUTHOR_MAX_COST_USD_PER_DAY = 5.00     # hard spend ceiling for authoring
 
 # -- canary (farm/canary.py) ------------------------------------------------

@@ -12,6 +12,7 @@ MCP client, so these tests make no network calls and never touch real state.
 """
 
 import copy
+import json
 import os
 import pathlib
 import shutil
@@ -71,6 +72,8 @@ check("the queue still holds one order", len(workorders.open_orders(queue)) == 1
 claimed = workorders.claim("abc123", "author_agent", run=42, path=queue)
 check("an order can be claimed", claimed and claimed["status"] == workorders.CLAIMED)
 check("claiming counts an attempt", claimed["attempts"] == 1)
+check("claiming retains immutable submission age",
+      claimed.get("created_ts") == first.get("created_ts"), str(claimed))
 check("a claimed order leaves the open queue", workorders.open_orders(queue) == [])
 
 workorders.resolve("abc123", workorders.PUBLISHED, note="shipped", release="20260825T1", path=queue)
@@ -81,15 +84,34 @@ check("the publishing release is recorded", cur["release"] == "20260825T1")
 section("queue ordering and exhaustion")
 
 queue2 = os.path.join(tmp, "q2.ndjson")
-for cid, sev in (("c1", "opportunity"), ("c2", "breaking"), ("c3", "shape")):
+for cid, sev in (("c1", "opportunity"), ("c2", "breaking"),
+                 ("c3", "shape"), ("c4", "degraded")):
     workorders.submit(dict(change, id=cid, severity=sev), "contract_watch", "i", [], [], path=queue2)
 order = workorders.next_order(queue2)
 check("breaking work is served first", order and order["id"] == "c2", str(order and order["id"]))
 check(
-    "then shape, then opportunity",
-    [o["severity"] for o in workorders.open_orders(queue2)] == ["breaking", "shape", "opportunity"],
+    "degraded repair precedes shape and opportunity work",
+    [o["severity"] for o in workorders.open_orders(queue2)]
+    == ["breaking", "degraded", "shape", "opportunity"],
     str([o["severity"] for o in workorders.open_orders(queue2)]),
 )
+
+queue_age = os.path.join(tmp, "q-age.ndjson")
+with open(queue_age, "w", encoding="utf-8") as handle:
+    for row in (
+        {"id": "old", "status": "open", "severity": "opportunity",
+         "ts": "2020-01-01T00:00:00Z"},
+        {"id": "new", "status": "open", "severity": "opportunity",
+         "ts": "2021-01-01T00:00:00Z"},
+        {"id": "old", "status": "open", "severity": "opportunity",
+         "ts": "2022-01-01T00:00:00Z", "note": "returned after a claim"},
+    ):
+        handle.write(json.dumps(row) + "\n")
+aged = workorders.open_orders(queue_age)
+check("queue events do not move older same-severity work behind newer work",
+      [o["id"] for o in aged] == ["old", "new"], str(aged))
+check("legacy orders derive immutable age from their first event",
+      aged[0].get("created_ts") == "2020-01-01T00:00:00Z", str(aged[0]))
 
 queue3 = os.path.join(tmp, "q3.ndjson")
 workorders.submit(change, "contract_watch", "i", [], [], path=queue3)

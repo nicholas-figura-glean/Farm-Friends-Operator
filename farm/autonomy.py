@@ -155,7 +155,7 @@ def orders_state(limit: int = 12) -> Dict[str, Any]:
             "summary": (order.get("summary") or "")[:180],
             "attempts": order.get("attempts") or 0,
             "claimed_by": order.get("claimed_by"),
-            "age_seconds": _age_seconds(order.get("ts")),
+            "age_seconds": _age_seconds(order.get("created_ts") or order.get("ts")),
         })
     # Open and blocked work first: a finished order is history, an unclaimed one is a
     # question about whether the loop is keeping up.
@@ -318,6 +318,8 @@ def llm_state() -> Dict[str, Any]:
         "spend_today": cost,
         "budget": getattr(rules, "AUTHOR_MAX_COST_USD_PER_DAY", None),
         "max_passes": getattr(rules, "AUTHOR_MAX_ORDERS_PER_DAY", None),
+        "surge_max_passes": getattr(rules, "AUTHOR_MAX_SURGE_ORDERS_PER_DAY", None),
+        "backlog_surge_age_seconds": getattr(rules, "AUTHOR_BACKLOG_SURGE_AGE_SECONDS", None),
     }
 
 

@@ -157,15 +157,18 @@ def availability() -> Dict[str, Any]:
     }
 
 
-def _post(auth: Dict[str, Any], path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """POST JSON to the gateway with bounded retries and a scrubbed failure."""
+def _post(
+    auth: Dict[str, Any], path: str, payload: Dict[str, Any], retries: Optional[int] = None,
+) -> Dict[str, Any]:
+    """POST JSON with bounded retries; callers choose idempotency-safe attempts."""
     url = "%s/%s" % (auth["base"], path.lstrip("/"))
     body = json.dumps(payload).encode("utf-8")
     context = ssl.create_default_context()
     secret = auth["access"]
     last: Optional[BaseException] = None
 
-    for attempt in range(RETRIES):
+    attempts = max(1, int(RETRIES if retries is None else retries))
+    for attempt in range(attempts):
         request = urllib.request.Request(
             url,
             data=body,
@@ -197,10 +200,10 @@ def _post(auth: Dict[str, Any], path: str, payload: Dict[str, Any]) -> Dict[str,
                 raise GatewayError(_scrub("gateway HTTP %d: %s" % (exc.code, detail), secret))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             last = exc
-        if attempt < RETRIES - 1:
+        if attempt < attempts - 1:
             time.sleep(BACKOFF ** (attempt + 1))
 
-    raise GatewayError(_scrub("gateway unreachable after %d tries: %r" % (RETRIES, last), secret))
+    raise GatewayError(_scrub("gateway unreachable after %d tries: %r" % (attempts, last), secret))
 
 
 def models() -> List[str]:
@@ -253,6 +256,7 @@ def complete(
     note: str = "",
     actor: str = "author",
     purpose: str = "reasoning",
+    reservation_id: str = "",
 ) -> Dict[str, Any]:
     """One turn against the gateway, with real usage booked to the token ledger.
 
@@ -280,7 +284,9 @@ def complete(
         "max_output_tokens": int(max_output_tokens),
     }
     started = time.monotonic()
-    response = _post(auth, "responses", payload)
+    # Generation POSTs are not idempotent: a timeout may follow server acceptance.
+    # Never resubmit an ambiguous paid request; the next author pass handles retry.
+    response = _post(auth, "responses", payload, retries=1)
 
     status = response.get("status")
     error = response.get("error")
@@ -316,6 +322,7 @@ def complete(
             "%s purpose=%s model=%s reasoning=%d%s%s"
             % (note, purpose, chosen, reasoning, " estimated" if estimated else "", " TRUNCATED" if truncated else "")
         )[:200],
+        reservation_id=reservation_id,
     )
 
     return {

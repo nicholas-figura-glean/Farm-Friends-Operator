@@ -11,10 +11,11 @@
   The author packages its gated worktree through the canonical deploy/release.sh;
   it never writes into the release from which it is running.
 
-  Cadence is only an upper bound on attention. The real rate limit is in
-  farm/rules.py (AUTHOR_MIN_INTERVAL_RUNS, AUTHOR_MAX_ORDERS_PER_DAY,
-  AUTHOR_MAX_COST_USD_PER_DAY) plus the rule that no new pass may start while a
-  canary is still watching the last one. Most invocations exit immediately.
+  Cadence is only an upper bound on attention. farm/rules.py defines a normal
+  exploration quota plus an autonomous, bounded surge pool for priority repairs
+  and aged backlog. The dollar ceiling, minimum run interval, and rule that no new
+  pass starts while a canary watches the last one remain hard. Most invocations
+  exit immediately.
 -->
 <plist version="1.0">
 <dict>

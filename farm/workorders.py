@@ -43,8 +43,9 @@ SUPERSEDED = "superseded"
 
 TERMINAL = (PUBLISHED, ABANDONED, SUPERSEDED)
 
-# Worst first. Mirrors contract.SEVERITIES so a queue sort matches a diff sort.
-SEVERITY_ORDER = ("breaking", "shape", "opportunity", "additive", "cosmetic")
+# Worst first. Dashboard degradation is operational repair work and must not sit
+# behind speculative opportunities merely because contract.SEVERITIES lacks it.
+SEVERITY_ORDER = ("breaking", "degraded", "shape", "opportunity", "additive", "cosmetic")
 
 # An order that has failed this many times stops being retried. Without this a
 # change the model cannot fix becomes an infinite, billable loop.
@@ -84,10 +85,15 @@ def _rows(path: str = QUEUE) -> List[Dict[str, Any]]:
 
 
 def current(path: str = QUEUE) -> Dict[str, Dict[str, Any]]:
-    """Latest row per order id. Later events supersede earlier ones."""
+    """Latest row per order id, retaining immutable first-submission time."""
     latest: Dict[str, Dict[str, Any]] = {}
+    created: Dict[str, str] = {}
     for row in _rows(path):
-        latest[str(row["id"])] = row
+        order_id = str(row["id"])
+        first = created.setdefault(order_id, str(row.get("created_ts") or row.get("ts") or ""))
+        value = dict(row)
+        value["created_ts"] = str(row.get("created_ts") or first)
+        latest[order_id] = value
     return latest
 
 
@@ -123,10 +129,12 @@ def submit(
     if attempts >= MAX_ATTEMPTS:
         return None
 
+    created_ts = _utcnow()
     return _append(
         {
             "id": order_id,
-            "ts": _utcnow(),
+            "ts": created_ts,
+            "created_ts": created_ts,
             "status": OPEN,
             "source": source,
             "severity": str(change.get("severity") or "additive"),
@@ -223,7 +231,7 @@ def open_orders(path: str = QUEUE) -> List[Dict[str, Any]]:
     A `claimed` order is included only if it looks abandoned; see `stale_claims`.
     """
     out = [o for o in current(path).values() if o.get("status") == OPEN]
-    out.sort(key=lambda o: (_severity_rank(o), o.get("ts") or ""))
+    out.sort(key=lambda o: (_severity_rank(o), o.get("created_ts") or o.get("ts") or ""))
     return out
 
 

@@ -700,8 +700,12 @@ def _ndjson(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def report(limit: int = 40) -> Dict[str, Any]:
-    """Current architecture plus its version history, for the dashboard."""
+def report(limit: int = 32) -> Dict[str, Any]:
+    """Current architecture plus bounded recent history for the dashboard.
+
+    The live snapshot grows as the control plane gains safeguards, so keep enough
+    timeline depth for diagnosis while preserving the endpoint's 64KB contract.
+    """
     snap = snapshot()
     rows = history(limit=limit)
     # Trim the heavy per-version node lists out of the timeline. The tab fetches one

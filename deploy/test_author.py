@@ -216,6 +216,15 @@ check("a non-rename change has no mechanical repair",
 check("a rename with no candidate has no mechanical repair",
       author_agent.mechanical_patch(
           dict(order, detail={"arg": "animal_id", "rename_candidate": None}), mech) is None)
+os.makedirs(os.path.join(mech, "experiments"), exist_ok=True)
+with open(os.path.join(mech, "experiments", "editable_call.py"), "w") as handle:
+    handle.write('def call(client):\n    return client.call("feed_animals", animal_id="all")\n')
+fallback_order = dict(order, files=["experiments/editable_call.py"])
+check("an editable deterministic rename is admitted without model cost",
+      author_agent.mechanical_patch(fallback_order, mech) is not None
+      and author_agent.max_model_pass_cost(fallback_order, mech) == 0.0)
+check("the same order has a bounded reservation if mechanical gates force model fallback",
+      author_agent.model_pass_reservation(fallback_order, mech)["cost_usd"] > 0.0)
 
 
 # -- prompt construction -----------------------------------------------------
@@ -736,6 +745,24 @@ with tempfile.TemporaryDirectory() as budget_tmp:
               str(pass_count))
         check("only author completions count against author dollar budget",
               author_cost == round(tokens.cost(100, 10) * 2, 4), str(author_cost))
+        reservation = tokens.record(
+            "author_reservation", 1, tokens_in=1000, tokens_out=1000,
+            note="worst case", reservation_id="pass-r1",
+        )
+        tokens.record(
+            "author", 1, tokens_in=100, tokens_out=10,
+            note="settled completion", reservation_id="pass-r1",
+        )
+        _, reserved_cost = author_agent.spend_today()
+        expected = round(author_cost + reservation["cost_usd"], 4)
+        check("reserved and actual cost settle to the conservative maximum, not their sum",
+              reserved_cost == expected, str((reserved_cost, expected)))
+        for run in range(1201):
+            tokens.record("cycle", run, note="shared-ledger churn")
+        churn_passes, churn_cost = author_agent.spend_today()
+        check("shared-ledger churn cannot evict live 24-hour author accounting",
+              churn_passes == 1 and churn_cost == expected,
+              str((churn_passes, churn_cost, expected)))
     finally:
         tokens.LEDGER = saved_ledger
 
@@ -748,17 +775,68 @@ check("a live canary blocks a new authoring pass",
 # this the assertions below silently test the daily-budget branch instead of the
 # interval branch, and begin failing as soon as the agent has genuinely run today.
 # That is a test-isolation bug, not a budget bug.
+model_reserve = author_agent.max_model_pass_cost(prompt_order, sandbox)
+check("a model pass reserves both bounded attempts before claiming",
+      model_reserve > tokens.cost(0, author_agent.MAX_MODEL_OUTPUT_TOKENS) * 2,
+      str(model_reserve))
+
 saved = canary.latest_run
 saved_spend = author_agent.spend_today
+saved_reserve = author_agent.max_model_pass_cost
 saved_active = canary.active
 saved_dirty = vcs.dirty_paths
 canary.latest_run = lambda *a, **k: 100
 author_agent.spend_today = lambda *a, **k: (0, 0.0)
+author_agent.max_model_pass_cost = lambda *a, **k: 0.0
 canary.active = lambda *a, **k: False
 vcs.dirty_paths = lambda *a, **k: []
 try:
     check("with budget, source and canary clear, the interval rule is what decides",
           author_agent.budget_check({}) is None, str(author_agent.budget_check({})))
+
+    fresh_opportunity = {
+        "id": "fresh", "severity": "opportunity", "ts": "2099-01-01T00:00:00Z",
+    }
+    aged_opportunity = {
+        "id": "aged", "severity": "opportunity", "ts": "2020-01-01T00:00:00Z",
+    }
+    breaking_repair = {
+        "id": "break", "severity": "breaking", "ts": "2099-01-01T00:00:00Z",
+    }
+    backlog = [aged_opportunity, dict(aged_opportunity, id="aged-2"),
+               dict(aged_opportunity, id="aged-3")]
+
+    author_agent.spend_today = lambda *a, **k: (rules.AUTHOR_MAX_ORDERS_PER_DAY, 0.0)
+    reason = author_agent.budget_check({}, fresh_opportunity, [fresh_opportunity])
+    check("fresh speculative work stops at the normal quota",
+          reason is not None and "normal quota" in reason, str(reason))
+    check("a breaking repair autonomously draws from surge capacity",
+          author_agent.budget_check({}, breaking_repair, [breaking_repair]) is None,
+          str(author_agent.budget_check({}, breaking_repair, [breaking_repair])))
+    aged_limit, aged_reason = author_agent.adaptive_pass_limit(aged_opportunity, backlog)
+    check("aged backlog earns capacity proportional to queue pressure",
+          aged_limit == rules.AUTHOR_MAX_ORDERS_PER_DAY + 6
+          and aged_reason == "aged backlog", str((aged_limit, aged_reason)))
+    check("aged work proceeds after the normal quota is spent",
+          author_agent.budget_check({}, aged_opportunity, backlog) is None,
+          str(author_agent.budget_check({}, aged_opportunity, backlog)))
+
+    author_agent.spend_today = lambda *a, **k: (rules.AUTHOR_MAX_SURGE_ORDERS_PER_DAY, 0.0)
+    reason = author_agent.budget_check({}, breaking_repair, [breaking_repair])
+    check("the absolute surge ceiling still contains priority repairs",
+          reason is not None and "priority repair" in reason, str(reason))
+    author_agent.spend_today = lambda *a, **k: (0, rules.AUTHOR_MAX_COST_USD_PER_DAY)
+    reason = author_agent.budget_check({}, breaking_repair, [breaking_repair])
+    check("priority never bypasses the hard dollar ceiling",
+          reason is not None and "cost ceiling" in reason, str(reason))
+    author_agent.spend_today = lambda *a, **k: (0, 2.0)
+    author_agent.max_model_pass_cost = lambda *a, **k: 3.01
+    reason = author_agent.budget_check({}, breaking_repair, [breaking_repair])
+    check("a pass is refused when worst-case in-flight cost would cross the ceiling",
+          reason is not None and "headroom" in reason, str(reason))
+    author_agent.max_model_pass_cost = lambda *a, **k: 0.0
+    author_agent.spend_today = lambda *a, **k: (0, 0.0)
+
     vcs.dirty_paths = lambda *a, **k: ["farm/parse.py", "farm-strategy-journal.md"]
     reason = author_agent.budget_check({})
     check("uncommitted release source blocks a stale-base authoring pass",
@@ -770,14 +848,54 @@ try:
     reason = author_agent.budget_check({"last_authored_run": 98})
     check("authoring twice in quick succession is blocked",
           reason is not None and "run" in reason, str(reason))
+    reason = author_agent.budget_check({"last_authored_run": 50, "last_attempted_run": 98})
+    check("a rejected or non-publishing pass also enforces the interval",
+          reason is not None and "run" in reason, str(reason))
     reason = author_agent.budget_check({"last_authored_run": 50})
     check("authoring is allowed once enough runs have passed",
           reason is None, str(reason))
 finally:
     canary.latest_run = saved
     author_agent.spend_today = saved_spend
+    author_agent.max_model_pass_cost = saved_reserve
     canary.active = saved_active
     vcs.dirty_paths = saved_dirty
+
+
+# -- model transport idempotency --------------------------------------------
+
+section("model generation is never ambiguously retried")
+
+saved_read_auth = llm._read_auth
+saved_pick_model = llm.pick_model
+saved_post = llm._post
+saved_ledger = tokens.LEDGER
+transport = {}
+with tempfile.TemporaryDirectory() as transport_tmp:
+    tokens.LEDGER = os.path.join(transport_tmp, "tokens.ndjson")
+    llm._read_auth = lambda: {"access": "secret", "base": "https://gateway.invalid"}
+    llm.pick_model = lambda preferred=None: "test-model"
+
+    def fake_post(auth, path, payload, retries=None):
+        transport.update(path=path, retries=retries, payload=payload)
+        return {
+            "status": "completed", "output_text": "OK",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }
+
+    llm._post = fake_post
+    try:
+        llm.complete("system", "user", reservation_id="reservation-test")
+        rows = tokens.tail()
+        check("a paid generation POST allows exactly one transport attempt",
+              transport.get("retries") == 1, str(transport))
+        check("completion usage is linked to its preflight reservation",
+              rows and rows[-1].get("reservation_id") == "reservation-test", str(rows))
+    finally:
+        llm._read_auth = saved_read_auth
+        llm.pick_model = saved_pick_model
+        llm._post = saved_post
+        tokens.LEDGER = saved_ledger
 
 
 # -- real gateway round trip -------------------------------------------------

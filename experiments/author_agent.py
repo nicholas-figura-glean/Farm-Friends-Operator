@@ -78,6 +78,8 @@ STAGE_FILES = ("run.py", "monitor.py")
 
 MAX_PATCH_BYTES = 40_000
 MAX_FILE_BYTES = 220_000     # a file too big to send is a file too big to rewrite blind
+MAX_MODEL_OUTPUT_TOKENS = 32_000
+MAX_RETRY_FEEDBACK_BYTES = 4_000
 
 
 def utcnow() -> str:
@@ -116,28 +118,102 @@ def spend_today() -> Tuple[int, float]:
     49 test requests look like 49 autonomous changes and wedged an 8-pass budget.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    passes, cost = 0, 0.0
-    for row in tokens.tail(1200):
+    passes, unreserved_cost = 0, 0.0
+    reservations: Dict[str, float] = {}
+    actual_by_reservation: Dict[str, float] = {}
+    # This is a safety window, not a dashboard projection. Read the full ledger so
+    # high-volume cycle/heal rows cannot evict still-live 24-hour author charges.
+    for row in tokens.tail():
         try:
             when = datetime.strptime(str(row.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
         if when < cutoff:
             continue
-        if row.get("kind") == "author_pass":
+        kind = row.get("kind")
+        reservation_id = str(row.get("reservation_id") or "")
+        row_cost = float(row.get("cost_usd") or 0.0)
+        if kind == "author_pass":
             passes += 1
-        elif row.get("kind") == "author":
-            cost += float(row.get("cost_usd") or 0.0)
+        elif kind == "author_reservation" and reservation_id:
+            reservations[reservation_id] = reservations.get(reservation_id, 0.0) + row_cost
+        elif kind == "author":
+            if reservation_id:
+                actual_by_reservation[reservation_id] = (
+                    actual_by_reservation.get(reservation_id, 0.0) + row_cost
+                )
+            else:
+                # Legacy/unreserved completions remain fully billable.
+                unreserved_cost += row_cost
+    reserved_ids = set(reservations) | set(actual_by_reservation)
+    cost = unreserved_cost + sum(
+        max(reservations.get(key, 0.0), actual_by_reservation.get(key, 0.0))
+        for key in reserved_ids
+    )
     return passes, round(cost, 4)
 
 
-def budget_check(stored: Dict[str, Any]) -> Optional[str]:
-    """Reason to stand down this pass, or None to proceed."""
+def _order_age_seconds(order: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not order or not (order.get("created_ts") or order.get("ts")):
+        return None
+    try:
+        when = datetime.strptime(
+            str(order.get("created_ts") or order["ts"]), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
+
+
+def adaptive_pass_limit(
+    order: Optional[Dict[str, Any]],
+    open_queue: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[int, str]:
+    """Choose repair capacity from severity, backlog age, and queue pressure.
+
+    The normal quota contains speculative research churn. It is deliberately soft:
+    a detector-confirmed repair must not wait a day merely because earlier model
+    attempts used the exploration allocation. Breaking/shape/degraded work can use
+    the independently bounded surge pool immediately. Lower-severity work earns a
+    smaller surge only after it has aged, with the size based on the live backlog.
+    """
+    base = rules.AUTHOR_MAX_ORDERS_PER_DAY
+    hard = rules.AUTHOR_MAX_SURGE_ORDERS_PER_DAY
+    severity = str((order or {}).get("severity") or "").lower()
+    if severity in {"breaking", "shape", "degraded"}:
+        return hard, "priority repair"
+
+    age = _order_age_seconds(order)
+    if age is not None and age >= rules.AUTHOR_BACKLOG_SURGE_AGE_SECONDS:
+        backlog = max(1, len(open_queue or []))
+        earned = max(1, min(hard - base, backlog * rules.AUTHOR_SURGE_PASSES_PER_QUEUED_ORDER))
+        return min(hard, base + earned), "aged backlog"
+    return base, "normal quota"
+
+
+def budget_check(
+    stored: Dict[str, Any],
+    order: Optional[Dict[str, Any]] = None,
+    open_queue: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Reason to stand down this pass, or None to proceed.
+
+    Capacity is an autonomous queue decision; cost and blast-radius ceilings are
+    absolute. Safety checks below are intentionally independent of order priority.
+    """
     passes, cost = spend_today()
-    if passes >= rules.AUTHOR_MAX_ORDERS_PER_DAY:
-        return "daily pass budget spent (%d/%d)" % (passes, rules.AUTHOR_MAX_ORDERS_PER_DAY)
     if cost >= rules.AUTHOR_MAX_COST_USD_PER_DAY:
         return "daily cost ceiling reached ($%.2f/$%.2f)" % (cost, rules.AUTHOR_MAX_COST_USD_PER_DAY)
+    reserved_cost = max_model_pass_cost(order, str(PROJECT)) if order else 0.0
+    if reserved_cost and cost + reserved_cost > rules.AUTHOR_MAX_COST_USD_PER_DAY:
+        return "insufficient model headroom ($%.2f spent + $%.2f reserved > $%.2f ceiling)" % (
+            cost, reserved_cost, rules.AUTHOR_MAX_COST_USD_PER_DAY,
+        )
+    pass_limit, capacity_reason = adaptive_pass_limit(order, open_queue)
+    if passes >= pass_limit:
+        return "daily pass capacity spent (%d/%d; %s)" % (
+            passes, pass_limit, capacity_reason,
+        )
 
     # A worktree forks from main. If packaged source differs from main, that base is
     # stale and a successful repair would silently republish the pre-change system.
@@ -158,7 +234,9 @@ def budget_check(stored: Dict[str, Any]) -> Optional[str]:
     if canary.active():
         return "a canary is still watching the previous release"
 
-    last_run = stored.get("last_authored_run")
+    # Space every claimed pass, not only successful publications. Otherwise a
+    # rejected patch or pre-existing gate failure retries every launchd tick.
+    last_run = stored.get("last_attempted_run", stored.get("last_authored_run"))
     current = canary.latest_run()
     if isinstance(last_run, int) and isinstance(current, int):
         if current - last_run < rules.AUTHOR_MIN_INTERVAL_RUNS:
@@ -393,6 +471,50 @@ def build_prompt(order: Dict[str, Any], root: str) -> Tuple[str, List[str]]:
     return "\n".join(parts), files
 
 
+def model_pass_reservation(order: Optional[Dict[str, Any]], root: str) -> Dict[str, Any]:
+    """Conservative token/cost reservation for all model attempts on one order."""
+    if not order:
+        return {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+    user, offered = build_prompt(order, root)
+    if not offered:
+        return {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+    # One token per UTF-8 byte is intentionally conservative for BPE tokenizers.
+    # Include maximum retry feedback in every attempt rather than assuming only the
+    # second call uses it; this is a financial safety bound, not a usage forecast.
+    input_per_attempt = len((SYSTEM_PROMPT + user).encode("utf-8")) + MAX_RETRY_FEEDBACK_BYTES
+    tokens_in = input_per_attempt * rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER
+    tokens_out = MAX_MODEL_OUTPUT_TOKENS * rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER
+    return {
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": tokens.cost(tokens_in, tokens_out),
+    }
+
+
+def max_model_pass_cost(order: Optional[Dict[str, Any]], root: str) -> float:
+    """Maximum charge needed for admission; deterministic repairs enter free."""
+    if order and mechanical_patch(order, root) is not None:
+        return 0.0
+    return float(model_pass_reservation(order, root)["cost_usd"])
+
+
+def book_model_reservation(order: Dict[str, Any], root: str) -> str:
+    """Durably reserve worst-case model usage immediately before network traffic."""
+    reservation = model_pass_reservation(order, root)
+    if not reservation["cost_usd"]:
+        return ""
+    reservation_id = "%s:%s:%d" % (order.get("id"), utcnow(), os.getpid())
+    tokens.record(
+        "author_reservation", canary.latest_run(),
+        tokens_in=reservation["tokens_in"], tokens_out=reservation["tokens_out"],
+        note="order=%s worst-case model attempts" % order.get("id"),
+        reservation_id=reservation_id,
+    )
+    log({"event": "cost_reserved", "order": order.get("id"),
+         "reservation_id": reservation_id, "cost_usd": reservation["cost_usd"]})
+    return reservation_id
+
+
 EDIT_BLOCK = re.compile(
     r"---\s*FILE:\s*(?P<path>\S+)\s*\n"
     r"<<<<<<<\s*SEARCH\s*\n(?P<search>.*?)\n"
@@ -473,7 +595,7 @@ def apply_edits(
 
 
 def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
-                ledger_actor: str = "author") -> Dict[str, Any]:
+                ledger_actor: str = "author", reservation_id: str = "") -> Dict[str, Any]:
     """Ask the gateway for edit blocks and apply them to the staging tree."""
     user, offered = build_prompt(order, root)
     if not offered:
@@ -482,16 +604,17 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
         user += (
             "\n\n## A previous attempt failed\n"
             "Your last patch was rejected. Fix the underlying problem; do not simply "
-            "reformat.\n\n```\n" + feedback[:4000] + "\n```\n"
+            "reformat.\n\n```\n" + feedback[:MAX_RETRY_FEEDBACK_BYTES] + "\n```\n"
         )
 
     result = llm.complete(
         SYSTEM_PROMPT, user,
-        max_output_tokens=32_000,
+        max_output_tokens=MAX_MODEL_OUTPUT_TOKENS,
         run=canary.latest_run(),
         note="order=%s %s" % (order.get("id"), order.get("kind")),
         actor=ledger_actor,
         purpose="work_order" if ledger_actor == "author" else "gateway_smoke_test",
+        reservation_id=reservation_id,
     )
     if result["truncated"]:
         return {"backend": "model", "files": {}, "usage": result,
@@ -682,14 +805,15 @@ def main() -> int:
     for released in workorders.release_stale(3600, queue):
         log({"event": "claim_released", "order": released.get("id"), "status": released.get("status")})
 
-    standdown = budget_check(stored)
-    if standdown:
-        print("AUTHOR standing down: %s" % standdown)
-        return 0
-
-    order = workorders.next_order(queue)
+    open_queue = workorders.open_orders(queue)
+    order = open_queue[0] if open_queue else None
     if not order:
         print("AUTHOR idle: no open work orders")
+        return 0
+
+    standdown = budget_check(stored, order, open_queue)
+    if standdown:
+        print("AUTHOR standing down: %s" % standdown)
         return 0
 
     blocked = [f for f in (order.get("files") or []) if editable(control.normalize_path(str(f)))]
@@ -708,8 +832,11 @@ def main() -> int:
                        claim_registry_version=runtime.get("claim_registry_version"),
                        step="author_change")
 
-    workorders.claim(order["id"], "author_agent", run=canary.latest_run(), path=queue)
-    tokens.record("author_pass", canary.latest_run(), note="order=%s %s" % (
+    attempted_run = canary.latest_run()
+    workorders.claim(order["id"], "author_agent", run=attempted_run, path=queue)
+    stored.update(last_attempted_run=attempted_run, last_order=order["id"])
+    write_json(STORE, stored)
+    tokens.record("author_pass", attempted_run, note="order=%s %s" % (
         order.get("id"), order.get("kind")
     ))
     print("AUTHOR claimed %s (%s %s): %s"
@@ -740,6 +867,7 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
     patch: Optional[Dict[str, Any]] = None
 
     # Mechanical first: free, deterministic, and correct for the common rename.
+    reservation_id = ""
     mechanical = mechanical_patch(order, root)
     if mechanical:
         patch = mechanical
@@ -755,12 +883,29 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             print("  no mechanical fix and the model is dormant: %s" % availability.get("reason"))
             log({"event": "dormant", "order": order["id"], "reason": availability.get("reason")})
             return 0
+        reservation_id = book_model_reservation(order, root)
 
     feedback = ""
     for attempt in range(1, rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER + 1):
         if patch is None:
+            # A deterministic patch may fail an attributable gate and fall back to
+            # model judgement. Re-admit and reserve at that exact boundary; never
+            # let a free mechanical admission become unbudgeted paid traffic.
+            if not reservation_id:
+                reservation = model_pass_reservation(order, root)
+                _, current_cost = spend_today()
+                if (reservation["cost_usd"]
+                        and current_cost + reservation["cost_usd"] > rules.AUTHOR_MAX_COST_USD_PER_DAY):
+                    workorders.resolve(
+                        order["id"], workorders.OPEN,
+                        note="mechanical fallback waiting for model budget headroom",
+                        path=queue, attempts=int(order.get("attempts") or 0),
+                    )
+                    print("  model fallback deferred: daily cost ceiling has no safe headroom")
+                    return 0
+                reservation_id = book_model_reservation(order, root)
             try:
-                patch = model_patch(order, root, feedback)
+                patch = model_patch(order, root, feedback, reservation_id=reservation_id)
             except llm.Dormant as exc:
                 workorders.resolve(order["id"], workorders.OPEN,
                                    note="model became dormant: %s" % exc, path=queue,

@@ -412,8 +412,9 @@ def do_llm_status() -> int:
         passes = sum(1 for r in tokens.tail(1200) if r.get("kind") == "author_pass")
         spend = round(sum(float(r.get("cost_usd") or 0.0) for r in author_rows), 4)
     print("  authoring passes in last 24h: %d, model spend $%.4f" % (passes, spend))
-    print("  budget: %d passes/day, $%.2f/day"
-          % (rules.AUTHOR_MAX_ORDERS_PER_DAY, rules.AUTHOR_MAX_COST_USD_PER_DAY))
+    print("  capacity: %d normal, %d surge max passes/24h; $%.2f/day hard ceiling"
+          % (rules.AUTHOR_MAX_ORDERS_PER_DAY, rules.AUTHOR_MAX_SURGE_ORDERS_PER_DAY,
+             rules.AUTHOR_MAX_COST_USD_PER_DAY))
     print("  recent author model completions:")
     for row in author_rows[-5:]:
         print("    %s  %6d in %6d out  $%.4f  %s"

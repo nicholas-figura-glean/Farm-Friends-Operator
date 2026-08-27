@@ -54,6 +54,7 @@ def record(
     escalated: bool = False,
     healed: int = 0,
     note: str = "",
+    reservation_id: str = "",
 ) -> Dict[str, Any]:
     tokens_in = int(tokens_in or 0)
     tokens_out = int(tokens_out or 0)
@@ -69,6 +70,7 @@ def record(
             "escalated": bool(escalated),
             "healed": int(healed or 0),
             "note": note[:200],
+            "reservation_id": str(reservation_id or "")[:160],
         }
     )
 
