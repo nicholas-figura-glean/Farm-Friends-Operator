@@ -151,6 +151,7 @@ TRUSTED_PATHS = frozenset(
         "farm/llm.py",
         "farm/mcp.py",
         "farm/notify.py",
+        "farm/novelty.py",
         "farm/policy.py",
         "farm/probes.py",
         "farm/provenance.py",

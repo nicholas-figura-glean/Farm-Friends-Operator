@@ -232,6 +232,16 @@ OFFER_FEED_QTY = 5
 OFFER_COIN_WANT = 10
 OFFER_MIN_AGE_MINUTES = 60  # never withdraw an unanswered offer younger than this
 DECLINE_PAUSE_THRESHOLD = 2
+# Feed is always available from the store for one coin, while coins immediately
+# fund scoring animals. A rival therefore gets the strategically scarce side of
+# any inbound feed-for-coin swap even when the nominal market values are equal.
+# Never send coins through a trade; buy feed from the neutral store instead.
+BLOCK_INBOUND_COIN_OUTFLOW = True
+# When another farm wants our feed, require the same 2x price as our bounded
+# outbound offers. Parity only replaces feed we then have to buy back and gives
+# the counterparty operating runway for no benefit to our score.
+FEED_TRADE_MARKUP = 2
+TRADE_MIN_SURPLUS = 1
 
 # --- prohibitions -----------------------------------------------------------
 FOOD_CROPS_BANNED = True
@@ -783,9 +793,66 @@ def trade_value(item: str, qty: int) -> int:
     return ITEM_VALUE.get(item, 0) * qty
 
 
+def trade_decision(
+    offer_item: str,
+    offer_qty: int,
+    want_item: str,
+    want_qty: int,
+    *,
+    available_qty: Optional[int] = None,
+    protected_qty: int = 0,
+) -> Dict[str, Any]:
+    """Return an auditable, strategy-aware decision for one inbound trade.
+
+    Market value is only the first gate. Coin outflow is categorically blocked
+    because feed has a neutral fixed-price supplier and rival-held coins compound
+    into leaderboard production. Transfers from our feed reserve are also blocked,
+    and every other trade must improve liquidation value rather than merely match it.
+    """
+    offer_value = trade_value(offer_item, offer_qty)
+    want_value = trade_value(want_item, want_qty)
+    decision: Dict[str, Any] = {
+        "accept": False,
+        "reason": "unclassified",
+        "offer_value": offer_value,
+        "want_value": want_value,
+        "surplus": offer_value - want_value,
+        "required_value": want_value + TRADE_MIN_SURPLUS,
+    }
+    if offer_qty <= 0 or want_qty <= 0:
+        decision["reason"] = "non-positive quantity"
+        return decision
+    if offer_item not in ITEM_VALUE or want_item not in ITEM_VALUE:
+        decision["reason"] = "unknown item has no trusted liquidation value"
+        return decision
+    if offer_item == want_item:
+        decision["reason"] = "same-item swap has no strategic upside"
+        return decision
+    if BLOCK_INBOUND_COIN_OUTFLOW and want_item == "coin":
+        decision["reason"] = "coin outflow blocked; buy feed from the neutral store"
+        return decision
+    if available_qty is not None and available_qty - want_qty < protected_qty:
+        decision["reason"] = "requested inventory is protected by the operating reserve"
+        return decision
+
+    required = want_value + TRADE_MIN_SURPLUS
+    if want_item == "feed":
+        required = max(required, want_value * FEED_TRADE_MARKUP)
+    decision["required_value"] = required
+    if offer_value < required:
+        decision["reason"] = "insufficient strategic premium"
+        return decision
+
+    decision["accept"] = True
+    decision["reason"] = "surplus clears value and reserve gates"
+    return decision
+
+
 def should_accept(offer_item: str, offer_qty: int, want_item: str, want_qty: int) -> bool:
-    """Accept only when what we receive is worth at least what we give."""
-    return trade_value(offer_item, offer_qty) >= trade_value(want_item, want_qty)
+    """Compatibility wrapper for callers that do not hold an inventory snapshot."""
+    return bool(
+        trade_decision(offer_item, offer_qty, want_item, want_qty).get("accept")
+    )
 
 
 def offer_targets(current_recipients: List[str], paused: List[str]) -> List[str]:

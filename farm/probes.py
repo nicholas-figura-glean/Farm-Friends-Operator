@@ -258,7 +258,13 @@ def _recent_events() -> List[Dict[str, Any]]:
 
 
 def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optional[Dict[str, Any]]:
-    """Run at most one autonomous read-only probe per configured run interval."""
+    """Run at most one autonomous read-only probe.
+
+    Remote probes retain the global cadence because calls and rival inspection
+    are scarce. Pure local replays cost no calls and may settle a fail-closed
+    novelty hold immediately; making them wait twenty runs would turn adaptation
+    into an hour-long outage for no safety benefit.
+    """
     if not isinstance(run, int) or not open_questions:
         return None
     events = _recent_events()
@@ -269,10 +275,14 @@ def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optio
         ],
         default=None,
     )
-    if isinstance(last_run, int) and run - last_run < rules.PROBE_MIN_INTERVAL_RUNS:
-        return None
+    throttled = bool(
+        isinstance(last_run, int) and run - last_run < rules.PROBE_MIN_INTERVAL_RUNS
+    )
     for probe_id, spec in sorted(_registry().items()):
         if not spec.get("read_only") or not spec.get("autonomous"):
+            continue
+        call_budget = int((spec.get("budget") or {}).get("calls") or 0)
+        if throttled and call_budget > 0:
             continue
         allowed_classes = set(spec.get("question_classes") or [])
         subject_patterns = [str(value).lower() for value in spec.get("subject_patterns") or []]
