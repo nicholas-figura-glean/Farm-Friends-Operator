@@ -174,7 +174,7 @@ def budget_check(stored: Dict[str, Any]) -> Optional[str]:
 def stage_tree(order_id: str = "stage") -> Dict[str, Any]:
     """An isolated tree to patch and gate, preferring a git worktree.
 
-    The live tree is never edited speculatively: launchd fires every 180s and
+    The live tree is never edited speculatively: launchd fires every 300s and
     would happily execute a half-applied change, which is incident #1 in
     deploy/release.sh's history.
 
@@ -300,11 +300,15 @@ def mechanical_candidate_files(order: Dict[str, Any], root: str) -> List[str]:
 
 
 def candidate_files(order: Dict[str, Any], root: str) -> List[str]:
-    """Files the model may touch, filtered through the trusted edit policy."""
+    """Existing files and explicitly requested new Python paths the model may touch."""
     out: List[str] = []
     for rel in list(order.get("files") or []):
         rel = control.normalize_path(str(rel))
-        if editable(rel) is None and os.path.isfile(os.path.join(root, rel)):
+        if editable(rel) is not None:
+            continue
+        path = os.path.join(root, rel)
+        parent = os.path.dirname(path)
+        if os.path.isfile(path) or os.path.isdir(parent):
             out.append(rel)
     return out[: rules.AUTHOR_MAX_FILES_PER_ORDER]
 
@@ -313,7 +317,7 @@ def candidate_files(order: Dict[str, Any], root: str) -> List[str]:
 
 SYSTEM_PROMPT = """\
 You maintain a headless Python program that plays an automated farming game via an
-MCP server. It runs unattended every 180 seconds and is currently in first place.
+MCP server. It runs unattended every 300 seconds and is currently in first place.
 Your edits ship without human review, so correctness matters more than elegance.
 
 Rules you must follow:
@@ -322,6 +326,8 @@ Rules you must follow:
   no markdown fences around the blocks.
 * SEARCH text must be copied byte-for-byte from the file shown to you, and must
   appear exactly once in that file. Include enough surrounding lines to be unique.
+* For an explicitly offered NEW FILE only, leave SEARCH empty and put the complete
+  bounded file body in REPLACE. Never invent a path that was not offered.
 * Make the smallest change that satisfies the acceptance criteria.
 * Preserve existing behaviour that the order does not ask you to change.
 * Never remove or weaken an existing safety check, budget, timeout or rate limit.
@@ -370,8 +376,15 @@ def build_prompt(order: Dict[str, Any], root: str) -> Tuple[str, List[str]]:
     if not files:
         parts.append("(none were resolved; reply with no edit blocks)")
     for rel in files:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            parts += [
+                "", "--- NEW FILE: %s" % rel,
+                "This requested path does not exist. Create it only with an empty SEARCH block.",
+            ]
+            continue
         try:
-            body = open(os.path.join(root, rel), "r", encoding="utf-8").read()
+            body = open(path, "r", encoding="utf-8").read()
         except OSError:
             continue
         if len(body) > MAX_FILE_BYTES:
@@ -400,7 +413,11 @@ def parse_edits(text: str) -> List[Dict[str, str]]:
     return out
 
 
-def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
+def apply_edits(
+    edits: List[Dict[str, str]],
+    root: str,
+    allowed: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Apply edit blocks to the staging tree, refusing anything ambiguous.
 
     A SEARCH string that matches zero or many times is rejected rather than
@@ -409,23 +426,35 @@ def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
     """
     files: Dict[str, str] = {}
     problems: List[str] = []
+    changed_bytes = 0
+    allowed_set = set(allowed or []) if allowed is not None else None
     for edit in edits:
         rel = control.normalize_path(edit["path"])
+        if allowed_set is not None and rel not in allowed_set:
+            problems.append("refused %s: path was not offered" % rel)
+            continue
         refusal = editable(rel)
         if refusal:
             problems.append("refused %s: %s" % (rel, refusal))
             continue
         path = os.path.join(root, rel)
-        if not os.path.isfile(path):
-            problems.append("refused %s: no such file" % rel)
-            continue
         body = files.get(rel)
+        if body is None and not os.path.isfile(path):
+            if edit["search"]:
+                problems.append("refused %s: new files require an empty SEARCH" % rel)
+                continue
+            files[rel] = edit["replace"]
+            changed_bytes += len(edit["replace"].encode("utf-8"))
+            continue
         if body is None:
             try:
                 body = open(path, "r", encoding="utf-8").read()
             except OSError as exc:
                 problems.append("unreadable %s: %s" % (rel, exc.__class__.__name__))
                 continue
+        if not edit["search"]:
+            problems.append("refused %s: empty SEARCH is only valid for a new file" % rel)
+            continue
         occurrences = body.count(edit["search"])
         if occurrences == 0:
             problems.append("SEARCH text not found in %s" % rel)
@@ -434,12 +463,13 @@ def apply_edits(edits: List[Dict[str, str]], root: str) -> Dict[str, Any]:
             problems.append("SEARCH text appears %d times in %s; ambiguous" % (occurrences, rel))
             continue
         files[rel] = body.replace(edit["search"], edit["replace"], 1)
+        changed_bytes += len(edit["search"].encode("utf-8")) + len(edit["replace"].encode("utf-8"))
 
     if len(files) > rules.AUTHOR_MAX_FILES_PER_ORDER:
         problems.append("touches %d files, over the %d limit"
                         % (len(files), rules.AUTHOR_MAX_FILES_PER_ORDER))
         files = {}
-    return {"files": files, "problems": problems}
+    return {"files": files, "problems": problems, "changed_bytes": changed_bytes}
 
 
 def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
@@ -473,8 +503,8 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
         return {"backend": "model", "files": {}, "usage": result,
                 "problems": ["model returned no usable edit blocks"]}
 
-    applied = apply_edits(edits, root)
-    size = sum(len(v) for v in applied["files"].values())
+    applied = apply_edits(edits, root, allowed=offered)
+    size = int(applied.get("changed_bytes") or 0)
     if size > MAX_PATCH_BYTES:
         applied["problems"].append("patch of %d bytes exceeds the %d byte limit" % (size, MAX_PATCH_BYTES))
         applied["files"] = {}
@@ -752,7 +782,9 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
 
         files = patch["files"]
         for rel, body in files.items():
-            with open(os.path.join(root, rel), "w", encoding="utf-8") as target:
+            target_path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "w", encoding="utf-8") as target:
                 target.write(body)
 
         broken = compile_check(files, root)

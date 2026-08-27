@@ -248,6 +248,15 @@ def record_result(
     return row
 
 
+def latest_result(identity: str) -> Optional[Dict[str, Any]]:
+    """Return the newest durable validation result for one hypothesis."""
+    matches = [
+        row for row in events()
+        if row.get("event") == "hypothesis.result" and row.get("hypothesis_id") == identity
+    ]
+    return matches[-1] if matches else None
+
+
 def graph(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Set[str]]:
     adjacency: Dict[str, Set[str]] = {}
     for row in list(rows) if rows is not None else events():
@@ -389,6 +398,57 @@ def record_policy_promotion(
     validate_graph(events() + [row])
     _append(row)
     return row
+
+
+def reconcile_workorders(path: Optional[str] = None) -> Dict[str, Any]:
+    """Attach lineage to strategy proposals created before provenance existed."""
+    from . import workorders
+
+    queue = path or workorders.QUEUE
+    migrated = 0
+    enriched = 0
+    errors: List[str] = []
+    orders = list(workorders.current(queue).values())
+    for order in orders:
+        try:
+            if workorders.ensure_probe_path(str(order.get("id")), queue):
+                enriched += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append("%s path: %s" % (order.get("id"), str(exc)[:140]))
+    for order in orders:
+        if order.get("kind") != "strategy_hypothesis" or order.get("provenance"):
+            continue
+        if order.get("status") in workorders.TERMINAL:
+            continue
+        detail = order.get("detail") or {}
+        if not isinstance(detail, dict):
+            detail = {}
+        metric = str(detail.get("metric") or "declared primary outcome")
+        spec = {
+            "hypothesis": detail.get("hypothesis") or order.get("summary"),
+            "null_hypothesis": detail.get("null_hypothesis")
+            or "The proposed mechanism produces no measurable improvement in %s." % metric,
+            "falsifier": detail.get("falsifier")
+            or "The bounded probe fails the work order acceptance criteria.",
+            "primary_metric": metric,
+            "expected_improvement": detail.get("expected_improvement"),
+        }
+        discovery = ["workorder:%s" % order.get("id")]
+        try:
+            registered = register_hypothesis(spec, discovery)
+            identity = str(registered.get("id") or hypothesis_id(spec))
+            contract = dict(spec)
+            contract.update({
+                "hypothesis_id": identity,
+                "discovery_evidence": discovery,
+                "question_ids": [],
+                "migration": "pre-lineage work order",
+            })
+            workorders.attach_provenance(str(order.get("id")), contract, queue)
+            migrated += 1
+        except Exception as exc:  # noqa: BLE001 - one legacy row must not block others
+            errors.append("%s: %s" % (order.get("id"), str(exc)[:160]))
+    return {"migrated": migrated, "probe_paths_enriched": enriched, "errors": errors}
 
 
 def status() -> Dict[str, Any]:

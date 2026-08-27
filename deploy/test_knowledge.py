@@ -328,6 +328,12 @@ def main() -> int:
             suite.check(not q1["page_on_open"] and not q2["page_on_open"],
                         "rival wake opens research without paging")
             questions.set_status(q1["question"]["id"], "answered", "rival resumed feeding", ["history#241"], 243)
+            repeated = questions.open_or_update(
+                "rival_wake", "RIVAL WAKE: John recent 0.800/min vs base 0.100/min",
+                row={"run": 244, "ts": "2026-08-22T00:10:00Z"},
+            )
+            suite.check(not repeated["reopened"] and repeated["question"]["status"] == "answered",
+                        "an immediate repeated alert does not erase a probe answer")
             reopened = questions.open_or_update(
                 "rival_wake", "RIVAL WAKE: John recent 2.000/min vs base 0.000/min",
                 row={"run": 268, "ts": "2026-08-22T02:00:00Z"},

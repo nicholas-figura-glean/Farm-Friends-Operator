@@ -33,6 +33,7 @@ DEFAULT_LEDGERS = (
     "intents.ndjson",
     "history.ndjson",
 )
+COMPATIBILITY_FILE = "compaction_compatibility.json"
 
 
 class CompactionError(RuntimeError):
@@ -462,6 +463,23 @@ def status(path: Any) -> Dict[str, Any]:
         "archived_rows": sum(int(item.get("rows") or 0) for item in entries),
         "last_segment": entries[-1].get("file") if entries else None,
     }
+
+
+def mark_compatible(state_dir: Any, revision: str) -> Dict[str, Any]:
+    """Record that rollback can no longer target a pre-segmentation reader."""
+    state = _path(state_dir)
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "revision": str(revision),
+        "established_ts": _utcnow(),
+        "reader": "segmented-ndjson-v1",
+    }
+    _atomic_json(state / COMPATIBILITY_FILE, record)
+    return record
+
+
+def compatibility(state_dir: Any) -> Dict[str, Any]:
+    return _load_json(_path(state_dir) / COMPATIBILITY_FILE)
 
 
 def maintain(

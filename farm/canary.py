@@ -64,6 +64,10 @@ REGRESSED = "regressed"
 INACTIVE = "inactive"
 
 
+class CanaryActiveError(RuntimeError):
+    """A second candidate cannot replace unresolved release evidence."""
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -197,7 +201,14 @@ def arm(
     run_history: str = RUN_HISTORY,
 ) -> Dict[str, Any]:
     """Record that `revision` is live provisionally and must prove itself."""
+    watching = active(store)
+    if watching:
+        raise CanaryActiveError(
+            "canary %s is still watching; refusing to arm %s"
+            % (watching.get("revision"), revision)
+        )
     runs = _runs(run_history)
+    evaluation.ensure_champion(store, previous, run=latest_run(runs))
     efficacy_baseline = evaluation.baseline_samples(runs)
     record = {
         "schema_version": 1,
@@ -448,6 +459,13 @@ def resolve(
         evaluation.record_resolution(record, verdict, store)
     except Exception as exc:  # noqa: BLE001 - pointer safety already decided
         outcome["efficacy_record_error"] = str(exc)[:200]
+    if status == HEALTHY:
+        try:
+            outcome["compaction_compatibility"] = compaction.mark_compatible(
+                Path(store).resolve().parent, str(record.get("revision") or "")
+            )
+        except Exception as exc:  # noqa: BLE001 - release verdict remains durable
+            outcome["compaction_compatibility_error"] = str(exc)[:200]
     return outcome
 
 

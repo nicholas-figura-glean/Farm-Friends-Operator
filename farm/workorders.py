@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -166,6 +167,38 @@ def claim(order_id: str, actor: str, run: Optional[int] = None, path: str = QUEU
         return None
     return _append(
         _event(order, CLAIMED, actor=actor, run=run, attempts=int(order.get("attempts") or 0) + 1),
+        path,
+    )
+
+
+def ensure_probe_path(order_id: str, path: str = QUEUE) -> Optional[Dict[str, Any]]:
+    """Backfill the explicit new-file path required by bounded model creation."""
+    order = current(path).get(order_id)
+    if not order or order.get("source") != "research_agent":
+        return None
+    if order.get("kind") not in {"strategy_hypothesis", "unused_capability"}:
+        return None
+    stem = re.sub(r"^research-(?:hypothesis|capability)-", "", order_id)
+    stem = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")[:48] or "generated"
+    probe_path = "experiments/%s_probe.py" % stem
+    files = list(order.get("files") or [])
+    if probe_path in files:
+        return None
+    files = [probe_path] + files
+    return _append(_event(order, str(order.get("status") or OPEN), files=files), path)
+
+
+def attach_provenance(
+    order_id: str,
+    provenance: Dict[str, Any],
+    path: str = QUEUE,
+) -> Optional[Dict[str, Any]]:
+    """Enrich a legacy live order without changing its queue status."""
+    order = current(path).get(order_id)
+    if not order:
+        return None
+    return _append(
+        _event(order, str(order.get("status") or OPEN), provenance=dict(provenance)),
         path,
     )
 

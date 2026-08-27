@@ -133,6 +133,58 @@ def champion(canary_store: str) -> Dict[str, Any]:
     return _read_json(path)
 
 
+def ensure_champion(
+    canary_store: str,
+    revision: str,
+    policy_id: str = "",
+    run: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Bootstrap the already-trusted rollback target exactly once.
+
+    Before efficacy existed, the live release had no champion row even though it
+    was the release every candidate would roll back to. Treating an implicit 1.0
+    as a measured candidate caused the first reliability release to fail the
+    cumulative budget instead of establishing a durable comparison anchor.
+    """
+    champion_path, events_path, lock_path = _paths(canary_store)
+    if not revision:
+        return {}
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        current = _read_json(champion_path)
+        if current:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            return current
+        established = {
+            "schema_version": SCHEMA_VERSION,
+            "revision": revision,
+            "policy_id": policy_id,
+            "established_ts": _utcnow(),
+            "established_run": run,
+            "cumulative_ratio": 1.0,
+            "history": [{
+                "revision": revision,
+                "policy_id": policy_id,
+                "change_class": "bootstrap",
+                "ts": _utcnow(),
+                "cumulative_ratio": 1.0,
+            }],
+        }
+        _atomic_json(champion_path, established)
+        _append(events_path, {
+            "schema_version": SCHEMA_VERSION,
+            "event": "champion.bootstrapped",
+            "ts": _utcnow(),
+            "revision": revision,
+            "policy_id": policy_id,
+            "run": run,
+            "reason": "trusted rollback target predates efficacy ledger",
+        })
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return established
+
+
 def judge(
     record: Dict[str, Any],
     usable_runs: List[Dict[str, Any]],

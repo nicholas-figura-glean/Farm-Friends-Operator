@@ -39,6 +39,26 @@ if [[ -L "$LINK" ]]; then
   PREVIOUS="$(basename "$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$LINK")")"
 fi
 
+# One unresolved candidate is the unit of attribution. Check before remote gates,
+# staging, or pointer mutation so manual and installer-driven releases cannot bypass
+# the author agent's advisory guard. --stage-only remains safe because it never flips.
+if [[ "$STAGE_ONLY" -eq 0 && -n "$PREVIOUS" ]]; then
+  if ! FARM_PROJECT_ROOT="$DEPLOY_PROJECT" PYTHONPATH="$SOURCE_PROJECT" \
+       /usr/bin/python3 - "$DEPLOY_PROJECT/state/canary.json" <<'PY'
+import sys
+from farm import canary
+
+watching = canary.active(sys.argv[1])
+if watching:
+    raise SystemExit(
+        "release rejected: canary %s is still watching" % watching.get("revision")
+    )
+PY
+  then
+    exit 4
+  fi
+fi
+
 # A release is built from the working tree, so the exact source that ships must be
 # both committed and durable upstream. This is a hard gate rather than a warning:
 # publishing a local-only repair makes the live runtime impossible to reproduce from

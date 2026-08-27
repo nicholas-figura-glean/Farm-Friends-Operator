@@ -13,7 +13,10 @@ from typing import Any, Callable, List
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import analysis, canary, compaction, control, evaluation, policy, probes, provenance  # noqa: E402
+from farm import (  # noqa: E402
+    analysis, canary, compaction, control, evaluation, policy, probes,
+    provenance, questions, workorders,
+)
 
 
 class Suite:
@@ -113,6 +116,12 @@ def main() -> int:
             status = compaction.status(ledger)
             suite.check(status["segments"] == 1 and status["archived_rows"] == 15,
                         "manifest reports immutable archived rows", status)
+            marked = compaction.mark_compatible(state, "rev-compatible")
+            suite.check(
+                marked["revision"] == "rev-compatible"
+                and compaction.compatibility(state)["reader"] == "segmented-ndjson-v1",
+                "accepted readers establish an explicit compaction watermark",
+            )
 
             manifest = json.loads((state / "segments" / "history" / "manifest.json").read_text())
             segment = state / "segments" / "history" / manifest["segments"][0]["file"]
@@ -219,6 +228,13 @@ def main() -> int:
                          lambda: policy.promote(policy_a, promotion_contract=contract),
                          "integrated policy gate rejects A to B to A oscillation")
 
+            peek_spec = probes._registry()["peek_top_rival"]
+            suite.check(
+                provenance.hypothesis_id(peek_spec) == peek_spec.get("hypothesis_id")
+                and "threat" in peek_spec.get("question_classes", []),
+                "the rival probe carries matching lineage and routes live threat questions",
+                peek_spec,
+            )
             saved_registry, saved_command = probes._registry, probes._command
             script = Path(tmp) / "linked_probe.py"
             spec_probe = {
@@ -248,11 +264,95 @@ def main() -> int:
                     "['experiment#cohort=81-90'], os.environ['FARM_EVIDENCE_CLASS'], {'effect': 0.04})\n",
                     encoding="utf-8",
                 )
-                durable_result = probes.run_probe("linked", explicit=True, run=90)
+                opened = questions.open_or_update(
+                    "model_drift", "MODEL DRIFT: linked fixture", item={"run": 89},
+                    subject="linked fixture",
+                )["question"]
+                durable_result = probes.run_probe(
+                    "linked", explicit=True, run=90, question_ids=[opened["id"]],
+                )
                 suite.check(durable_result["status"] == "passed",
                             "probe passes after writing a durable hypothesis result", durable_result)
+                settled = next(row for row in questions.load_all() if row["id"] == opened["id"])
+                suite.check(
+                    settled["status"] == "answered"
+                    and settled.get("probe_result_status") == "supported",
+                    "a durable probe result closes its bound question", settled,
+                )
+
+                unrelated = Path(tmp) / "tool_calls.ndjson"
+                compaction.append_json(unrelated, {"probe_id": "background", "event": "tool.call"})
+                unlinked_spec = {
+                    "hypothesis": "Pure replay settles a stale decision.",
+                    "command": ["unused"], "read_only": True, "autonomous": True,
+                    "budget": {"coins": 0, "calls": 0, "wall_seconds": 10},
+                    "stop_condition": "fixture", "evidence_destination": "state/audits.ndjson",
+                }
+                probes._registry = lambda: {"unlinked": dict(unlinked_spec)}
+                script.write_text("print('replay complete')\n", encoding="utf-8")
+                stale = questions.open_or_update(
+                    "strategy_stale", "STRATEGY STALE: fixture", item={"run": 91},
+                    subject="farm",
+                )["question"]
+                replay = probes.run_probe(
+                    "unlinked", explicit=True, run=92, question_ids=[stale["id"]],
+                )
+                suite.check(
+                    replay["status"] == "passed" and replay["calls"] == 0,
+                    "unrelated global telemetry cannot create a probe budget violation", replay,
+                )
+                stale_after = next(row for row in questions.load_all() if row["id"] == stale["id"])
+                suite.check(stale_after["status"] == "answered",
+                            "a successful replay closes an unlinked strategy question", stale_after)
             finally:
                 probes._registry, probes._command = saved_registry, saved_command
+
+            saved_recent, saved_run_probe, saved_registry = (
+                probes._recent_events, probes.run_probe, probes._registry,
+            )
+            called: List[str] = []
+            try:
+                probes._recent_events = lambda: [{"run": 100, "status": "skipped"}]
+                probes._registry = lambda: {
+                    "scheduled": {
+                        "read_only": True, "autonomous": True,
+                        "question_classes": ["strategy_stale"],
+                        "subject_patterns": ["farm"],
+                    }
+                }
+                probes.run_probe = lambda probe_id, **kwargs: called.append(probe_id) or {"status": "passed"}
+                probes.maybe_run(
+                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm"}], 101,
+                )
+            finally:
+                probes._recent_events, probes.run_probe, probes._registry = (
+                    saved_recent, saved_run_probe, saved_registry,
+                )
+            suite.check(called == ["scheduled"],
+                        "a lock-contention skip does not consume probe cooldown", called)
+
+            queue = str(Path(tmp) / "workorders.ndjson")
+            workorders.submit(
+                {
+                    "id": "legacy-strategy", "kind": "strategy_hypothesis",
+                    "severity": "opportunity", "summary": "Legacy hypothesis",
+                    "detail": {
+                        "hypothesis": "A fixture intervention improves output.",
+                        "falsifier": "The fixture result is flat.",
+                        "metric": "fixture output",
+                    },
+                },
+                source="research_agent", intent="Build a bounded fixture probe.", path=queue,
+            )
+            migration = provenance.reconcile_workorders(queue)
+            migrated_order = workorders.current(queue)["legacy-strategy"]
+            suite.check(
+                migration["migrated"] == 1
+                and migration["probe_paths_enriched"] == 1
+                and (migrated_order.get("provenance") or {}).get("hypothesis_id")
+                and "experiments/legacy_strategy_probe.py" in (migrated_order.get("files") or []),
+                "legacy strategy work orders receive lineage and an explicit probe path", migrated_order,
+            )
 
         section("champion versus candidate efficacy")
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,6 +374,13 @@ def main() -> int:
             suite.check(reliable["accepted"] and reliable["status"] == evaluation.EQUIVALENT,
                         "reliability release can pass a tight equivalence gate", reliable)
 
+            bootstrap = evaluation.ensure_champion(store, "rev-a", policy_id="pol-a", run=12)
+            repeated = evaluation.ensure_champion(store, "rev-other", policy_id="pol-b", run=13)
+            suite.check(
+                bootstrap["revision"] == repeated["revision"] == "rev-a"
+                and bootstrap["cumulative_ratio"] == 1.0,
+                "the trusted rollback target bootstraps the champion exactly once", repeated,
+            )
             champion_path = Path(tmp) / "champion.json"
             champion_path.write_text(json.dumps({"cumulative_ratio": 0.96}), encoding="utf-8")
             budget = evaluation.judge(dict(base_record, change_class="reliability"),
@@ -297,6 +404,7 @@ def main() -> int:
             suite.check(no_gain["status"] == canary.REGRESSED
                         and "does not prove" in no_gain["reason"],
                         "safe but ineffective strategy release is reverted", no_gain)
+            canary.resolve(no_gain, project=tmp, store=str(store), history=str(audit))
 
             write_rows(history, base)
             canary.arm("rev-c", "rev-a", change_class="strategy",
@@ -307,6 +415,12 @@ def main() -> int:
             suite.check(gain["status"] == canary.HEALTHY
                         and (gain.get("efficacy") or {}).get("accepted"),
                         "strategy release promotes only after independent efficacy", gain)
+            canary.resolve(gain, project=tmp, store=str(store), history=str(audit))
+            suite.check(
+                compaction.compatibility(root).get("revision") == "rev-c",
+                "a healthy canary establishes the accepted reader watermark",
+                compaction.compatibility(root),
+            )
 
         suite.check(control.is_protected("farm/cycle.py"),
                     "model author cannot rewrite the live strategy cycle")
@@ -317,8 +431,9 @@ def main() -> int:
         suite.check("compaction_safe = False" in supervisor_source
                     and "if compaction_safe:" in supervisor_source,
                     "source ledgers cannot rotate while rollback may target an old reader")
-        suite.check("publish and accept a compaction-capable release first" in supervisor_source,
-                    "manual compaction enforces the same reader-compatibility boundary")
+        suite.check("publish and accept a compaction-capable release first" in supervisor_source
+                    and "compaction.compatibility(state)" in supervisor_source,
+                    "manual compaction enforces the accepted-reader compatibility watermark")
 
     finally:
         os.environ.clear()

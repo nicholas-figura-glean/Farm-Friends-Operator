@@ -42,14 +42,14 @@ from urllib.request import urlopen
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import architecture, autonomy, workorders  # noqa: E402
+from farm import analysis, architecture, autonomy, workorders  # noqa: E402
 
 LEDGER = PROJECT / "state" / "dashboard_health.ndjson"
 DASHBOARD_URL = os.environ.get("FARM_DASHBOARD_URL", "http://127.0.0.1:8765").rstrip("/")
 
 # Each dashboard readout, how it is produced, and how stale it may be before that is
 # a defect. The staleness budgets come from the cadence of whatever writes the data:
-# the cycle runs every 180s, the contract watcher every 900s, the research agent
+# the cycle runs every 300s, the contract watcher every 900s, the research agent
 # hourly. A budget well above the writer's period avoids flagging normal jitter.
 #
 # `critical` marks readouts whose silence would hide something dangerous. A stale
@@ -292,11 +292,9 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
 
 def _staleness() -> Dict[str, Any]:
     """How old the underlying writers' data is, independent of whether it renders."""
-    from farm import journal
-
     out: Dict[str, Any] = {}
     try:
-        rows = journal.history(limit=1)
+        rows = analysis.history_rows(limit=1)
         if rows:
             ts = rows[-1].get("ts")
             parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -375,6 +373,16 @@ def main() -> int:
             })
 
     stale = _staleness()
+    for key, value in stale.items():
+        if not key.endswith("_error"):
+            continue
+        source = key[:-6]
+        problems.append({
+            "severity": "breaking" if source == "cycle_age" else "degraded",
+            "what": "%s freshness could not be verified" % source.replace("_", " "),
+            "why": str(value),
+            "source": source,
+        })
     for key, tab, budget in (("cycle_age", "overview", 900),
                              ("contract_age", "drift detection", 3600),
                              ("research_age", "Findings", 86400 * 2)):
@@ -429,6 +437,11 @@ def main() -> int:
             "detail": problem["why"],
         }
         try:
+            repair_files = (
+                ["experiments/dashboard_agent.py"]
+                if str(problem["source"]).endswith("_age")
+                else ["farm/autonomy.py", "farm/architecture.py", "monitor.py"]
+            )
             submitted = workorders.submit(
                 change,
                 source="dashboard_agent",
@@ -438,7 +451,7 @@ def main() -> int:
                     "python3 deploy/test_dashboard_agent.py reports no failing readout",
                     "the readout builds in under 4000ms",
                 ],
-                files=["farm/autonomy.py", "farm/architecture.py", "monitor.py"],
+                files=repair_files,
             )
             if submitted:
                 filed += 1

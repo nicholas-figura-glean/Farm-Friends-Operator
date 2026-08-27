@@ -136,14 +136,6 @@ def _lower_adopt_cap(store: Dict[str, Any], factor: float = 0.6) -> Optional[str
     return "adopt cap %d -> %d/run" % (current, target)
 
 
-def _raise_collect_passes(store: Dict[str, Any]) -> Optional[str]:
-    current = rules.collect_passes(store.get("knobs") or {})
-    if current >= rules.MAX_COLLECT_PASSES:
-        return None
-    _set(store, "collect_passes", current + 1)
-    return "collect passes %d -> %d" % (current, current + 1)
-
-
 # -- remedies ----------------------------------------------------------------
 # Each takes (item, row, store) and returns a description of what it changed,
 # or None when it has nothing left to try (which escalates).
@@ -159,25 +151,11 @@ def _heal_backpressure(item, row, store) -> Optional[str]:
 
 
 def _heal_throughput(item, row, store) -> Optional[str]:
-    """Low throughput that survived the detector's backlog test.
-
-    Two fixable causes: produce accumulating faster than one collect call can
-    drain, and a cycle so long that collection intervals stretch. Both have
-    concrete levers.
-    """
-    actions = []
-    animals = row.get("animals") or 0
-    if not rules.backlog_drained(row.get("ready_units") or 0, animals):
-        action = _raise_collect_passes(store)
-        if action:
-            actions.append(action)
-    # Deliberately does NOT lower the adoption cap for a long run any more.
-    # adopt_chickens() already stops on the wall-clock deadline, so adoption
-    # cannot overrun the budget on its own - but a run that is long BECAUSE it
-    # adopted would cut the cap, shrinking the next run's adoption, which is a
-    # loop that ratchets growth to zero for the one reason that is not a fault.
-    # The inherent cost is collect + bulk feed, which no adoption cap can shrink.
-    return "; ".join(actions) if actions else None
+    """One bulk collection is invariant; throughput requires investigation."""
+    # Deliberately do not invent a second collection pass or cut growth because
+    # a long run adopted successfully. Both responses previously hid the actual
+    # scoring signal and recreated the throttling loop from POSTMORTEM-run377.
+    return None
 
 
 def _heal_hunger(item, row, store) -> Optional[str]:
@@ -214,7 +192,9 @@ def _heal_feed_reserve(item, row, store) -> Optional[str]:
 
 
 def _heal_zero_collect(item, row, store) -> Optional[str]:
-    return _raise_collect_passes(store)
+    # Collection is exactly once per cycle. Repeating an ambiguous mutating call
+    # can double-apply after a gateway timeout, so unresolved zeroes are routed.
+    return None
 
 
 def _heal_adopt_failures(item, row, store) -> Optional[str]:
@@ -356,15 +336,9 @@ def relax(store: Dict[str, Any], run: Optional[int]) -> List[str]:
             current["adopt_cap"] = target
             notes.append("adopt cap eased %d -> %d" % (value, target))
 
-    if "collect_passes" in current and quiet("throughput") and quiet("zero_collect"):
-        value = rules.collect_passes(current)
-        if value <= 2:
-            current.pop("collect_passes", None)
-            notes.append("collect passes restored to 1")
-        else:
-            current["collect_passes"] = value - 1
-            notes.append("collect passes eased %d -> %d" % (value, value - 1))
-
+    # Purge pre-bulk-path knobs instead of displaying a control the cycle ignores.
+    current.pop("collect_passes", None)
+    current.pop("individual_feeds", None)
     return notes
 
 
@@ -575,6 +549,5 @@ def effective_knobs() -> Dict[str, Any]:
         "rate_ceiling": rules.rate_ceiling(current),
         "adopt_cap": rules.adopt_cap(current),
         "adopt_workers": rules.adopt_worker_count(current),
-        "collect_passes": rules.collect_passes(current),
         "overrides": current,
     }

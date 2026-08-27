@@ -1,6 +1,6 @@
 # Plan: self-audit and research loop
 
-Status: **implemented in the working tree; pending explicit immutable release.**
+Status: **implemented and enforced by immutable-release gates.**
 Written after the run 291 loss of first place and completed after the farm retook
 rank 1 at run 416. The implementation is split across `farm/rules.py` (pure replay
 detectors), `farm/questions.py`, `farm/research.py`, `farm/probes.py`, and the

@@ -8,11 +8,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import analysis, provenance, rules
+from . import analysis, compaction, provenance, questions, rules
 
 PROJECT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
@@ -67,13 +68,85 @@ def _command(spec: Dict[str, Any]) -> List[str]:
     return [sys.executable, str(script)] + raw[1:]
 
 
-def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) -> Dict[str, Any]:
+def _ensure_registration(spec: Dict[str, Any], question_ids: List[str], probe_id: str) -> None:
+    identity = str(spec.get("hypothesis_id") or "")
+    if not identity:
+        return
+    if any(
+        row.get("event") == "hypothesis.registered" and row.get("node") == identity
+        for row in provenance.events()
+    ):
+        return
+    registration = provenance.register_hypothesis(
+        spec,
+        ["question:%s" % value for value in question_ids] or ["explicit-probe:%s" % probe_id],
+        question_ids=question_ids,
+    )
+    if registration.get("id") != identity:
+        raise provenance.ProvenanceError(
+            "probe %s declares hypothesis %s but semantics resolve to %s"
+            % (probe_id, identity, registration.get("id"))
+        )
+
+
+def _attributed_calls(execution_id: str) -> int:
+    """Count only MCP telemetry emitted by this exact probe execution."""
+    tool_log = _state_dir() / "tool_calls.ndjson"
+    return sum(
+        1 for row in compaction.read_rows(tool_log, limit=10_000)
+        if row.get("probe_id") == execution_id
+    )
+
+
+def _finish_questions(
+    question_ids: List[str],
+    probe_id: str,
+    run: Optional[int],
+    result: Dict[str, Any],
+) -> None:
+    status = str(result.get("status") or "failed")
+    hypothesis_id = str(result.get("hypothesis_id") or "")
+    hypothesis_result = provenance.latest_result(hypothesis_id) if hypothesis_id else None
+    evidence_ref = "probe:%s:%s" % (probe_id, result.get("started_ts") or result.get("ts"))
+    refs = [evidence_ref]
+    destination = result.get("evidence_destination")
+    if destination:
+        refs.append(str(destination))
+
+    supported = {"supported", "accepted", "passed", "falsified", "rejected"}
+    result_status = str((hypothesis_result or {}).get("status") or status)
+    settled = status == "passed" and (not hypothesis_id or result_status in supported)
+    for question_id in question_ids:
+        if settled:
+            answer = "Probe %s completed with durable result %s." % (probe_id, result_status)
+            questions.set_status(
+                question_id, "answered", answer=answer, evidence_refs=refs,
+                run=run, probe_id=probe_id, result_status=result_status,
+            )
+        else:
+            answer = "Probe %s did not settle the question: %s." % (
+                probe_id, result.get("reason") or result_status,
+            )
+            questions.set_status(
+                question_id, "open", answer=answer, evidence_refs=refs,
+                run=run, probe_id=probe_id, result_status=result_status,
+            )
+
+
+def run_probe(
+    probe_id: str,
+    explicit: bool = False,
+    run: Optional[int] = None,
+    question_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     registry = _registry()
     if probe_id not in registry:
         raise ValueError("unknown probe: %s" % probe_id)
     spec = registry[probe_id]
     if not explicit and (not spec.get("read_only") or not spec.get("autonomous")):
         raise ValueError("probe %s requires explicit invocation" % probe_id)
+    bound_questions = sorted(set(str(value) for value in (question_ids or []) if value))
+    _ensure_registration(spec, bound_questions, probe_id)
 
     lock_path = _state_dir() / ".lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,18 +170,20 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             raise
 
         started = _utcnow()
+        execution_id = "%s:%d:%d" % (probe_id, os.getpid(), time.time_ns())
+        for question_id in bound_questions:
+            questions.set_status(question_id, "probing", run=run, probe_id=probe_id)
         hypothesis_id = str(spec.get("hypothesis_id") or "")
         result_count_before = sum(
             1 for item in provenance.events()
             if item.get("event") == "hypothesis.result"
             and item.get("hypothesis_id") == hypothesis_id
         ) if hypothesis_id else 0
-        tool_log = _state_dir() / "tool_calls.ndjson"
-        before_size = tool_log.stat().st_size if tool_log.exists() else 0
         budget = dict(spec.get("budget") or {})
         timeout = max(1, int(budget.get("wall_seconds") or 60))
         env = dict(os.environ)
-        env["FARM_PROBE_ID"] = probe_id
+        env["FARM_PROBE_ID"] = execution_id
+        env["FARM_TOOL_CALL_LOG"] = str(_state_dir() / "tool_calls.ndjson")
         if hypothesis_id:
             env["FARM_HYPOTHESIS_ID"] = hypothesis_id
             env["FARM_EVIDENCE_CLASS"] = str(spec.get("evidence_class") or "holdout")
@@ -131,10 +206,11 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             output = (_text(exc.stdout) + _text(exc.stderr))[-8_000:]
             returncode = None
             reason = "wall-time budget exceeded"
-        after_size = tool_log.stat().st_size if tool_log.exists() else 0
-        if int(budget.get("calls") or 0) == 0 and after_size != before_size:
+        calls = _attributed_calls(execution_id)
+        call_budget = max(0, int(budget.get("calls") or 0))
+        if calls > call_budget:
             status = "budget_violation"
-            reason = "read-only probe wrote MCP tool telemetry"
+            reason = "probe made %d attributed MCP calls against budget %d" % (calls, call_budget)
         if status == "passed" and hypothesis_id:
             result_count_after = sum(
                 1 for item in provenance.events()
@@ -150,6 +226,8 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             "started_ts": started,
             "run": run,
             "probe_id": probe_id,
+            "execution_id": execution_id,
+            "question_ids": bound_questions,
             "status": status,
             "returncode": returncode,
             "reason": reason,
@@ -159,11 +237,13 @@ def run_probe(probe_id: str, explicit: bool = False, run: Optional[int] = None) 
             "hypothesis_id": hypothesis_id or None,
             "evidence_class": spec.get("evidence_class"),
             "budget": budget,
+            "calls": calls,
             "stop_condition": spec.get("stop_condition"),
             "evidence_destination": spec.get("evidence_destination"),
             "output": output,
         }
         _append(result)
+        _finish_questions(bound_questions, probe_id, run, result)
         return result
     finally:
         try:
@@ -183,7 +263,10 @@ def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optio
         return None
     events = _recent_events()
     last_run = max(
-        [event.get("run") for event in events if isinstance(event.get("run"), int)],
+        [
+            event.get("run") for event in events
+            if isinstance(event.get("run"), int) and event.get("status") != "skipped"
+        ],
         default=None,
     )
     if isinstance(last_run, int) and run - last_run < rules.PROBE_MIN_INTERVAL_RUNS:
@@ -202,5 +285,8 @@ def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optio
                 continue
             matching.append(question)
         if matching:
-            return run_probe(probe_id, explicit=False, run=run)
+            return run_probe(
+                probe_id, explicit=False, run=run,
+                question_ids=[str(question.get("id")) for question in matching if question.get("id")],
+            )
     return None

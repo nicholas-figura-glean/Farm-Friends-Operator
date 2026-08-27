@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import rules
+
 SCHEMA_VERSION = 1
 VALID_STATUSES = {"open", "probing", "answered", "abandoned"}
 
@@ -351,7 +353,15 @@ def open_or_update(
         rows, migrations = _collapse_duplicates(load_all())
         existing = next((value for value in rows if value.get("id") == qid), None)
         opened = existing is None
-        reopened = bool(existing and existing.get("status") in {"answered", "abandoned"})
+        terminal = bool(existing and existing.get("status") in {"answered", "abandoned"})
+        closed_run = (existing or {}).get("closed_run")
+        critical_recurrence = alert_class in {"rank_lost", "overtaken", "no_path_to_win"}
+        enough_new_runs = (
+            not isinstance(run, int)
+            or not isinstance(closed_run, int)
+            or run - closed_run >= rules.QUESTION_REOPEN_RUNS
+        )
+        reopened = bool(terminal and (critical_recurrence or enough_new_runs))
         if existing is None:
             record: Dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
@@ -438,6 +448,8 @@ def set_status(
     answer: Optional[str] = None,
     evidence_refs: Optional[List[str]] = None,
     run: Optional[int] = None,
+    probe_id: Optional[str] = None,
+    result_status: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     if status not in VALID_STATUSES:
         raise ValueError("invalid question status: %s" % status)
@@ -455,9 +467,23 @@ def set_status(
             record["answer"] = answer
         if evidence_refs:
             record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
-        if status in {"answered", "abandoned"}:
+        if status == "probing":
+            record["active_probe_id"] = probe_id
+            record["probe_started_run"] = run
+            record["closed_run"] = None
+            record["closed_ts"] = None
+        elif status == "open":
+            record["active_probe_id"] = None
+            record["probe_started_run"] = None
+            record["closed_run"] = None
+            record["closed_ts"] = None
+        elif status in {"answered", "abandoned"}:
+            record["active_probe_id"] = None
+            record["probe_started_run"] = None
             record["closed_run"] = run
             record["closed_ts"] = _utcnow()
+        if result_status is not None:
+            record["probe_result_status"] = result_status
         _write_current(current_path, rows)
         _append_event(
             events_path,
@@ -469,6 +495,8 @@ def set_status(
                 "run": run,
                 "answer": answer,
                 "evidence_refs": evidence_refs or [],
+                "probe_id": probe_id,
+                "result_status": result_status,
             },
         )
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

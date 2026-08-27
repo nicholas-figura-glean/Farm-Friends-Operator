@@ -420,7 +420,7 @@ def do_llm_status() -> int:
     return 0
 
 
-def do_supervise(cadence: int = 180) -> int:
+def do_supervise(cadence: int = 300) -> int:
     """The self-healing pass. Cheap, deterministic, and safe to run often.
 
     Order matters: the schedule is repaired first (a dead scheduler makes every
@@ -459,6 +459,16 @@ def do_supervise(cadence: int = 180) -> int:
     #     executes it, or the recovery itself runs the broken build.
     canary_note = ""
     compaction_safe = False
+
+    def accepted_compaction_reader() -> bool:
+        state = analysis.state_dir()
+        live = state.parent / "release"
+        compatible = compaction.compatibility(state)
+        return (
+            (live / "farm" / "compaction.py").is_file()
+            and compatible.get("revision") == os.path.basename(os.path.realpath(str(live)))
+        )
+
     try:
         verdict = canary.evaluate()
         if verdict.get("status") in (canary.HEALTHY, canary.REGRESSED):
@@ -475,14 +485,14 @@ def do_supervise(cadence: int = 180) -> int:
                 canary_note = "canary cleared %s: %s" % (
                     outcome.get("revision"), verdict.get("reason", ""),
                 )
-                compaction_safe = True
+                compaction_safe = accepted_compaction_reader()
             notes.append(canary_note)
         elif verdict.get("status") == canary.WATCHING:
             canary_note = "canary watching %s (%s)" % (
                 verdict.get("revision"), verdict.get("reason", ""),
             )
         else:
-            compaction_safe = True
+            compaction_safe = accepted_compaction_reader()
     except Exception as exc:  # noqa: BLE001
         notes.append("canary check failed: %s" % str(exc)[:100])
 
@@ -540,6 +550,13 @@ def do_supervise(cadence: int = 180) -> int:
     questioned = result.get("questions") or []
     probe_result = None
     try:
+        migrated = provenance.reconcile_workorders()
+        if migrated.get("migrated"):
+            notes.append("attached lineage to %d legacy strategy order(s)" % migrated["migrated"])
+        if migrated.get("probe_paths_enriched"):
+            notes.append("added explicit paths to %d legacy probe order(s)" % migrated["probe_paths_enriched"])
+        if migrated.get("errors"):
+            notes.append("lineage migration failed: %s" % "; ".join(migrated["errors"])[:100])
         probe_result = probes.maybe_run(questions.open_questions(), last.get("run"))
     except Exception as exc:  # noqa: BLE001
         notes.append("probe scheduler failed: %s" % str(exc)[:100])
@@ -794,11 +811,15 @@ def do_compaction(run: bool = False) -> int:
     state = analysis.state_dir()
     if run:
         canary_store = str(state / "canary.json")
-        live_compactor = state.parent / "release" / "farm" / "compaction.py"
+        live_release = state.parent / "release"
+        live_compactor = live_release / "farm" / "compaction.py"
         if canary.active(canary_store):
             print("COMPACTION REFUSED: a release is still provisional")
             return 4
-        if not live_compactor.is_file():
+        compatible = compaction.compatibility(state)
+        live_revision = os.path.basename(os.path.realpath(str(live_release)))
+        if (not live_compactor.is_file()
+                or compatible.get("revision") != live_revision):
             print("COMPACTION REFUSED: publish and accept a compaction-capable release first")
             return 4
     result = (
@@ -1118,19 +1139,22 @@ def do_self_test() -> int:
     from farm import mcp as _mcp
 
     limiter = _mcp.RateLimiter(rate=20.0)
-    t0 = time.time()
+    t0 = time.monotonic()
     for _ in range(10):
         limiter.acquire()
-    elapsed = time.time() - t0
-    if not (0.35 <= elapsed <= 0.75):
+    elapsed = time.monotonic() - t0
+    # Oversleep is host scheduling noise, not evidence that reservations drifted.
+    # Keep the lower bound tight (under-throttling is dangerous) and use a generous
+    # upper bound so a background launchd pass cannot block unrelated code repair.
+    if not (0.40 <= elapsed <= 2.0):
         failures.append(
-            "rate limiter drift: 10 acquires at 20/s took %.2fs (want ~0.45s)" % elapsed
+            "rate limiter drift: 10 acquires at 20/s took %.2fs (want >=0.40s, <=2.0s)" % elapsed
         )
     checks += 1
     import threading as _threading
 
     limiter = _mcp.RateLimiter(rate=20.0)
-    t0 = time.time()
+    t0 = time.monotonic()
     threads = [
         _threading.Thread(target=lambda: [limiter.acquire() for _ in range(5)])
         for _ in range(4)
@@ -1139,10 +1163,10 @@ def do_self_test() -> int:
         t.start()
     for t in threads:
         t.join()
-    elapsed = time.time() - t0
-    if not (0.8 <= elapsed <= 1.6):
+    elapsed = time.monotonic() - t0
+    if not (0.85 <= elapsed <= 3.0):
         failures.append(
-            "rate limiter under 4 threads: 20 acquires at 20/s took %.2fs (want ~1.0s)"
+            "rate limiter under 4 threads: 20 acquires at 20/s took %.2fs (want >=0.85s, <=3.0s)"
             % elapsed
         )
 

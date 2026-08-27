@@ -91,9 +91,9 @@ class RateLimiter(object):
         """
         with self._lock:
             interval = 1.0 / self._rate
-            slot = max(time.time(), self._next)
+            slot = max(time.monotonic(), self._next)
             self._next = slot + interval
-        delay = slot - time.time()
+        delay = slot - time.monotonic()
         if delay > 0:
             time.sleep(delay)
 

@@ -1,8 +1,9 @@
 # The self-healing loop
 
-Three agents were added so the operator can keep playing a game that keeps
-changing, without a human in the loop. They are deliberately separated by
-capability: one can only *look*, one can only *propose*, one can only *edit*.
+Three specialized change agents sit inside the nine-service unattended runtime.
+They are deliberately separated by capability: one can only *look*, one can only
+*propose*, one can only *edit*. `farm/control.py::SERVICES` is authoritative for
+the complete process set.
 
 ```
   contract_watch (15m)  ---- work orders ---->  author_agent (10m)  ---->  release + canary
@@ -47,7 +48,7 @@ not. Only the first three file work orders.
 ### Cost
 
 One MCP call per scan (`tools/list`). Response shapes are derived from the raw
-dumps the cycle already writes to `state/raw/latest/`, which are at most 180s
+dumps the cycle already writes to `state/raw/latest/`, which are at most 300s
 stale and cover 10 of the 15 tools. `list_farm` alone is ~20MB on the wire;
 re-fetching it every 15 minutes to check its format would add real load for no new
 information. POSTMORTEM-run377 is the reason that constraint is taken seriously.
@@ -84,7 +85,7 @@ budget -> claim -> stage -> patch -> gate -> publish -> canary
 ```
 
 * **Staging.** Patches are applied to a temp copy, never speculatively to the live
-  tree; launchd fires every 180s and would happily execute a half-applied change.
+  tree; launchd fires every 300s and would happily execute a half-applied change.
 * **Two backends.** An argument rename is derivable from the diff, so it is done in
   Python with no model and no variance. The model is reserved for changes needing
   judgement (reparsing, fallbacks for a removed capability).

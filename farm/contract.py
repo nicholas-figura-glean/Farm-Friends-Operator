@@ -21,7 +21,7 @@ lost the game, so a monitoring agent that polls 15 endpoints on a timer is not
 acceptable. A scan therefore makes **exactly one** MCP call: `tools/list`.
 
 Response shapes come free from `state/raw/latest/`, which the cycle already
-writes on every run. Those files are at most 180s stale, cover 10 of the 15
+writes on every run. Those files are at most 300s stale, cover 10 of the 15
 tools, and cost nothing to read. `list_farm` alone is ~20MB on the wire; re-fetching
 it every 15 minutes to check its format would add real pressure for no new
 information. The remaining tools are mutating (`adopt_animal`, `plant`, `gift`)

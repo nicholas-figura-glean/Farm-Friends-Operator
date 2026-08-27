@@ -165,7 +165,7 @@ MAX_ADOPTIONS_PER_RUN = 400
 # adopt_animal is one call per animal and the limiter allows ~4.5-5 calls/s, so
 # a ~90s adoption window supports ~400. adopt_chickens() still stops on the
 # wall-clock deadline, so this is a ceiling and never a mandate.
-# launchd cadence is 180s. Phase timing showed ~65-75s of every run is
+# launchd cadence is 300s. Phase timing showed ~65-75s of every run is
 # inherent server work (collect ~30-40s and bulk feed ~35s at this herd size)
 # that no amount of adoption parallelism can shrink. Keep the full cycle below
 # the scheduler interval so skipped launches do not stretch feed/collection
@@ -257,6 +257,8 @@ GAP_RECON_MINUTES = 30
 CLAIM_REFRESH_RUNS = 20
 RESEARCH_AUDIT_RUNS = 10
 PROBE_MIN_INTERVAL_RUNS = 20
+# A repeated alert is not novel evidence immediately after its probe settled.
+QUESTION_REOPEN_RUNS = 20
 
 # --- self-healing -----------------------------------------------------------
 # The supervisor remediates recurring alert classes in Python instead of waking

@@ -126,6 +126,11 @@ def unused_capabilities() -> List[Dict[str, Any]]:
     return out
 
 
+def _probe_path(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")[:48] or "generated"
+    return "experiments/%s_probe.py" % slug
+
+
 def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
     """A work order proposing a bounded probe for one unused capability."""
     name = entry["capability"]
@@ -157,7 +162,7 @@ def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
         "the probe records its outcome so a later pass can read the result",
     ]
     return {"change": change, "intent": intent, "acceptance": acceptance,
-            "files": ["experiments/registry.py"]}
+            "files": [_probe_path(name), "experiments/registry.py"]}
 
 
 # -- 2 & 3. parameter sensitivity and outcome correlation --------------------
@@ -272,7 +277,7 @@ Rules:
     "risk"       what it could cost if the hypothesis is wrong
 * Propose at most 3, ordered by expected value.
 * Prefer experiments that are read-only or cheaply reversible.
-* Do not propose anything that would slow the 180s cycle or add server load
+* Do not propose anything that would slow the 300s cycle or add server load
   proportional to herd size.
 * Do not propose changes to feeding cadence or the growth gate unless the evidence
   given to you specifically contradicts the current claim; both have prior
@@ -342,7 +347,7 @@ def hypothesis_proposal(item: Dict[str, Any]) -> Dict[str, Any]:
         "the probe has an explicit budget",
     ]
     return {"change": change, "intent": intent, "acceptance": acceptance,
-            "files": ["experiments/registry.py"]}
+            "files": [_probe_path(key), "experiments/registry.py"]}
 
 
 # -- main --------------------------------------------------------------------

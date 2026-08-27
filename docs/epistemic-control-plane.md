@@ -1,6 +1,6 @@
 # Epistemic control plane
 
-Status: implemented additively in the working tree. The live release does not consume this design until a new immutable release is explicitly published.
+Status: implemented and release-gated. Runtime changes consume this design only after an immutable release is published and its canary resolves.
 
 ## The boundary
 
@@ -29,6 +29,7 @@ All paths are relative to `state/` and can be redirected with `FARM_STATE_DIR` i
 - `audits.ndjson` — semantic and model-drift audit results.
 - `experiments.ndjson` — bounded probe executions and outcomes.
 - `segments/<ledger>/manifest.json` — ordered checksums for compressed immutable source segments.
+- `compaction_compatibility.json` — accepted release watermark proving rollback readers understand segmented ledgers.
 
 `history.ndjson`, `tool_calls.ndjson`, `observations.ndjson`, and `intents.ndjson` remain logical source evidence. The supervisor may move old complete rows byte-for-byte into gzip segments while retaining a hot tail at the legacy path. No model summary replaces source rows, and transparent readers replay segments plus the tail.
 

@@ -1,6 +1,6 @@
 # Farm Friends operator
 
-Deterministic Python runs the farm. An LLM is only involved when something breaks.
+Deterministic Python runs the farm. An LLM is confined to bounded research and repair work off the routine mutation path.
 
 ## Why
 
@@ -437,14 +437,23 @@ bugs that reading the code did not:
 
 ## Self-healing
 
-Two agents run and repair each other, so no single stopped job silences the farm:
+Nine services make up unattended operation. `farm/control.py::SERVICES` is the
+authoritative registry consumed by launchd supervision, health, architecture, and
+the author trust boundary:
 
-| agent | cadence | job |
-| --- | --- | --- |
-| `com.nickfigura.farmfriends` | 180s | the full cycle |
-| `com.nickfigura.farmfriends.supervisor` | 60s | keep the schedule alive, remediate alerts |
+| service | role |
+| --- | --- |
+| cycle | plays the farm |
+| supervisor | repairs schedules, adjudicates releases, compacts, and recovers |
+| expand | buys bounded scoring capacity |
+| recovery | independently verifies outage recovery |
+| contract | detects endpoint drift |
+| author | writes and publishes bounded repairs |
+| research | turns uncertainty into bounded probes |
+| dashboard | verifies every operator readout |
+| monitor | serves the read-only operator view |
 
-`--supervise` does five things in order, and makes **no** farm calls unless the
+`--supervise` does six things in order, and makes **no** farm calls unless the
 loop has actually gone stale:
 
 1. **Repair the schedule.** A dead scheduler makes every other signal
@@ -455,15 +464,16 @@ loop has actually gone stale:
 4. **Recover a stale loop** by running one cycle inline under the same lock, so it
    can never double-run the farm.
 5. **Remediate alerts** via `farm/heal.py`, then acknowledge only what it fixed.
+6. **Run at most one due bounded probe**, binding its result to durable questions.
 
 The healer's constraints are the interesting part:
 
-- **Remedies are bounded and conservative.** Knobs can throttle growth
-  (`rate_ceiling`, `adopt_cap`, `adopt_workers`) or do bounded extra work
-  (`collect_passes`, `individual_feeds`). None can spend coins, adopt, sell,
-  trade, or gift. The worst a bad healing decision can do is slow the farm down,
-  and `rules.py` clamps every knob on read, so a corrupt store cannot escape the
-  measured bounds.
+- **Remedies are bounded and conservative.** Knobs can only reduce call rate,
+  adoption concurrency, or adoption count (`rate_ceiling`, `adopt_workers`,
+  `adopt_cap`). Collection remains exactly once and feeding remains one bulk call;
+  legacy `collect_passes` and `individual_feeds` overrides are purged. No remedy
+  can spend coins, adopt, sell, trade, or gift. `rules.py` clamps every live knob
+  on read, so a corrupt store cannot escape the measured bounds.
 - **One remedy per class per pass.** Several queued copies of one alert describe
   one condition. Stepping per alert once dropped a 5.0/s ceiling to 2.05/s.
 - **Knobs relax one step per quiet pass** (`HEAL_ATTEMPT_RESET_RUNS`), so one bad
@@ -574,8 +584,9 @@ Current accepted mechanics, each with scope and a falsifier in `state/claims.jso
   inventory is collected.
 - **Healthy output scales with herd size.** The full current fit above 8,000
   animals is strongly positive; the historical plateau is superseded.
-- **Uncollected produce accumulates.** Collection is paced by coin/feed need and
-  transport cost, currently every ten cycles unless a safety override fires.
+- **Uncollected produce accumulates.** Collection nevertheless runs exactly once
+  at the start of every cycle to minimize spoilage exposure and bound ambiguity;
+  there is no collection cadence or healing retry.
 - **Feeding is the score input, not merely a cost.** Skipping feeds sharply
   reduced net output, so the cooldown is zero and any meaningful hunger can fire
   the feed path.
@@ -583,8 +594,9 @@ Current accepted mechanics, each with scope and a falsifier in `state/claims.jso
   server-side, so post-call state reconciliation—not blind throttling—settles it.
 - **Worst-case hunger rises with herd size under the current bulk-feed path.** A
   measured safety ceiling preserves headroom below the production stop.
-- **`farm_events` is omitted from routine play.** Its bounded window is dominated
-  by adoption spam at current scale.
+- **`farm_events(limit=100)` runs once per cycle.** Risk events are normalized and
+  deduplicated so expected losses are visible without being mistaken for code or
+  transport regressions.
 
 ## Safety and failure behaviour
 

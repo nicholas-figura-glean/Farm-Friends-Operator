@@ -1466,7 +1466,7 @@ function renderHero(data) {
   const stamp=s.ts || r.ts, elapsed=stamp ? Math.max(0,(Date.now()-new Date(stamp).getTime())/1000) : 0;
   // It is explicitly labelled an estimate: the authoritative score is only read
   // once per cycle, but production accrues continuously on the server.
-  const cap=Math.max(0,Number(data.cadence_seconds || 180)*1.25);
+  const cap=Math.max(0,Number(data.cadence_seconds || 300)*1.25);
   const live=Number.isFinite(base) ? base + rateSec*Math.min(elapsed,cap) : null;
   $("hero-produce").textContent=live == null ? "—" : num(Math.floor(live));
   $("hero-produce-sub").textContent=rateSec > 0 ? `+${num(Math.round(rateSec))}/s estimated between score reads` : "waiting for a measured rate";

@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(ROOT, "experiments"))
 from farm import canary, control, llm, rules, tokens, vcs, workorders  # noqa: E402
 
 import author_agent  # noqa: E402
+import research_agent  # noqa: E402
 
 FAILURES = []
 CHECKS = [0]
@@ -144,6 +145,37 @@ check("the refusal names protection", any("protected" in p for p in result["prob
 check("prose without edit blocks yields no edits",
       author_agent.parse_edits("I would change the parser to handle the new field.") == [])
 
+os.makedirs(os.path.join(sandbox, "experiments"))
+new_block = author_agent.parse_edits(
+    "--- FILE: experiments/bounded_probe.py\n"
+    + "<<<<<<< SEARCH\n\n"
+    + "=======\n"
+    + '\"\"\"Bounded generated probe.\"\"\"\n\nVALUE = 1\n'
+    + ">>>>>>> REPLACE"
+)
+new_result = author_agent.apply_edits(
+    new_block, sandbox, allowed=["experiments/bounded_probe.py"],
+)
+check("an explicitly offered Python file can be created",
+      "experiments/bounded_probe.py" in new_result["files"], str(new_result))
+check("new-file accounting measures the created bytes",
+      0 < new_result["changed_bytes"] < 100, str(new_result["changed_bytes"]))
+refused_new = author_agent.apply_edits(
+    new_block, sandbox, allowed=["experiments/different_probe.py"],
+)
+check("a model cannot invent an unoffered new path",
+      refused_new["files"] == {} and any("not offered" in p for p in refused_new["problems"]),
+      str(refused_new))
+large_existing = "PREFIX = 1\n" + ("# padding\n" * 6000)
+with open(os.path.join(sandbox, "farm", "large.py"), "w") as handle:
+    handle.write(large_existing)
+small_edit = [{"path": "farm/large.py", "search": "PREFIX = 1", "replace": "PREFIX = 2"}]
+small_result = author_agent.apply_edits(small_edit, sandbox, allowed=["farm/large.py"])
+check("patch accounting measures changed text rather than the whole output file",
+      small_result["changed_bytes"] < 100
+      and len(small_result["files"]["farm/large.py"]) > 40_000,
+      str(small_result.get("changed_bytes")))
+
 
 # -- mechanical backend ------------------------------------------------------
 
@@ -211,6 +243,26 @@ check("the prompt includes machine detail", "fullness" in user)
 
 no_files = author_agent.build_prompt(dict(prompt_order, files=["farm/canary.py"]), sandbox)
 check("a protected target is not offered to the model", no_files[1] == [], str(no_files[1]))
+new_prompt, new_offered = author_agent.build_prompt(
+    dict(prompt_order, files=["experiments/future_probe.py"]), sandbox,
+)
+check("a requested new Python path is explicitly offered",
+      new_offered == ["experiments/future_probe.py"] and "--- NEW FILE:" in new_prompt,
+      str(new_offered))
+capability_order = research_agent.capability_proposal({
+    "capability": "future_tool", "description": "fixture", "required": [], "args": [],
+})
+hypothesis_order = research_agent.hypothesis_proposal({
+    "title": "Future Strategy", "hypothesis": "A future strategy helps.",
+    "falsifier": "The outcome is flat.", "probe": "Replay a fixture.",
+    "metric": "fixture output", "risk": "none",
+})
+check("research capability orders declare their new probe file",
+      capability_order["files"][0] == "experiments/future_tool_probe.py",
+      str(capability_order["files"]))
+check("strategy hypothesis orders declare their new probe file",
+      hypothesis_order["files"][0] == "experiments/future_strategy_probe.py",
+      str(hypothesis_order["files"]))
 
 
 # -- isolated publication ----------------------------------------------------
@@ -407,6 +459,13 @@ check("arming records the previous revision", armed["previous"] == "revA")
 check("arming captures a baseline rate", abs(armed["baseline_rate"] - 100.0) < 0.01, str(armed))
 check("arming records the flip point", armed["armed_at_run"] == 6)
 check("the canary is now active", canary.active(store) is not None)
+overlap_refused = False
+try:
+    canary.arm("revC", "revB", reason="overlap", order_id="o2",
+               store=store, history=hist, run_history=runs)
+except canary.CanaryActiveError:
+    overlap_refused = True
+check("arming a second unresolved candidate is refused", overlap_refused)
 
 verdict = canary.evaluate(store, runs)
 check("with no post-flip runs the verdict is watching", verdict["status"] == canary.WATCHING, str(verdict))
@@ -631,6 +690,9 @@ check("a rollback push failure remains explicit without erasing the local invers
 
 section("a resolved canary does not act twice")
 
+# Clear the earlier fixture canary before arming a new candidate. Production now
+# rejects overlap at the trusted boundary rather than silently replacing evidence.
+canary.resolve({"status": canary.REGRESSED, "reason": "fixture reset"}, rev, store, hist)
 # Arm against a healthy baseline FIRST, then let the regression appear, so there
 # are genuine post-flip runs to judge.
 write_runs(base)

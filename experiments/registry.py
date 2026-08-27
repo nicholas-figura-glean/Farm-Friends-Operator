@@ -8,7 +8,7 @@ farm lock with a wall-time ceiling.
 PROBES = {
     "counterfactual_sweep": {
         "hypothesis": "A neighbouring decision constant changes historical outcomes.",
-        "question_classes": ["strategy_stale", "knob_age", "policy_drift"],
+        "question_classes": ["strategy_stale", "idle_capital", "knob_age", "policy_drift"],
         "subject_patterns": ["farm", "growth", "policy", "output_linear"],
         "command": ["run.py", "--sweep"],
         "read_only": True,
@@ -70,9 +70,14 @@ PROBES = {
         "evidence_destination": "state/experiments.ndjson",
     },
     "peek_top_rival": {
+        "hypothesis_id": "hyp-acb4268935bb27c3",
         "hypothesis": "The current best rival's farm state cannot plausibly generate more than 25% of our recent per-cycle gain before the next cycle, so threat allocation should remain unchanged.",
-        "question_classes": ["opportunity", "strategy_hypothesis"],
-        "subject_patterns": ["rival", "visit_farm", "threat_allocation"],
+        "null_hypothesis": "The proposed mechanism produces no measurable improvement in projected_rival_next_cycle_gain.",
+        "falsifier": "visit_farm shows the best rival has a pending harvest, herd, or resource stockpile consistent with a next-cycle gain above 176383 produce.",
+        "primary_metric": "projected_rival_next_cycle_gain",
+        "evidence_class": "direct_mechanism",
+        "question_classes": ["rival_wake", "threat", "rival_growing", "rank_lost", "overtaken"],
+        "subject_patterns": [],
         "command": ["experiments/registry.py", "--peek-top-rival"],
         "read_only": True,
         "autonomous": True,
@@ -121,6 +126,32 @@ def _append_visit_farm_probe_outcome(record):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _record_linked_result(record):
+    """Adjudicate a pre-registered probe when the scheduler supplied lineage."""
+    import os
+
+    identity = os.environ.get("FARM_HYPOTHESIS_ID")
+    if not identity:
+        return
+    projected = record.get("projected_rival_next_cycle_gain")
+    threshold = record.get("falsifier_threshold")
+    if not isinstance(projected, (int, float)) or not isinstance(threshold, (int, float)):
+        status = "inconclusive"
+    else:
+        status = "falsified" if projected > threshold else "supported"
+    from farm import provenance
+    provenance.record_result(
+        identity,
+        status,
+        ["state/peek_top_rival_probe.json"],
+        os.environ.get("FARM_EVIDENCE_CLASS", "direct_mechanism"),
+        {
+            "projected_rival_next_cycle_gain": projected,
+            "falsifier_threshold": threshold,
+        },
+    )
 
 
 def _run_visit_farm_probe(argv):
@@ -337,6 +368,8 @@ def _run_peek_top_rival_probe(argv):
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }
         _append_visit_farm_probe_outcome(record)
+        prior.setdefault("falsifier_threshold", 176383)
+        _record_linked_result(prior)
         return 0
 
     recent_gain = 705531
@@ -398,6 +431,7 @@ def _run_peek_top_rival_probe(argv):
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
     _append_visit_farm_probe_outcome(record)
+    _record_linked_result(record)
     return 0
 
 

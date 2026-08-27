@@ -142,6 +142,9 @@ check("a release separates gated source from deployment state",
       "FARM_SOURCE_ROOT" in release_source and "FARM_DEPLOY_ROOT" in release_source)
 check("every activated release arms a canary",
       "canary.arm(" in release_source and "release activation failed closed" in release_source)
+check("the release boundary refuses an already-watching candidate before staging",
+      "release rejected: canary %s is still watching" in release_source
+      and release_source.index("canary.active") < release_source.index("run.py --self-test"))
 check("release pruning preserves the active canary's rollback target",
       '! -name "$PREVIOUS"' in release_source)
 
@@ -484,7 +487,26 @@ section("readouts are judged on served cost, not agent startup")
 # The agent is a fresh process every 15 minutes; the dashboard is a long-running server.
 # Judging on the cold number reported Findings as "too slow" at 4,066ms when the served
 # cost was 674ms -- measuring the agent's own imports and calling it a defect in the page.
+sys.path.insert(0, str(PROJECT / "experiments"))
+import dashboard_agent  # noqa: E402
+
 agent_src = (PROJECT / "experiments" / "dashboard_agent.py").read_text(encoding="utf-8")
+check("cycle freshness uses the compaction-aware history reader",
+      "analysis.history_rows(limit=1)" in agent_src and "journal.history" not in agent_src)
+saved_history_rows = dashboard_agent.analysis.history_rows
+try:
+    dashboard_agent.analysis.history_rows = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fixture"))
+    freshness_failure = dashboard_agent._staleness()
+finally:
+    dashboard_agent.analysis.history_rows = saved_history_rows
+check("a cycle freshness exception remains explicit",
+      "fixture" in freshness_failure.get("cycle_age_error", ""), str(freshness_failure))
+check("freshness-check errors affect the dashboard problem list",
+      'if not key.endswith("_error")' in agent_src
+      and '"breaking" if source == "cycle_age"' in agent_src)
+check("freshness repair orders name only the owning agent",
+      '["experiments/dashboard_agent.py"]' in agent_src
+      and 'if str(problem["source"]).endswith("_age")' in agent_src)
 check("the probe measures twice", "_probe_once" in agent_src)
 check("the cold number is still reported", "cold_ms" in agent_src)
 
@@ -494,9 +516,6 @@ check("the cold number is still reported", "cold_ms" in agent_src)
 # threshold set from a normal-priority measurement can be applied here, and the first
 # attempt at a relative check then compared a throttled pass against a median built from
 # hand-run unthrottled ones and cried regression.
-sys.path.insert(0, str(PROJECT / "experiments"))
-import dashboard_agent  # noqa: E402
-
 check("how the pass was started is detected, not inferred",
       isinstance(dashboard_agent._scheduled(), bool))
 # A hand run must classify as a hand run, or this very suite compares itself against
