@@ -1371,6 +1371,10 @@ const EVIDENCE_REFRESH_MS = 60000, ARCHITECTURE_REFRESH_MS = 30000;
 let CHART_METRIC = "produce", ACTIVE_RUN = null;
 let RACE_MODE = "absolute", RACE_RANGE = 100;
 let COST_HISTORY_METRIC = "cost", COST_HISTORY_RANGE = "all";
+// Healing condition rows are rebuilt on every 2s state poll. Preserve native
+// <details> disclosure state by stable condition class instead of snapping a row
+// closed whenever fresh counts or evidence arrive.
+let OPEN_HEAL_CLASSES = {};
 let PANEL_ERRORS = [];
 const METRICS = {
   produce: {label:"Lifetime produce", unit:"", digits:0},
@@ -1787,7 +1791,17 @@ function renderCost(t, c) {
       + `</tbody></table>`
     : `<div class="empty">No ledger rows yet</div>`;
 }
+function captureHealClassState(root=document) {
+  const rows = root && root.querySelectorAll
+    ? root.querySelectorAll("#heal-classes details[data-heal-class]") : [];
+  Array.from(rows || []).forEach(row => {
+    const key = row.dataset ? row.dataset.healClass : row.getAttribute("data-heal-class");
+    if (key) OPEN_HEAL_CLASSES[String(key)] = !!row.open;
+  });
+  return OPEN_HEAL_CLASSES;
+}
 function renderHealing(h) {
+  captureHealClassState();
   const k = h.knobs || {};
   const overrides = k.overrides || {};
   const mark = (name, value) => name in overrides ? `${value} <span style="color:var(--yellow)">(healed)</span>` : `${value}`;
@@ -1801,11 +1815,11 @@ function renderHealing(h) {
   const classes = (h.classes || []).filter(c => c.class !== "relax");
   const relax = (h.classes || []).find(c => c.class === "relax");
   $("heal-classes").innerHTML = (classes.length
-    ? classes.map(c => `<details class="healclass"><summary><span class="top"><span class="cls">${esc(c.class)}</span>`
+    ? classes.map(c => { const key=String(c.class || "unknown"), open=OPEN_HEAL_CLASSES[key] ? " open" : ""; return `<details class="healclass" data-heal-class="${esc(key)}"${open}><summary><span class="top"><span class="cls">${esc(c.class)}</span>`
         + `<span class="n">${num(c.count)}× · last run ${esc(c.last_run)}</span></span>`
         + `<span class="what">${esc(c.last_action || "—")}</span></summary>`
         + (c.alerts && c.alerts.length ? `<div class="heal-evidence"><div class="tagrow">${c.alerts.map(a => `<span class="tag">${esc(a)}</span>`).join("")}</div></div>` : "")
-        + `</details>`).join("")
+        + `</details>`; }).join("")
     : `<div class="empty">Nothing has needed healing</div>`)
     + (relax ? `<div class="healclass relax-row"><div class="top"><span class="cls">relax</span><span class="n">${num(relax.count)}×</span></div>`
         + `<div class="what">Knobs stepping back toward default after quiet runs — ${esc(relax.last_action || "")}</div></div>` : "");

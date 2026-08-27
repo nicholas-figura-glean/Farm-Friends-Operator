@@ -210,6 +210,29 @@ var RESULT = (function () {
   ok("operator shell: latest cycle shows observe through verify", (html("cycle-story") || "").indexOf("Observe") >= 0 && (html("cycle-story") || "").indexOf("Verify") >= 0);
   ok("operator shell: pipeline surfaces its decision and guardrails", (txt("pipe-decision-title") || "").length > 10 && (html("pipe-guardrails") || "").indexOf("Production") >= 0);
   ok("operator shell: healing remains a closed loop when quiet", (html("healing-loop") || "").indexOf("Defaults preserved") >= 0);
+  var HEALING = {knobs:{},classes:[
+    {class:"threat",count:4,last_run:216,last_action:"contained wolf",alerts:["wolf"]},
+    {class:"idle_capital",count:2,last_run:215,last_action:"adopted bounded herd",alerts:["idle capital"]}
+  ],recent:[]};
+  OPEN_HEAL_CLASSES = {};
+  captureHealClassState({querySelectorAll:function () { return [
+    {dataset:{healClass:"threat"},open:true},
+    {dataset:{healClass:"idle_capital"},open:true}
+  ]; }});
+  renderHealing(HEALING);
+  ok("healing disclosures stay expanded across a state refresh",
+     (html("heal-classes") || "").indexOf('data-heal-class="threat" open') >= 0 &&
+     (html("heal-classes") || "").indexOf('data-heal-class="idle_capital" open') >= 0,
+     html("heal-classes"));
+  captureHealClassState({querySelectorAll:function () { return [
+    {dataset:{healClass:"threat"},open:false},
+    {dataset:{healClass:"idle_capital"},open:true}
+  ]; }});
+  renderHealing(HEALING);
+  ok("each healing disclosure retains its own open or closed state",
+     (html("heal-classes") || "").indexOf('data-heal-class="threat" open') < 0 &&
+     (html("heal-classes") || "").indexOf('data-heal-class="idle_capital" open') >= 0,
+     html("heal-classes"));
   ok("operator shell: boundary health is summarized outside the animation", (txt("wire-hero-state") || "").indexOf("Boundary") >= 0);
   ok("live run: hero paints the live estimate", (txt("hero-produce") || "").indexOf("1,410,000") >= 0,
      txt("hero-produce"));
