@@ -69,6 +69,16 @@ PROBES = {
         "stop_condition": "one explicitly invoked visit_farm call and immediate lifetime-produce comparison",
         "evidence_destination": "state/experiments.ndjson",
     },
+    "propose_trade_message": {
+        "hypothesis": "Supplying propose_trade.message improves immediate produce per coin versus the current no-message baseline.",
+        "question_classes": ["opportunity", "model_drift"],
+        "command": ["experiments/registry.py", "--propose-trade-message-probe"],
+        "read_only": False,
+        "autonomous": False,
+        "budget": {"coins": 1_000, "calls": 1, "wall_seconds": 30},
+        "stop_condition": "one explicitly configured propose_trade call with a bounded message and immediate produce-per-coin comparison",
+        "evidence_destination": "state/experiments.ndjson",
+    },
     "peek_top_rival": {
         "hypothesis_id": "hyp-acb4268935bb27c3",
         "hypothesis": "The current best rival's farm state cannot plausibly generate more than 25% of our recent per-cycle gain before the next cycle, so threat allocation should remain unchanged.",
@@ -126,6 +136,41 @@ def _append_visit_farm_probe_outcome(record):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _read_coin_snapshot():
+    import json
+    from pathlib import Path
+
+    def find_coin_value(value, prefix=""):
+        if not isinstance(value, dict):
+            return None
+        for key, child in value.items():
+            child_key = str(key)
+            child_path = f"{prefix}.{child_key}" if prefix else child_key
+            if child_key.lower() in ("coins", "coin", "balance", "money") and isinstance(child, (int, float)):
+                return {"key": child_path, "value": child}
+        for key, child in value.items():
+            found = find_coin_value(child, f"{prefix}.{key}" if prefix else str(key))
+            if found is not None:
+                return found
+        return None
+
+    for path in (
+        Path("state/farm.json"),
+        Path("state/status.json"),
+        Path("state/latest.json"),
+        Path("state/state.json"),
+    ):
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        found = find_coin_value(data)
+        if found is not None:
+            found["path"] = str(path)
+            return found
+    return None
 
 
 def _record_linked_result(record):
@@ -210,6 +255,88 @@ def _run_visit_farm_probe(argv):
             "before_lifetime_produce": before,
             "after_lifetime_produce": after,
             "lifetime_produce_delta": delta,
+            "call": call,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+    )
+    return 0
+
+
+def _run_propose_trade_message_probe(argv):
+    import os
+    import shlex
+    import subprocess
+    import time
+
+    budget = PROBES["propose_trade_message"]["budget"]
+    started = time.monotonic()
+    message = (argv[0] if argv else os.environ.get("PROPOSE_TRADE_PROBE_MESSAGE", "bounded propose_trade message probe"))[:120]
+    before_produce = _read_lifetime_produce_snapshot()
+    before_coins = _read_coin_snapshot()
+    status = "not_configured"
+    call = {"attempted": False, "message": message, "message_argument": "message"}
+
+    command = os.environ.get("PROPOSE_TRADE_COMMAND")
+    if command:
+        # The live cycle remains on the proven no-message path; this explicit
+        # probe appends only the new optional argument to a caller-supplied,
+        # bounded propose_trade command.
+        args = shlex.split(command)
+        if "{message}" in args:
+            args = [message if arg == "{message}" else arg for arg in args]
+        else:
+            args += ["--message", message]
+        timeout = max(1, min(budget["wall_seconds"], budget["wall_seconds"] - int(time.monotonic() - started)))
+        call["attempted"] = True
+        call["command"] = command
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            call["returncode"] = completed.returncode
+            call["stdout"] = completed.stdout[-2000:]
+            call["stderr"] = completed.stderr[-2000:]
+            status = "called" if completed.returncode == 0 else "call_failed"
+        except subprocess.TimeoutExpired as exc:
+            call["timeout_seconds"] = timeout
+            call["stdout"] = (exc.stdout or "")[-2000:] if isinstance(exc.stdout, str) else ""
+            call["stderr"] = (exc.stderr or "")[-2000:] if isinstance(exc.stderr, str) else ""
+            status = "timeout"
+
+    after_produce = _read_lifetime_produce_snapshot()
+    after_coins = _read_coin_snapshot()
+    before_produce_value = before_produce["value"] if before_produce else None
+    after_produce_value = after_produce["value"] if after_produce else None
+    before_coin_value = before_coins["value"] if before_coins else None
+    after_coin_value = after_coins["value"] if after_coins else None
+    produce_delta = (
+        after_produce_value - before_produce_value
+        if before_produce_value is not None and after_produce_value is not None
+        else None
+    )
+    coin_spend = before_coin_value - after_coin_value if before_coin_value is not None and after_coin_value is not None else None
+    produce_per_coin = produce_delta / coin_spend if produce_delta is not None and coin_spend and coin_spend > 0 else None
+    _append_visit_farm_probe_outcome(
+        {
+            "kind": "propose_trade_message_probe",
+            "capability": "propose_trade",
+            "argument": "message",
+            "status": status,
+            "budget": budget,
+            "read_only": PROBES["propose_trade_message"]["read_only"],
+            "autonomous": PROBES["propose_trade_message"]["autonomous"],
+            "before_lifetime_produce": before_produce,
+            "after_lifetime_produce": after_produce,
+            "lifetime_produce_delta": produce_delta,
+            "before_coins": before_coins,
+            "after_coins": after_coins,
+            "coin_spend": coin_spend,
+            "produce_per_coin": produce_per_coin,
+            "baseline": "compare against historical/current no-message propose_trade outcomes; live cycle calls are unchanged",
             "call": call,
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }
@@ -440,5 +567,7 @@ if __name__ == "__main__":
 
     if sys.argv[1:2] == ["--visit-farm-probe"]:
         raise SystemExit(_run_visit_farm_probe(sys.argv[2:]))
+    if sys.argv[1:2] == ["--propose-trade-message-probe"]:
+        raise SystemExit(_run_propose_trade_message_probe(sys.argv[2:]))
     if sys.argv[1:2] == ["--peek-top-rival"]:
         raise SystemExit(_run_peek_top_rival_probe(sys.argv[2:]))
