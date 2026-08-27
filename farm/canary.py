@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -458,28 +457,17 @@ def _restart_monitor() -> Dict[str, Any]:
     monitor.py composes its document and registers routes at import time. A pointer
     rollback without a process restart therefore keeps serving the rejected UI even
     though every scheduled agent has returned to the previous release. The browser's
-    revision guard handles an already-open document; this restart handles the server.
+    revision guard handles an already-open document; this shared control-plane restart
+    handles the server without duplicating launchd identity outside the registry.
     """
-    label = control.LABEL_PREFIX + ".monitor"
-    domain = "gui/%d/%s" % (os.getuid(), label)
-    command = ["/bin/launchctl", "kickstart", "-k", domain]
-    try:
-        installed = subprocess.run(
-            ["/bin/launchctl", "print", domain],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-        if installed.returncode != 0:
-            return {"monitor_restarted": False, "monitor_restart": "not_loaded"}
-        restarted = subprocess.run(
-            command, capture_output=True, text=True, timeout=15, check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"monitor_restarted": False,
-                "monitor_restart_error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
-    if restarted.returncode != 0:
-        detail = (restarted.stderr or restarted.stdout or "launchctl kickstart failed").strip()
-        return {"monitor_restarted": False, "monitor_restart_error": detail[:200]}
-    return {"monitor_restarted": True, "monitor_restart": label}
+    result = control.restart_service("monitor")
+    out: Dict[str, Any] = {
+        "monitor_restarted": bool(result.get("restarted")),
+        "monitor_restart": result.get("restart") or result.get("label"),
+    }
+    if result.get("restart_error"):
+        out["monitor_restart_error"] = result["restart_error"]
+    return out
 
 
 def revert(previous: str, project: Optional[str] = None) -> Dict[str, Any]:

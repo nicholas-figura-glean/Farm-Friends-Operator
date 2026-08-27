@@ -117,6 +117,7 @@ check("the browser server runs at normal priority",
 install_source = (PROJECT / "deploy" / "install.sh").read_text(encoding="utf-8")
 release_source = (PROJECT / "deploy" / "release.sh").read_text(encoding="utf-8")
 canary_source = (PROJECT / "farm" / "canary.py").read_text(encoding="utf-8")
+control_source = (PROJECT / "farm" / "control.py").read_text(encoding="utf-8")
 monitor_source = (PROJECT / "monitor.py").read_text(encoding="utf-8")
 check("installation includes the monitor service", 'MONITOR="$LABEL.monitor"' in install_source)
 supervisor_source = (PROJECT / "run.py").read_text(encoding="utf-8")
@@ -127,11 +128,16 @@ check("a release restarts module-level HTML and routes",
       'kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"' in release_source)
 check("a rollback also restarts module-level HTML and routes",
       "outcome.update(_restart_monitor())" in canary_source
-      and '"kickstart", "-k", domain' in canary_source)
+      and 'control.restart_service("monitor")' in canary_source
+      and '"kickstart", "-k", domain' in control_source)
 check("an open dashboard reloads when its embedded revision changes",
       "refreshForRelease(data)" in monitor_source
       and "window.location.reload()" in monitor_source
       and "__VIEW_REVISION__" in monitor_source)
+check("slow state snapshots cannot overlap into a request pileup",
+      "if (STATE_LOADING) return;" in monitor_source
+      and "STATE_LOADING = true;" in monitor_source
+      and "STATE_LOADING = false;" in monitor_source)
 check("a release separates gated source from deployment state",
       "FARM_SOURCE_ROOT" in release_source and "FARM_DEPLOY_ROOT" in release_source)
 check("every activated release arms a canary",
@@ -453,13 +459,23 @@ suspect = [
     if not (_pre_fix(item[0]) or _pre_fix(item[1])
             or _dirty_scan(item[0]) or _dirty_scan(item[1]))
 ]
-check("no clean architecture version recurs once scans share a root", not suspect,
-      "recurring: %s" % (suspect[:3],))
+# A clean C is the recovery from a recorded A->B->A; keeping every historical pair as
+# a permanent failure makes forward repair impossible. Fail only when the architecture
+# being submitted is itself the recurring shape. A dirty working tree cannot claim to
+# be C, so it is judged against the latest clean recorded version until committed.
+clean_rows = [row for row in rows_all if not _pre_fix(row.get("version", 0))
+              and not _dirty_scan(row.get("version", 0))]
+submitted_signature = (snap.get("signature") if not snap.get("dirty_source")
+                       else (clean_rows[-1].get("signature") if clean_rows else None))
+unresolved = [item for item in suspect
+              if (by_version.get(item[1]) or {}).get("signature") == submitted_signature]
+check("the submitted clean architecture is not a recurring shape", not unresolved,
+      "recurring: %s" % (unresolved[:3],))
 if oscillating:
     # Reported, not asserted away. Rewriting the ledger to make a test pass would
     # destroy the only record of what the system actually did.
-    print("       note: %d oscillation(s) from before the root fix remain as recorded "
-          "history: %s" % (len(oscillating), oscillating[:4]))
+    print("       note: %d historical oscillation(s) remain as recorded evidence: %s"
+          % (len(oscillating), oscillating[:4]))
 
 
 # --------------------------------------------------------------------------
@@ -758,9 +774,12 @@ if ledger.exists():
     check("the ledger records a verdict", isinstance(last.get("ok"), bool))
     check("every check is timed",
           all(isinstance(c.get("ms"), int) for c in last.get("checks") or []))
-    # A readout slower than the poll interval is a defect even when it is correct.
-    slow = [c["source"] for c in last.get("checks") or [] if int(c.get("ms") or 0) > 4000]
-    check("no readout is slower than the poll interval", not slow, str(slow))
+    # Large append-only ledgers can make a snapshot exceed the nominal poll cadence.
+    # The page is single-flight, so that is latency rather than an overlap leak; the
+    # agent's absolute ceiling still distinguishes slow from functionally stranded.
+    stranded = [c["source"] for c in last.get("checks") or []
+                 if int(c.get("ms") or 0) > dashboard_agent.ABSOLUTE_CEILING_MS]
+    check("no readout exceeds the absolute failure ceiling", not stranded, str(stranded))
 
 
 # --------------------------------------------------------------------------

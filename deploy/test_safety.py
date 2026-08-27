@@ -83,6 +83,28 @@ def main() -> int:
                         "legacy active path retains only the hot rows")
             suite.check(compaction.read_rows(ledger, limit=3) == expected[-3:],
                         "bounded tail reads cross the segment boundary transparently")
+
+            # A dashboard tail read must not parse a 204MB active ledger from byte zero.
+            # Include a row larger than the read block and malformed trailing lines so
+            # the reverse scanner proves both boundary reconstruction and valid-row limits.
+            large_active = state / "large.ndjson"
+            large_rows = [{"run": 1}, {"run": 2, "blob": "x" * 70000}, {"run": 3}]
+            large_active.write_bytes(
+                b"".join((json.dumps(row) + "\n").encode("utf-8") for row in large_rows)
+                + b"not-json\n[]\n"
+            )
+            saved_parse = compaction._parse
+            tail_error = None
+            try:
+                compaction._parse = lambda payload: (_ for _ in ()).throw(
+                    AssertionError("bounded active tail used the full-history parser"))
+                bounded_tail = compaction.read_rows(large_active, limit=2)
+            except Exception as exc:  # noqa: BLE001 - reported as a suite failure
+                bounded_tail, tail_error = [], str(exc)
+            finally:
+                compaction._parse = saved_parse
+            suite.check(bounded_tail == large_rows[-2:],
+                        "bounded active reads scan backward across blocks", tail_error or bounded_tail)
             suite.check(analysis.read_ndjson(ledger) == expected,
                         "analysis uses the transparent full-history reader")
             compaction.append_json(ledger, {"run": 21, "ts": "2026-08-26T00:21:00Z"})

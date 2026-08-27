@@ -241,7 +241,8 @@ restart the monitor because its routes and HTML are composed at import time, and
 open page compares its embedded revision with `/api/state` every two seconds. A changed
 pointer reloads the page once the restarted monitor reports that it serves that pointer;
 a transition-scoped `sessionStorage` marker prevents a restart failure from creating a
-reload loop.
+reload loop. State polling is single-flight, so a snapshot slower than the two-second
+nominal cadence cannot accumulate concurrent requests and strand the page on Connecting.
 
 The pipeline view is fed by `farm/progress.py`, which the loop updates as it
 runs. Progress writes are atomic and best-effort: monitoring costs visibility

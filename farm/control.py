@@ -16,6 +16,7 @@ an autonomous authoring pass.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -200,6 +201,33 @@ def author_editable(path: str) -> bool:
 def service(value: str) -> Optional[Dict[str, Any]]:
     """Find a service by key or launchd label."""
     return next((dict(item) for item in SERVICES if value in (item["key"], item["label"])), None)
+
+
+def restart_service(value: str) -> Dict[str, Any]:
+    """Kickstart an installed launchd service from the authoritative registry."""
+    declared = service(value)
+    if not declared:
+        return {"restarted": False, "restart_error": "unknown service: %s" % value}
+    label = str(declared["label"])
+    domain = "gui/%d/%s" % (os.getuid(), label)
+    try:
+        installed = subprocess.run(
+            ["/bin/launchctl", "print", domain],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if installed.returncode != 0:
+            return {"restarted": False, "restart": "not_loaded", "label": label}
+        restarted = subprocess.run(
+            ["/bin/launchctl", "kickstart", "-k", domain],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"restarted": False, "label": label,
+                "restart_error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
+    if restarted.returncode != 0:
+        detail = (restarted.stderr or restarted.stdout or "launchctl kickstart failed").strip()
+        return {"restarted": False, "label": label, "restart_error": detail[:200]}
+    return {"restarted": True, "restart": "kickstarted", "label": label}
 
 
 def labels(exclude: Iterable[str] = ()) -> List[str]:

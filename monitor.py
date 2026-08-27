@@ -1363,7 +1363,7 @@ function kv(items) { return items.map(([k,v]) => `<div><span>${esc(k)}</span><sp
 // from a different monitor process after publish or rollback, so retain the revision
 // embedded in this document and reload once when the live pointer changes.
 const VIEW_REVISION = __VIEW_REVISION__;
-let LAST = null, LAST_FETCH_MS = null, FETCH_ERROR = null;
+let LAST = null, LAST_FETCH_MS = null, FETCH_ERROR = null, STATE_LOADING = false;
 let EVIDENCE = null, EVIDENCE_LOADING = false, EVIDENCE_LAST_FETCH_MS = null;
 let ACTIVE_TAB = "overview";
 const EVIDENCE_REFRESH_MS = 60000, ARCHITECTURE_REFRESH_MS = 30000;
@@ -2049,6 +2049,11 @@ function refreshForRelease(data) {
   return true;
 }
 async function load() {
+  // snapshot() can legitimately take longer than the nominal 2s cadence once the
+  // append-only ledgers are large. setInterval does not await async callbacks, so a
+  // single slow response otherwise creates an unbounded pile of concurrent snapshots.
+  if (STATE_LOADING) return;
+  STATE_LOADING = true;
   try {
     const response = await fetch(`/api/state?t=${Date.now()}`, {cache:"no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2069,6 +2074,8 @@ async function load() {
     FETCH_ERROR = error && error.message ? error.message : String(error);
     $("health").innerHTML = `<span class="pill offline">disconnected</span>`;
     renderHeartbeat();
+  } finally {
+    STATE_LOADING = false;
   }
 }
 function activateTab(name, writeHash) {

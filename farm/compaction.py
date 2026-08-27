@@ -273,19 +273,60 @@ def append_json(path: Any, row: Dict[str, Any], strict: bool = True) -> bool:
         return False
 
 
+def _parse_line(line: bytes) -> Optional[Dict[str, Any]]:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        value = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _parse(payload: bytes) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for line in payload.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, TypeError, ValueError):
-            continue
-        if isinstance(value, dict):
+        value = _parse_line(line)
+        if value is not None:
             rows.append(value)
     return rows
+
+
+def _tail_rows(path: Path, wanted: int, block_bytes: int = 64 * 1024) -> List[Dict[str, Any]]:
+    """Read the last valid object rows without parsing the entire active ledger."""
+    if wanted <= 0:
+        return []
+    found: List[Dict[str, Any]] = []
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            carry = b""
+            while position > 0 and len(found) < wanted:
+                size = min(max(1, int(block_bytes)), position)
+                position -= size
+                handle.seek(position)
+                data = handle.read(size) + carry
+                lines = data.split(b"\n")
+                # Unless this block reaches byte zero, its first item may begin in
+                # the preceding block. Carry only that fragment into the next pass;
+                # every later line is complete and can be judged now.
+                if position > 0:
+                    carry = lines.pop(0)
+                else:
+                    carry = b""
+                for line in reversed(lines):
+                    value = _parse_line(line)
+                    if value is not None:
+                        found.append(value)
+                        if len(found) >= wanted:
+                            break
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise CompactionError("cannot read active ledger %s: %s" % (path, exc.__class__.__name__))
+    return list(reversed(found))
 
 
 def read_rows(path: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -296,17 +337,11 @@ def read_rows(path: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
         try:
             manifest = _manifest(ledger)
-            try:
-                active_payload = ledger.read_bytes()
-            except FileNotFoundError:
-                active_payload = b""
-            except OSError as exc:
-                raise CompactionError("cannot read active ledger %s: %s" % (ledger, exc.__class__.__name__))
-            active = _parse(active_payload)
             if limit is not None:
                 wanted = max(0, int(limit))
                 if wanted == 0:
                     return []
+                active = _tail_rows(ledger, wanted)
                 if len(active) >= wanted:
                     return active[-wanted:]
                 chunks: List[List[Dict[str, Any]]] = [active]
@@ -318,6 +353,14 @@ def read_rows(path: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
                     if missing <= 0:
                         break
                 return [row for chunk in chunks for row in chunk][-wanted:]
+
+            try:
+                active_payload = ledger.read_bytes()
+            except FileNotFoundError:
+                active_payload = b""
+            except OSError as exc:
+                raise CompactionError("cannot read active ledger %s: %s" % (ledger, exc.__class__.__name__))
+            active = _parse(active_payload)
 
             out: List[Dict[str, Any]] = []
             for entry in manifest.get("segments") or []:

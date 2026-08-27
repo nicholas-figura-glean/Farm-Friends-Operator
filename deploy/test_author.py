@@ -502,7 +502,7 @@ check("default rollback root is the canonical checkout, not release/",
 
 # monitor.py composes routes and HTML at import time. A rollback must kickstart the
 # installed server after moving the pointer or the UI continues serving rejected code.
-_saved_subprocess_run = canary.subprocess.run
+_saved_subprocess_run = control.subprocess.run
 _restart_calls = []
 
 
@@ -518,10 +518,10 @@ def _launch_ok(command, **kwargs):
 
 
 try:
-    canary.subprocess.run = _launch_ok
+    control.subprocess.run = _launch_ok
     _restart_result = canary._restart_monitor()
 finally:
-    canary.subprocess.run = _saved_subprocess_run
+    control.subprocess.run = _saved_subprocess_run
 check("rollback restart probes and kickstarts the monitor",
       _restart_result.get("monitor_restarted") is True
       and len(_restart_calls) == 2
