@@ -55,13 +55,15 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 section("every agent is accounted for")
 
 view = autonomy.agents()
-check("all nine required processes are described", view.get("expected") == 9,
+check("all eleven required processes are described", view.get("expected") == 11,
       str(view.get("expected")))
 labels = {a["label"] for a in view.get("agents") or []}
 for expected in ("com.nickfigura.farmfriends",
                  "com.nickfigura.farmfriends.supervisor",
                  "com.nickfigura.farmfriends.expand",
                  "com.nickfigura.farmfriends.recovery",
+                 "com.nickfigura.farmfriends.outage",
+                 "com.nickfigura.farmfriends.eod",
                  "com.nickfigura.farmfriends.contract",
                  "com.nickfigura.farmfriends.author",
                  "com.nickfigura.farmfriends.research",
@@ -86,7 +88,7 @@ section("the plists the architecture reads are actually parseable")
 # XML comment, which `plutil` tolerates and Python's expat rejects. Both agents
 # silently disappeared from the architecture view with no error anywhere.
 plists = sorted((PROJECT / "deploy").glob("com.nickfigura.farmfriends*.plist"))
-check("nine plists on disk", len(plists) == 9, str(len(plists)))
+check("eleven plists on disk", len(plists) == 11, str(len(plists)))
 for path in plists:
     try:
         with path.open("rb") as handle:
@@ -273,12 +275,12 @@ section("architecture is derived from what is on disk")
 
 snap = architecture.snapshot()
 check("a signature is produced", len(snap.get("signature") or "") == 64)
-check("all nine LaunchAgents are found", snap["stats"]["launch_agents"] == 9,
+check("all eleven LaunchAgents are found", snap["stats"]["launch_agents"] == 11,
       str(snap["stats"]["launch_agents"]))
 check("modules were discovered", snap["stats"]["modules"] > 20,
       str(snap["stats"]["modules"]))
-check("all nine runtime services are first-class architecture nodes",
-      snap["stats"]["agent_modules"] == 9, str(snap["stats"]["agent_modules"]))
+check("all eleven runtime services are first-class architecture nodes",
+      snap["stats"]["agent_modules"] == 11, str(snap["stats"]["agent_modules"]))
 service_nodes = {n.get("agent_label") for n in snap["nodes"] if n.get("kind") == "agent"}
 check("every declared service has a health-addressable node",
       service_nodes == {s["label"] for s in control.SERVICES}, str(sorted(service_nodes)))
@@ -932,8 +934,8 @@ check("the asset loaded rather than stubbing out",
 check("the stylesheet loaded", "missing dashboard asset" not in monitor.ARCH_CSS)
 
 state = monitor.snapshot()
-check("snapshot reports all nine required processes",
-      len((state.get("launchd") or {}).get("all") or []) == 9,
+check("snapshot reports all eleven required processes",
+      len((state.get("launchd") or {}).get("all") or []) == 11,
       str(len((state.get("launchd") or {}).get("all") or [])))
 check("snapshot keeps the original cycle fields",
       "loaded" in (state.get("launchd") or {}))

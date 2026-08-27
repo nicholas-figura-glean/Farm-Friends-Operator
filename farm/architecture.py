@@ -88,7 +88,7 @@ MODULE_LAYER: Dict[str, str] = {
     "contract": "detect", "watch": "detect",
     "llm": "decide", "research": "decide",
     "canary": "guard", "evaluation": "guard", "provenance": "guard", "governance": "guard",
-    "workorders": "guard", "vcs": "guard", "heal": "guard",
+    "workorders": "guard", "vcs": "guard", "heal": "guard", "notify": "guard",
     "scheduler": "operate", "autonomy": "operate", "architecture": "operate",
     "progress": "operate", "release": "operate", "control": "guard",
     "run": "operate", "monitor": "operate", "expand": "play",

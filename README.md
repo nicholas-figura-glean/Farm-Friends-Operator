@@ -61,7 +61,8 @@ farm/evidence.py       dashboard projection generated from estimators and claims
 farm/cycle.py          deterministic loop, intents, predictions, outcome verification
 farm/watch.py          operational + strategy detectors
 farm/heal.py           operational remedies + durable-question disposition
-farm/scheduler.py      launchd liveness and repair for both agents
+farm/notify.py         secret-safe Slack incoming-webhook delivery
+farm/scheduler.py      launchd liveness and repair for every declared service
 farm/contract.py       full server contract capture, fingerprint, severity-classified drift
 farm/workorders.py     append-only work queue between detection and repair
 farm/canary.py         provisional releases: emergency brake + efficacy decision
@@ -142,7 +143,7 @@ python3 run.py --canary-status # the release currently on probation
 python3 run.py --llm-status    # headless model availability and authoring spend
 python3 run.py --vcs-status    # local/remote commit proof and autonomous history
 deploy/release.sh             # publish only a clean HEAD verified on origin/main
-deploy/install.sh             # install/refresh both agents
+deploy/install.sh             # install/refresh all supervised services
 deploy/install.sh --uninstall # stop the schedule (boots out the supervisor first)
 python3 monitor.py             # open the read-only live dashboard
 python3 monitor.py --no-open    # serve it without opening a browser
@@ -438,7 +439,7 @@ bugs that reading the code did not:
 
 ## Self-healing
 
-Nine services make up unattended operation. `farm/control.py::SERVICES` is the
+Eleven services make up unattended operation. `farm/control.py::SERVICES` is the
 authoritative registry consumed by launchd supervision, health, architecture, and
 the author trust boundary:
 
@@ -448,6 +449,8 @@ the author trust boundary:
 | supervisor | repairs schedules, adjudicates releases, compacts, and recovers |
 | expand | buys bounded scoring capacity |
 | recovery | independently verifies outage recovery |
+| outage | clears local setup, confirms external outage/recovery, and notifies `#farm-friends` |
+| eod | posts the 5 PM Mountain Time farmer-style daily progress and healing digest |
 | contract | detects endpoint drift |
 | author | writes and publishes bounded repairs |
 | research | turns uncertainty into bounded probes |
@@ -629,6 +632,38 @@ The MCP endpoint is a secret. It is read from `$FARM_MCP_URL` or
 `~/.config/farm/endpoint` (mode 0600), never passed as a CLI argument (keeping it
 out of `ps` and shell history), and scrubbed from every exception and log line by
 `Client.scrub()`.
+
+Slack delivery uses a channel-bound incoming webhook stored at
+`~/.config/farm/slack_webhook` with mode `0600` (or `$FARM_SLACK_WEBHOOK_URL`). The
+URL is never stored in a plist, process argument, repository file, state row, or
+exception. The webhook must be created for private channel `#farm-friends`; the
+resolved Slack channel ID is `C0BRMBGN7QA`. Configure it before installing:
+
+```bash
+mkdir -p ~/.config/farm
+printf '%s\n' 'https://hooks.slack.com/services/…' > ~/.config/farm/slack_webhook
+chmod 600 ~/.config/farm/slack_webhook
+```
+
+The outage guard runs every five minutes but requires two repeated read-only
+transport failures, or two flat lifetime-score checks with a healthy local herd,
+before posting. It first validates the endpoint secret and immutable release and
+repairs/rechecks both local schedulers, so an unloaded local job is never described
+as an external outage. Each incident reserves its one John mention in durable state
+*before* calling Slack's non-idempotent webhook. An ambiguous timeout or later retry
+therefore cannot mention him again; delivery failures require operator review. A
+recovery update is posted only after the remote score probe succeeds and does not
+mention John.
+
+If a human or Glean has already posted an outage, a bounded `state/slack_intel.json`
+record can identify the open channel message (`channel_id`, `message_ts`,
+`john_mentioned`, and `status`). The guard adopts that message as the incident's
+already-delivered notification and remembers consumed message timestamps, preventing
+a new top-level alert even after recovery. Slack is corroborating evidence only:
+channel claims never close an incident without a successful farm endpoint/score probe.
+
+The EOD job uses `launchd` local time at 17:00; this host is Mountain Time and the
+`America/Denver` report window follows daylight-saving transitions.
 
 ## Changing strategy
 

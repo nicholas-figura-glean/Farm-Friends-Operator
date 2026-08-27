@@ -129,8 +129,15 @@ def _load_endpoint() -> str:
 class Client(object):
     """One client per process. Stateless POSTs; no session id required."""
 
-    def __init__(self, endpoint: Optional[str] = None):
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        timeout: int = TIMEOUT,
+        retries: int = RETRIES,
+    ):
         self._endpoint = endpoint or _load_endpoint()
+        self._timeout = max(1, int(timeout))
+        self._retries = max(1, int(retries))
         self._id = 0
         self._ctx = ssl.create_default_context()
         self.call_count = 0
@@ -181,11 +188,11 @@ class Client(object):
             method="POST",
         )
         last = None
-        for attempt in range(RETRIES):
+        for attempt in range(self._retries):
             try:
                 LIMITER.acquire()
                 _started = time.time()
-                with urllib.request.urlopen(req, timeout=TIMEOUT, context=self._ctx) as resp:
+                with urllib.request.urlopen(req, timeout=self._timeout, context=self._ctx) as resp:
                     raw = resp.read().decode("utf-8", "replace")
                 self.last_service_seconds = time.time() - _started
                 return _decode(raw)
@@ -202,9 +209,11 @@ class Client(object):
                 self.transport_errors_by_tool[self._current_tool] = (
                     self.transport_errors_by_tool.get(self._current_tool, 0) + 1
                 )
-                if attempt < RETRIES - 1:
+                if attempt < self._retries - 1:
                     time.sleep(BACKOFF ** (attempt + 1))
-        raise McpError(self.scrub("transport failure after %d tries: %r" % (RETRIES, last)))
+        raise McpError(
+            self.scrub("transport failure after %d tries: %r" % (self._retries, last))
+        )
 
     def rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._id += 1
