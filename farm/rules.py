@@ -344,6 +344,8 @@ CANARY_MIN_RUNS = 3                    # never judge a release on fewer runs
 CANARY_MAX_RUNS = 10                   # decide by here, or clear it and move on
 CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert
 CANARY_BASELINE_RUNS = 6               # pre-flip safety window used for fast rollback
+# A release that prevents completed runs cannot wait forever for run-count evidence.
+CANARY_STALL_SECONDS = 30 * 60
 
 # Safety and efficacy are deliberately different decisions. Reliability repairs
 # need equivalence; strategy candidates must prove a pre-declared gain. The

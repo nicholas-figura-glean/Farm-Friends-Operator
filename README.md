@@ -648,7 +648,9 @@ deploy/release.sh
 
 The provisional release then faces two independent decisions: a loose emergency
 canary catches catastrophic breakage, while `farm/evaluation.py` requires strategy
-gain or reliability equivalence before advancing the champion. A cumulative 5%
+gain or reliability equivalence before advancing the champion. If a release prevents
+all completed runs, 30 minutes without post-release progress is itself a regression;
+probation cannot wait forever for evidence the candidate made impossible. A cumulative 5%
 regression budget prevents repeated small losses, and policy A→B→A pauses instead
 of oscillating. Routine arithmetic still belongs in `rules.py` or `watch.py`, not a
 prompt. **A decision that is never re-checked belongs in the question ledger.** See

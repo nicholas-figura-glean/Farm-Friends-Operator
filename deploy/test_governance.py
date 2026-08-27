@@ -117,6 +117,15 @@ def main() -> int:
     storage = next(row for row in broken if row["id"] == "evidence.compaction")
     suite.check(storage["status"] == governance.WARN,
                 "compaction debt is deferred, not acted on, during probation", storage)
+    aged_canary = healthy_snapshot()
+    aged_canary["canary"] = {
+        "armed": True, "status": "watching", "revision": "rev-stuck",
+        "armed_ts": "2020-01-01T00:00:00Z", "verdict": {"runs_observed": 0},
+    }
+    probation = next(row for row in governance.assess(aged_canary)
+                     if row["id"] == "release.probation")
+    suite.check(probation["status"] == governance.FAIL,
+                "wall-clock age catches a canary with no completed runs", probation)
 
     print("== run cadence, persistence, and trend")
     previous_env = dict(os.environ)

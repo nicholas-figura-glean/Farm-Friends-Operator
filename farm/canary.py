@@ -72,6 +72,14 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _age_seconds(value: Any) -> Optional[int]:
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
 def _read_json(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -294,6 +302,17 @@ def evaluate(
         "threshold": None,
         "reason": "",
     }
+
+    progress_ts = after[-1].get("ts") if after else record.get("armed_ts")
+    progress_age = _age_seconds(progress_ts)
+    verdict["progress_age_seconds"] = progress_age
+    if isinstance(progress_age, int) and progress_age > rules.CANARY_STALL_SECONDS:
+        verdict["status"] = REGRESSED
+        verdict["reason"] = (
+            "no completed post-release run for %d minutes (limit %d minutes)"
+            % (progress_age // 60, rules.CANARY_STALL_SECONDS // 60)
+        )
+        return verdict
 
     # A run that ends in a hard failure is decisive on its own: the canary exists
     # to catch exactly this, and waiting for a rate average would keep broken code

@@ -469,6 +469,16 @@ check("arming a second unresolved candidate is refused", overlap_refused)
 
 verdict = canary.evaluate(store, runs)
 check("with no post-flip runs the verdict is watching", verdict["status"] == canary.WATCHING, str(verdict))
+with open(store) as handle:
+    stalled_record = json.load(handle)
+stalled_record["armed_ts"] = "2020-01-01T00:00:00Z"
+with open(store, "w") as handle:
+    json.dump(stalled_record, handle)
+stalled = canary.evaluate(store, runs)
+check("a release that prevents completed runs eventually regresses",
+      stalled["status"] == canary.REGRESSED and "no completed" in stalled["reason"], str(stalled))
+with open(store, "w") as handle:
+    json.dump(armed, handle)
 
 # Two good runs: still too early to judge.
 write_runs(base + [{"run": 7, "produce_per_min": 101.0, "collected": 10},

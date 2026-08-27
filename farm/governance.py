@@ -173,13 +173,18 @@ def assess(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
     verdict = canary_state.get("verdict") or {}
     active = bool(canary_state.get("armed"))
     observed = int(verdict.get("runs_observed") or 0)
-    overdue = active and observed > rules.EFFICACY_MIN_RUNS * 2
+    armed_age = _age_seconds(canary_state.get("armed_ts"))
+    overdue = active and (
+        observed > rules.EFFICACY_MIN_RUNS * 2
+        or (isinstance(armed_age, int) and armed_age > rules.CANARY_STALL_SECONDS)
+    )
     checks.append(_check(
         "release.probation", FAIL if overdue else PASS,
         "release probation is bounded" if not overdue else "release probation exceeded its evidence window",
         {
             "active": active, "status": canary_state.get("status"),
             "revision": canary_state.get("revision"), "runs_observed": observed,
+            "armed_age_seconds": armed_age,
         },
         "supervisor",
     ))
