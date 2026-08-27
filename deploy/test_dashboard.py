@@ -151,7 +151,12 @@ var RESULT = (function () {
     getElementById: function (id) { if (!STORE[id]) STORE[id] = new El(id); return STORE[id]; },
     querySelectorAll: function () { return []; }
   };
-  var window = {};
+  var SESSION = {}, RELOADS = 0;
+  var sessionStorage = {
+    getItem: function (key) { return Object.prototype.hasOwnProperty.call(SESSION, key) ? SESSION[key] : null; },
+    setItem: function (key, value) { SESSION[key] = String(value); }
+  };
+  var window = { location: { reload: function () { RELOADS += 1; } } };
   var console = { error: function () {}, log: function () {} };
 
   __PAGE_SCRIPT__
@@ -172,6 +177,21 @@ var RESULT = (function () {
   var NOW = new Date("2026-08-21T15:11:22Z").getTime();
   var RealDate = Date;
   Date.now = function () { return NOW; };
+
+  // A page is immutable UI code, not just a view over mutable JSON. It must reload
+  // once when publish or rollback changes the release pointer, without looping if
+  // the monitor restart is delayed.
+  var alignedRelease = {release: {pointer_revision: VIEW_REVISION}};
+  ok("release refresh: matching code stays loaded",
+     refreshForRelease(alignedRelease) === false && RELOADS === 0);
+  var restartingRelease = {release: {pointer_revision: "next-release", serving_revision: VIEW_REVISION}};
+  ok("release refresh: pointer flip waits for the restarted monitor",
+     refreshForRelease(restartingRelease) === false && RELOADS === 0, "reloads=" + RELOADS);
+  var changedRelease = {release: {pointer_revision: "next-release", serving_revision: "next-release"}};
+  ok("release refresh: a new pointer reloads the page",
+     refreshForRelease(changedRelease) === true && RELOADS === 1, "reloads=" + RELOADS);
+  ok("release refresh: the same transition cannot loop",
+     refreshForRelease(changedRelease) === false && RELOADS === 1, "reloads=" + RELOADS);
 
   // 1. A live run paints every panel.
   reset();

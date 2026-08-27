@@ -116,6 +116,8 @@ check("the browser server runs at normal priority",
 
 install_source = (PROJECT / "deploy" / "install.sh").read_text(encoding="utf-8")
 release_source = (PROJECT / "deploy" / "release.sh").read_text(encoding="utf-8")
+canary_source = (PROJECT / "farm" / "canary.py").read_text(encoding="utf-8")
+monitor_source = (PROJECT / "monitor.py").read_text(encoding="utf-8")
 check("installation includes the monitor service", 'MONITOR="$LABEL.monitor"' in install_source)
 supervisor_source = (PROJECT / "run.py").read_text(encoding="utf-8")
 check("supervision iterates the authoritative service registry",
@@ -123,6 +125,13 @@ check("supervision iterates the authoritative service registry",
 check("uninstall removes the monitor service", 'bootout "$DOMAIN/$MONITOR"' in install_source)
 check("a release restarts module-level HTML and routes",
       'kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"' in release_source)
+check("a rollback also restarts module-level HTML and routes",
+      "outcome.update(_restart_monitor())" in canary_source
+      and '"kickstart", "-k", domain' in canary_source)
+check("an open dashboard reloads when its embedded revision changes",
+      "refreshForRelease(data)" in monitor_source
+      and "window.location.reload()" in monitor_source
+      and "__VIEW_REVISION__" in monitor_source)
 check("a release separates gated source from deployment state",
       "FARM_SOURCE_ROOT" in release_source and "FARM_DEPLOY_ROOT" in release_source)
 check("every activated release arms a canary",

@@ -36,12 +36,15 @@ Safety properties this module must preserve:
   * **Never revert more than once.** A revert clears the canary, so a flapping
     metric cannot walk the pointer backwards through history.
   * **Never block the farm.** Every failure path leaves the pointer alone.
+  * **Refresh the operator view.** A live rollback restarts the monitor after the
+    pointer moves so its import-time HTML and routes match the restored release.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -418,9 +421,11 @@ def resolve(
     if status == REGRESSED:
         outcome.update(revert(str(record.get("previous") or ""), project))
         # Only once the pointer has actually moved, and only when operating on the
-        # real project, record the inverse commit. Guarding on `project` keeps test
-        # suites that flip a symlink in a temp directory from rewriting real history.
+        # real project, refresh the import-time UI and record the inverse commit.
+        # Guarding on `project` keeps temp-directory tests from touching launchd or
+        # real git history.
         if outcome.get("reverted") and os.path.abspath(project) == os.path.abspath(str(PROJECT)):
+            outcome.update(_restart_monitor())
             inverse = record_inverse_commit(store)
             if inverse.get("commit"):
                 outcome["inverse_commit"] = inverse["commit"]
@@ -445,6 +450,36 @@ def resolve(
     except Exception as exc:  # noqa: BLE001 - pointer safety already decided
         outcome["efficacy_record_error"] = str(exc)[:200]
     return outcome
+
+
+def _restart_monitor() -> Dict[str, Any]:
+    """Restart the installed monitor after a live pointer change.
+
+    monitor.py composes its document and registers routes at import time. A pointer
+    rollback without a process restart therefore keeps serving the rejected UI even
+    though every scheduled agent has returned to the previous release. The browser's
+    revision guard handles an already-open document; this restart handles the server.
+    """
+    label = control.LABEL_PREFIX + ".monitor"
+    domain = "gui/%d/%s" % (os.getuid(), label)
+    command = ["/bin/launchctl", "kickstart", "-k", domain]
+    try:
+        installed = subprocess.run(
+            ["/bin/launchctl", "print", domain],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if installed.returncode != 0:
+            return {"monitor_restarted": False, "monitor_restart": "not_loaded"}
+        restarted = subprocess.run(
+            command, capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"monitor_restarted": False,
+                "monitor_restart_error": "%s: %s" % (exc.__class__.__name__, str(exc)[:160])}
+    if restarted.returncode != 0:
+        detail = (restarted.stderr or restarted.stdout or "launchctl kickstart failed").strip()
+        return {"monitor_restarted": False, "monitor_restart_error": detail[:200]}
+    return {"monitor_restarted": True, "monitor_restart": label}
 
 
 def revert(previous: str, project: Optional[str] = None) -> Dict[str, Any]:

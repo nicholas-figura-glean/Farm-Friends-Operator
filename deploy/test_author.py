@@ -499,6 +499,37 @@ section("revert safety")
 check("default rollback root is the canonical checkout, not release/",
       pathlib.Path(canary.PROJECT) == author_agent.PROJECT
       and (pathlib.Path(canary.PROJECT) / "releases").is_dir(), str(canary.PROJECT))
+
+# monitor.py composes routes and HTML at import time. A rollback must kickstart the
+# installed server after moving the pointer or the UI continues serving rejected code.
+_saved_subprocess_run = canary.subprocess.run
+_restart_calls = []
+
+
+class _LaunchResult:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def _launch_ok(command, **kwargs):
+    _restart_calls.append(command)
+    return _LaunchResult()
+
+
+try:
+    canary.subprocess.run = _launch_ok
+    _restart_result = canary._restart_monitor()
+finally:
+    canary.subprocess.run = _saved_subprocess_run
+check("rollback restart probes and kickstarts the monitor",
+      _restart_result.get("monitor_restarted") is True
+      and len(_restart_calls) == 2
+      and _restart_calls[0][1] == "print"
+      and _restart_calls[1][1:3] == ["kickstart", "-k"]
+      and _restart_calls[1][-1].endswith(".monitor"),
+      "%s %s" % (_restart_result, _restart_calls))
+
 rev = tempfile.mkdtemp()
 os.makedirs(os.path.join(rev, "releases", "revA"))
 os.makedirs(os.path.join(rev, "releases", "revB"))

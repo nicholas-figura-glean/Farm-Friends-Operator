@@ -149,7 +149,7 @@ python3 monitor.py --port 8877  # if 8765 is taken (it also auto-falls-back)
 deploy/open_monitor.py          # reuse a running dashboard, else start one, then open it
 deploy/export_game.py           # write coop-rush.html, a standalone playable file
 deploy/test_game.sh             # run the game's headless test suites
-deploy/test_dashboard.py        # 58 checks: panels, liveness, visuals, cost history, findings
+deploy/test_dashboard.py        # 151 checks: panels, release refresh, liveness, visuals, traces
 python3 deploy/test_evidence.py  # 25 checks: derived findings and cost history stay ledger-faithful
 deploy/make_app.sh              # build double-clickable Coop Rush.app / Farm Monitor.app
 ```
@@ -236,6 +236,12 @@ explicit audit drawers instead of competing with the current verdict.
   architecture audit trail remain available through progressive drill-down.
 
 The monitor reads existing local state only and never calls or mutates the farm API.
+Release identity is enforced at both layers of the UI: publish and canary rollback
+restart the monitor because its routes and HTML are composed at import time, and every
+open page compares its embedded revision with `/api/state` every two seconds. A changed
+pointer reloads the page once the restarted monitor reports that it serves that pointer;
+a transition-scoped `sessionStorage` marker prevents a restart failure from creating a
+reload loop.
 
 The pipeline view is fed by `farm/progress.py`, which the loop updates as it
 runs. Progress writes are atomic and best-effort: monitoring costs visibility
@@ -278,7 +284,7 @@ visible:
   contracts; `dashboard/test_mcp_wire.js` verifies 71 switchboard contracts;
   `deploy/test_tool_trace.py` verifies 21 telemetry, pairing, error and
   redaction contracts; `deploy/test_dashboard.py` runs the real page script and
-  snapshot against a DOM stub for 145 checks; topology and the architecture payload
+  snapshot against a DOM stub for 151 checks; topology and the architecture payload
   have their own suites. Run the complete gate with `deploy/test_dashboard.sh`.
   Render the current real run without opening a
   browser using `python3 deploy/preview_trace_explorer.py --check` (or

@@ -1359,6 +1359,10 @@ function kv(items) { return items.map(([k,v]) => `<div><span>${esc(k)}</span><sp
 // single unguarded chain, so a throw in an early panel left the pipeline,
 // signals, chart and log tail frozen at their last values while the overview
 // kept refreshing -- a stuck page that looks alive.
+// The page itself is an immutable release artifact. /api/state may begin coming
+// from a different monitor process after publish or rollback, so retain the revision
+// embedded in this document and reload once when the live pointer changes.
+const VIEW_REVISION = __VIEW_REVISION__;
 let LAST = null, LAST_FETCH_MS = null, FETCH_ERROR = null;
 let EVIDENCE = null, EVIDENCE_LOADING = false, EVIDENCE_LAST_FETCH_MS = null;
 let ACTIVE_TAB = "overview";
@@ -2023,11 +2027,34 @@ async function loadEvidence(force=false) {
     safe("findings",()=>renderEvidence({error:error&&error.message?error.message:String(error)}));
   } finally { EVIDENCE_LOADING=false; }
 }
+function refreshForRelease(data) {
+  const pointer = data && data.release && (data.release.pointer_revision || data.release.revision);
+  const serving = data && data.release && data.release.serving_revision;
+  if (!pointer || pointer === "unpublished" || pointer === VIEW_REVISION) return false;
+  // A pointer flip happens just before launchd restarts the monitor. Keep polling
+  // through that brief interval so reload cannot fetch the old document again.
+  if (serving && serving !== pointer) return false;
+
+  // Protect against a reload loop if launchd has not restarted the monitor yet. The
+  // marker is scoped to the exact source->target transition, so every later release
+  // or rollback still gets its own refresh.
+  const marker = `farmfriends-release-reload:${VIEW_REVISION}->${pointer}`;
+  try {
+    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(marker)) return false;
+    if (typeof sessionStorage !== "undefined") sessionStorage.setItem(marker, String(Date.now()));
+  } catch (error) {
+    // Private browsing can deny storage; reloading is still the correct action.
+  }
+  window.location.reload();
+  return true;
+}
 async function load() {
   try {
     const response = await fetch(`/api/state?t=${Date.now()}`, {cache:"no-store"});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
+    const data = await response.json();
+    if (refreshForRelease(data)) return;
+    render(data);
     const now=Date.now();
     if (!OP_AUTONOMY_LAST_FETCH_MS || now-OP_AUTONOMY_LAST_FETCH_MS>=OP_AUTONOMY_REFRESH_MS) loadOperatorAutonomy(!!OP_AUTONOMY);
     if (!EVIDENCE) loadEvidence();
@@ -2161,7 +2188,8 @@ __GAME_JS__
 # Composed once at import: the page is static apart from the /api/state poll, and
 # an import-time build keeps HTML a plain module constant for anything that reads it.
 HTML = (
-    HTML_TEMPLATE.replace("__TRACE_CSS__", TRACE_CSS)
+    HTML_TEMPLATE.replace("__VIEW_REVISION__", json.dumps(_revision(PROJECT, "working-tree")))
+    .replace("__TRACE_CSS__", TRACE_CSS)
     .replace("__WIRE_CSS__", WIRE_CSS)
     .replace("__ARCH_CSS__", ARCH_CSS)
     .replace("__GAME_CSS__", GAME_CSS)
