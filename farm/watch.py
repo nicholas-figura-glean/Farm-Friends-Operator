@@ -218,31 +218,8 @@ def evaluate(
     if row.get("tools_changed"):
         out.append("tools/list changed - new or removed server capability")
 
-    # The pre-action sentinel has already failed closed in the named domains.
-    # Emit only rising-edge signals (plus bounded routing reminders) so the
-    # question/probe pipeline investigates the regime change without turning a
-    # persistent hold into repetitive model spend.
-    for signal in (row.get("novelty") or {}).get("signals") or []:
-        alert = signal.get("alert")
-        if alert and alert not in out:
-            out.append(str(alert))
-
     if row.get("trades_in"):
         out.append("%d incoming trade(s) pending review" % row["trades_in"])
-
-    # Coin outflow through trade is a strategic invariant, not merely a nominal
-    # value check. Feed can always be bought from the neutral store at 1:1;
-    # transferring coins to a rival lets them compound immediately into animals.
-    if row.get("trade_coin_outflow"):
-        out.append(
-            "TRADE POLICY BREACH: %d coins transferred through inbound trade"
-            % row["trade_coin_outflow"]
-        )
-    blocked_trade_coins = int(row.get("trade_coin_outflow_blocked") or 0)
-    if blocked_trade_coins:
-        soft.append(
-            "trade guard preserved %d coins from inbound offers" % blocked_trade_coins
-        )
 
     # A stray retry among dozens of calls is ordinary network noise, not an
     # incident. Bulk operations are now constant-time, so every tool participates

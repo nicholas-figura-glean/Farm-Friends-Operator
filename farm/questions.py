@@ -23,34 +23,6 @@ SCHEMA_VERSION = 1
 VALID_STATUSES = {"open", "probing", "answered", "abandoned"}
 
 TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "activity_novelty_trade": {
-        "hypothesis": "A new trade pattern may transfer more compounding value to a counterparty than its nominal liquidation margin returns to us.",
-        "settle": "Replay resource flows by trade ID and counterparty, compare each side with neutral store/market alternatives, and correlate transfers with subsequent rival coin, herd, and produce changes.",
-        "priority": "high",
-        "page_on_open": False,
-        "budget": {"coins": 0, "calls": 1, "wall_seconds": 60},
-    },
-    "activity_novelty_rival": {
-        "hypothesis": "A rival entered a materially different capital, adoption, or production regime that changes the best response.",
-        "settle": "Measure the rival's herd, coins, produce slope, recent transfers, and sustainable growth; distinguish organic production from activity we funded.",
-        "priority": "high",
-        "page_on_open": False,
-        "budget": {"coins": 0, "calls": 1, "wall_seconds": 60},
-    },
-    "activity_novelty_risk": {
-        "hypothesis": "A newly observed loss mechanic changes the safe reserve or growth policy.",
-        "settle": "Bound its frequency, maximum loss, affected resource, and whether current reserves absorb it before restoring affected strategic actions.",
-        "priority": "high",
-        "page_on_open": False,
-        "budget": {"coins": 0, "calls": 0, "wall_seconds": 60},
-    },
-    "activity_novelty_tools": {
-        "hypothesis": "A capability-surface change invalidates assumptions about available reads, mutations, or parser contracts.",
-        "settle": "Diff the capability names and schemas, exercise changed read-only paths, and prove existing mutation arguments remain compatible.",
-        "priority": "critical",
-        "page_on_open": True,
-        "budget": {"coins": 0, "calls": 10, "wall_seconds": 120},
-    },
     "strategy_stale": {
         "hypothesis": "A standing growth decision is suppressing a profitable strategy.",
         "settle": "Replay output and capital outcomes under neighbouring growth thresholds, then run a bounded growth cohort if the replay disagrees.",
@@ -383,11 +355,7 @@ def open_or_update(
         opened = existing is None
         terminal = bool(existing and existing.get("status") in {"answered", "abandoned"})
         closed_run = (existing or {}).get("closed_run")
-        critical_recurrence = alert_class in {
-            "rank_lost", "overtaken", "no_path_to_win",
-            "activity_novelty_trade", "activity_novelty_rival",
-            "activity_novelty_risk", "activity_novelty_tools",
-        }
+        critical_recurrence = alert_class in {"rank_lost", "overtaken", "no_path_to_win"}
         enough_new_runs = (
             not isinstance(run, int)
             or not isinstance(closed_run, int)

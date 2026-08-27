@@ -85,7 +85,7 @@ MODULE_LAYER: Dict[str, str] = {
     "questions": "observe",
     "topology": "observe", "tool_trace": "observe", "claims": "observe",
     "probes": "observe", "report": "observe", "tokens": "observe",
-    "contract": "detect", "watch": "detect", "novelty": "detect",
+    "contract": "detect", "watch": "detect",
     "llm": "decide", "research": "decide",
     "canary": "guard", "evaluation": "guard", "provenance": "guard", "governance": "guard",
     "workorders": "guard", "vcs": "guard", "heal": "guard", "notify": "guard",
@@ -94,7 +94,7 @@ MODULE_LAYER: Dict[str, str] = {
     "run": "operate", "monitor": "operate", "expand": "play",
     "contract_watch": "detect", "recovery_watch": "guard",
     "author_agent": "decide", "research_agent": "decide",
-    "activity_probe": "observe", "dashboard_agent": "operate",
+    "dashboard_agent": "operate",
 }
 
 # This is the enforced trust boundary, not a UI mirror.

@@ -6,17 +6,6 @@ farm lock with a wall-time ceiling.
 """
 
 PROBES = {
-    "activity_replay": {
-        "hypothesis": "New trade activity can be classified from resource flows, neutral alternatives, and subsequent counterparty growth before trade automation resumes.",
-        "question_classes": ["activity_novelty_trade"],
-        "subject_patterns": [],
-        "command": ["experiments/activity_probe.py"],
-        "read_only": True,
-        "autonomous": True,
-        "budget": {"coins": 0, "calls": 0, "wall_seconds": 30},
-        "stop_condition": "recent trade decisions are replayed or the evidence window is empty",
-        "evidence_destination": "state/activity_probe.json",
-    },
     "counterfactual_sweep": {
         "hypothesis": "A neighbouring decision constant changes historical outcomes.",
         "question_classes": ["strategy_stale", "idle_capital", "knob_age", "policy_drift"],
@@ -97,10 +86,7 @@ PROBES = {
         "falsifier": "visit_farm shows the best rival has a pending harvest, herd, or resource stockpile consistent with a next-cycle gain above 176383 produce.",
         "primary_metric": "projected_rival_next_cycle_gain",
         "evidence_class": "direct_mechanism",
-        "question_classes": [
-            "rival_wake", "threat", "rival_growing", "rank_lost", "overtaken",
-            "activity_novelty_rival",
-        ],
+        "question_classes": ["rival_wake", "threat", "rival_growing", "rank_lost", "overtaken"],
         "subject_patterns": [],
         "command": ["experiments/registry.py", "--peek-top-rival"],
         "read_only": True,
