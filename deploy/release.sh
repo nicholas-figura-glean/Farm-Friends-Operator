@@ -99,6 +99,7 @@ fi
 # calls; test_knowledge redirects every mutable epistemic store to a temp dir.
 /usr/bin/python3 run.py --self-test
 /usr/bin/python3 deploy/test_knowledge.py
+/usr/bin/python3 deploy/test_governance.py
 /usr/bin/python3 deploy/test_safety.py
 /usr/bin/python3 deploy/test_evidence.py
 /usr/bin/python3 deploy/test_tool_trace.py

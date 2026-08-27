@@ -26,6 +26,7 @@ All paths are relative to `state/` and can be redirected with `FARM_STATE_DIR` i
 - `provenance.ndjson` — pre-registered hypothesis, validation-result, and policy lineage.
 - `champion.json` — accepted release and cumulative performance ratio.
 - `efficacy_events.ndjson` — independent candidate acceptance/rejection outcomes.
+- `governance_reviews.ndjson` — 20-run whole-system contracts, trends, and bounded remediation outcomes.
 - `audits.ndjson` — semantic and model-drift audit results.
 - `experiments.ndjson` — bounded probe executions and outcomes.
 - `segments/<ledger>/manifest.json` — ordered checksums for compressed immutable source segments.

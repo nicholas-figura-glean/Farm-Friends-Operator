@@ -158,7 +158,7 @@ check("the immutable author process receives the editable checkout explicitly",
 section("the autonomy view degrades instead of collapsing")
 
 report = autonomy.report()
-for key in ("agents", "canary", "orders", "contract", "vcs", "research", "llm", "activity"):
+for key in ("agents", "canary", "orders", "contract", "vcs", "research", "governance", "llm", "activity"):
     check("section %s is present" % key, key in report)
     check("section %s has no error" % key,
           not (report.get(key) or {}).get("error"),
@@ -173,7 +173,7 @@ def _boom():
 guarded = autonomy._guard(_boom)
 activity_view = report.get("activity") or {}
 activity_rows = activity_view.get("events") or []
-check("autonomy activity projects the existing ledgers", activity_view.get("sources") == 5,
+check("autonomy activity projects the existing ledgers", activity_view.get("sources") == 6,
       str(activity_view.get("sources")))
 check("autonomy activity is newest-first",
       all(activity_rows[i].get("ts", "") >= activity_rows[i + 1].get("ts", "")
@@ -291,7 +291,8 @@ check("no module is silently unclassified", snap["unmapped"] == [],
 protected = {n["path"] for n in snap["nodes"] if n.get("protected")}
 for path in ("farm/canary.py", "farm/workorders.py", "farm/llm.py", "farm/rules.py",
              "farm/vcs.py", "farm/cycle.py", "farm/compaction.py",
-             "farm/evaluation.py", "farm/provenance.py", "experiments/author_agent.py"):
+             "farm/evaluation.py", "farm/governance.py", "farm/provenance.py",
+             "experiments/author_agent.py"):
     check("%s is marked unwritable" % path, path in protected)
 check("the diagram consumes the enforced protected manifest",
       architecture.PROTECTED == control.TRUSTED_PATHS)
@@ -834,6 +835,23 @@ with tempfile.TemporaryDirectory() as tmp:
     second = workorders.submit(change, source="dashboard_agent", intent="restore it",
                                acceptance=["it works"], files=["monitor.py"], path=queue)
     check("re-filing the same broken readout is a no-op", second is None, str(second)[:90])
+    closed = dashboard_agent._resolve_healthy_orders(
+        [{"source": "test.probe", "ok": True}], [], path=queue,
+    )
+    check("a recovered readout supersedes its stale repair order",
+          closed == ["dashboard-test-probe"]
+          and workorders.current(queue)["dashboard-test-probe"]["status"] == workorders.SUPERSEDED,
+          str(workorders.current(queue)["dashboard-test-probe"]))
+    reopened = workorders.submit(change, source="dashboard_agent", intent="restore it",
+                                 acceptance=["it works"], files=["monitor.py"], path=queue)
+    held = dashboard_agent._resolve_healthy_orders(
+        [{"source": "test.probe", "ok": True}],
+        [{"source": "test.probe", "severity": "degraded"}], path=queue,
+    )
+    check("a currently unhealthy readout keeps its repair open",
+          bool(reopened) and held == []
+          and workorders.current(queue)["dashboard-test-probe"]["status"] == workorders.OPEN,
+          str(held))
 
 
 # --------------------------------------------------------------------------

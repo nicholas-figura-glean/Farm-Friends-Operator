@@ -128,6 +128,7 @@ TRUSTED_PATHS = frozenset(
         "farm/evaluation.py",
         "farm/evidence.py",
         "farm/heal.py",
+        "farm/governance.py",
         "farm/ledger.py",
         "farm/llm.py",
         "farm/mcp.py",

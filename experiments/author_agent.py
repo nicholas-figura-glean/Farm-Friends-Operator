@@ -522,6 +522,7 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
 GATES = (
     ("self-test", ["/usr/bin/python3", "run.py", "--self-test"]),
     ("knowledge", ["/usr/bin/python3", "deploy/test_knowledge.py"]),
+    ("governance", ["/usr/bin/python3", "deploy/test_governance.py"]),
     ("safety", ["/usr/bin/python3", "deploy/test_safety.py"]),
     ("evidence", ["/usr/bin/python3", "deploy/test_evidence.py"]),
     ("tool-trace", ["/usr/bin/python3", "deploy/test_tool_trace.py"]),

@@ -15,6 +15,17 @@ the complete process set.
    never edits
 ```
 
+## Periodic whole-system review
+
+Every 20 completed runs, the supervisor executes `farm/governance.py`. This is a
+deterministic local-state review rather than a model call. It checks execution,
+strategy position, all services, canary bounds, compaction, policy/claims,
+dashboard freshness, question/probe closure, repair flow, and provenance. Missed
+boundaries retry on the next supervisor pass. Reviews are append-only and compare
+with the previous review so regressions and autonomous recoveries are explicit.
+Known safe remedies reuse scheduler, compaction, stale-claim, and question/probe
+paths; the reviewer cannot grant a model permission to rewrite the safety kernel.
+
 ## Why the split
 
 A single agent that both detects a problem and rewrites code to fix it has no

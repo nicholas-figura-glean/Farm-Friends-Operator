@@ -281,6 +281,13 @@ def research_state(limit: int = 6) -> Dict[str, Any]:
     }
 
 
+def governance_state() -> Dict[str, Any]:
+    """Latest broad run-based review of execution, healing, learning, and safety."""
+    from farm import governance
+
+    return governance.status()
+
+
 def llm_state() -> Dict[str, Any]:
     """Model budget and reachability.
 
@@ -389,6 +396,19 @@ def activity_state(limit: int = 18) -> Dict[str, Any]:
             (row.get("fingerprint") or "")[:12],
         )
 
+    for row in _tail(PROJECT / "state" / "governance_reviews.ndjson", 6):
+        summary = row.get("summary") or {}
+        add(
+            row.get("ts"), "verify", "Governance reviewer",
+            "Periodic systems review %s" % str(row.get("status") or "recorded"),
+            "%s pass · %s warn · %s fail · %s action(s)" % (
+                summary.get("pass", 0), summary.get("warn", 0), summary.get("fail", 0),
+                len(row.get("actions") or []),
+            ),
+            str(row.get("status") or "recorded"),
+            "state/governance_reviews.ndjson", row.get("run"),
+        )
+
     for row in _tail(PROJECT / "state" / "research_findings.ndjson", 8):
         event = str(row.get("event") or "finding")
         item = row.get("item") if isinstance(row.get("item"), dict) else {}
@@ -415,7 +435,7 @@ def activity_state(limit: int = 18) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     for event in unique:
         counts[event["phase"]] = counts.get(event["phase"], 0) + 1
-    return {"events": unique[:limit], "counts": counts, "sources": 5}
+    return {"events": unique[:limit], "counts": counts, "sources": 6}
 
 
 def report() -> Dict[str, Any]:
@@ -428,6 +448,7 @@ def report() -> Dict[str, Any]:
         "contract": _guard(contract_state),
         "vcs": _guard(vcs_state),
         "research": _guard(research_state),
+        "governance": _guard(governance_state),
         "llm": _guard(llm_state),
         "activity": _guard(activity_state),
     }
@@ -519,6 +540,19 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
                     "what": "no endpoint scan for %d minutes" % (age // 60),
                     "why": "schema drift would go undetected"})
 
+    governance_view = view.get("governance") or {}
+    governance_last = governance_view.get("last") or {}
+    for check in governance_last.get("checks") or []:
+        if check.get("status") != "fail":
+            continue
+        out.append({
+            "severity": "critical" if check.get("id") in {
+                "execution.progress", "runtime.services", "knowledge.policy", "safety.lineage"
+            } else "warn",
+            "what": "governance review failed %s" % check.get("id"),
+            "why": check.get("summary") or "periodic invariant failed",
+        })
+
     llm_view = view.get("llm") or {}
     if llm_view.get("available") is False:
         out.append({"severity": "warn",
@@ -531,7 +565,7 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
                     "what": "author pass budget is exhausted with %d repair(s) queued" % repair_count,
                     "why": "%d/%d real author passes used in the last 24 hours" % (passes, maximum)})
 
-    for section in ("agents", "canary", "orders", "contract", "vcs", "research", "llm"):
+    for section in ("agents", "canary", "orders", "contract", "vcs", "research", "governance", "llm"):
         err = (view.get(section) or {}).get("error")
         if err:
             out.append({"severity": "warn",

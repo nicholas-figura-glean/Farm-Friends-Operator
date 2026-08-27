@@ -425,7 +425,8 @@ def main() -> int:
         suite.check(control.is_protected("farm/cycle.py"),
                     "model author cannot rewrite the live strategy cycle")
         suite.check(all(control.is_protected(path) for path in (
-            "farm/compaction.py", "farm/evaluation.py", "farm/provenance.py", "farm/policy.py"
+            "farm/compaction.py", "farm/evaluation.py", "farm/governance.py",
+            "farm/provenance.py", "farm/policy.py"
         )), "model author cannot weaken its storage, efficacy, lineage, or promotion judges")
         supervisor_source = (PROJECT / "run.py").read_text(encoding="utf-8")
         suite.check("compaction_safe = False" in supervisor_source

@@ -5,6 +5,7 @@
   run.py --dry-run    read live state, print the decision, mutate nothing
   run.py --review N   hourly digest of the last N recorded runs
   run.py --supervise  self-heal: keep the schedule alive, remediate alerts
+  run.py --governance-status show the latest periodic autonomous systems review
   run.py --heal-status show healing knobs, recent remedies and cost ledger
   run.py --self-test  parser regression against saved fixtures
 
@@ -34,6 +35,7 @@ from farm import (  # noqa: E402
     control,
     cycle,
     evaluation,
+    governance,
     growth,
     heal,
     journal,
@@ -560,6 +562,11 @@ def do_supervise(cadence: int = 300) -> int:
         probe_result = probes.maybe_run(questions.open_questions(), last.get("run"))
     except Exception as exc:  # noqa: BLE001
         notes.append("probe scheduler failed: %s" % str(exc)[:100])
+    governance_result = None
+    try:
+        governance_result = governance.run_review(int(last.get("run") or 0))
+    except Exception as exc:  # noqa: BLE001
+        notes.append("governance review failed: %s" % str(exc)[:100])
     if healed:
         tokens.record_heal(
             last.get("run"),
@@ -595,6 +602,16 @@ def do_supervise(cadence: int = 300) -> int:
         )
     if probe_result:
         print("  probe %s: %s" % (probe_result.get("probe_id"), probe_result.get("status")))
+    if governance_result and governance_result.get("recorded"):
+        review_summary = governance_result.get("summary") or {}
+        print(
+            "  governance %s: %s pass, %s warn, %s fail; actions=%d"
+            % (
+                governance_result.get("status"), review_summary.get("pass", 0),
+                review_summary.get("warn", 0), review_summary.get("fail", 0),
+                len(governance_result.get("actions") or []),
+            )
+        )
     for item in routed:
         print(
             "  ROUTED %s -> %s (%s)"
@@ -837,6 +854,19 @@ def do_safety_status() -> int:
         "efficacy": evaluation.status(str(analysis.state_dir() / "canary.json")),
         "compaction": compaction.state_status(analysis.state_dir()),
     }, indent=2, sort_keys=True, allow_nan=False))
+    return 0
+
+
+def do_governance_status(run_review: bool = False, force: bool = False) -> int:
+    import json
+
+    if run_review:
+        history = analysis.history_rows(limit=1)
+        current_run = int(history[-1].get("run") or 0) if history else 0
+        value = governance.run_review(current_run, force=force)
+    else:
+        value = governance.status()
+    print(json.dumps(value, indent=2, sort_keys=True, allow_nan=False, default=str))
     return 0
 
 
@@ -1915,7 +1945,8 @@ def main() -> int:
     ap.add_argument("--review", type=int, nargs="?", const=12, help="digest last N runs")
     ap.add_argument("--alerts", action="store_true", help="pending anomalies only")
     ap.add_argument("--journal", action="store_true", help="append a generated journal entry")
-    ap.add_argument("--force", action="store_true", help="with --journal, ignore the cadence")
+    ap.add_argument("--force", action="store_true",
+                    help="with --journal or --governance-review, ignore cadence")
     ap.add_argument("--health", action="store_true", help="backstop check, self-heals if stale")
     ap.add_argument(
         "--supervise",
@@ -1951,6 +1982,10 @@ def main() -> int:
                     help="losslessly rotate oversized source ledgers")
     ap.add_argument("--safety-status", action="store_true",
                     help="show lineage, champion, and compaction safeguards")
+    ap.add_argument("--governance-status", action="store_true",
+                    help="show the latest periodic autonomous systems review")
+    ap.add_argument("--governance-review", action="store_true",
+                    help="run the due systems review; use --force to override cadence")
     ap.add_argument("--probes", action="store_true", help="list bounded research probes")
     ap.add_argument("--run-probe", metavar="ID", help="explicitly run one registered bounded probe")
     ap.add_argument("--align", action="store_true", help="wait for :35s before acting")
@@ -1974,6 +2009,8 @@ def main() -> int:
         return do_compaction(run=args.compact_state)
     if args.safety_status:
         return do_safety_status()
+    if args.governance_status or args.governance_review:
+        return do_governance_status(run_review=args.governance_review, force=args.force)
     if args.probes:
         return do_probes()
     if args.run_probe:

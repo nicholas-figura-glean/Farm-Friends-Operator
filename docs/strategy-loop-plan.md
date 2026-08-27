@@ -6,6 +6,11 @@ rank 1 at run 416. The implementation is split across `farm/rules.py` (pure repl
 detectors), `farm/questions.py`, `farm/research.py`, `farm/probes.py`, and the
 versioned claims/policy layer documented in `docs/epistemic-control-plane.md`.
 
+A deterministic governance review now verifies every 20 runs that aged strategic
+questions are producing question-linked probe results. A stalled learning loop is
+routed back into the existing `strategy_stale` probe path instead of waiting for a
+person to notice it.
+
 Every original acceptance target is replayed by `deploy/test_knowledge.py` against
 the full ledger: stale strategy by run 80 with none in runs 1-50, John wake at run
 241, strategy unreachable from remedies, one current question identity, and zero

@@ -309,6 +309,34 @@ def _staleness() -> Dict[str, Any]:
     return out
 
 
+def _resolve_healthy_orders(
+    results: List[Dict[str, Any]],
+    problems: List[Dict[str, Any]],
+    path: str = workorders.QUEUE,
+) -> List[str]:
+    """Close readout repairs whose exact source is healthy again."""
+    unhealthy = {str(problem.get("source") or "") for problem in problems}
+    current = workorders.current(path)
+    resolved: List[str] = []
+    for result in results:
+        source = str(result.get("source") or "")
+        if not source or source in unhealthy or not result.get("ok"):
+            continue
+        order_id = "dashboard-%s" % source.replace(".", "-")
+        order = current.get(order_id)
+        if not order or order.get("status") not in {
+            workorders.OPEN, workorders.CLAIMED, workorders.FAILED,
+        }:
+            continue
+        workorders.resolve(
+            order_id, workorders.SUPERSEDED,
+            note="readout is healthy again; periodic verifier closed stale repair",
+            path=path,
+        )
+        resolved.append(order_id)
+    return resolved
+
+
 def main() -> int:
     problems: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
@@ -423,6 +451,11 @@ def main() -> int:
     with LEDGER.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
 
+    # Healthy verification is also a transition. Without closing stale repairs, an
+    # already-recovered readout permanently poisons repair-flow reviews and consumes
+    # future author budget.
+    resolved = _resolve_healthy_orders(results, problems)
+
     # One order per distinct broken readout. The change id is derived from the source
     # so a readout that stays broken updates its existing order instead of filing a new
     # one every 15 minutes -- `submit` is idempotent by that id.
@@ -480,6 +513,8 @@ def main() -> int:
         for blocker in autonomy_blockers:
             print("  AUTONOMY [%s] %s -- %s"
                   % (blocker["severity"], blocker["what"], blocker["why"]))
+    if resolved:
+        print("  resolved %d stale dashboard repair(s)" % len(resolved))
     if filed:
         print("  filed %d work order(s)" % filed)
     # Filing a repair is successful autonomous handling, not operator attention.

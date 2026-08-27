@@ -256,6 +256,8 @@ RIVAL_WAKE_FLAT_EPS = 0.05
 GAP_RECON_MINUTES = 30
 CLAIM_REFRESH_RUNS = 20
 RESEARCH_AUDIT_RUNS = 10
+# Broad autonomous operating review; aligned with the journal/claim evidence window.
+GOVERNANCE_REVIEW_RUNS = JOURNAL_EVERY
 PROBE_MIN_INTERVAL_RUNS = 20
 # A repeated alert is not novel evidence immediately after its probe settled.
 QUESTION_REOPEN_RUNS = 20

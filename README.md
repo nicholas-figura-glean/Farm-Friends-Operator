@@ -56,6 +56,7 @@ farm/mcp.py            JSON-RPC, endpoint scrubbing, contextual boundary spans
 farm/parse.py          plain text -> dataclasses; risk events normalized by category
 farm/rules.py          pure executable arithmetic and replayable self-audit rules
 farm/growth.py         reversible recent-evidence growth brake
+farm/governance.py     20-run systems review: execution, healing, learning, safety
 farm/evidence.py       dashboard projection generated from estimators and claims
 farm/cycle.py          deterministic loop, intents, predictions, outcome verification
 farm/watch.py          operational + strategy detectors
@@ -453,7 +454,7 @@ the author trust boundary:
 | dashboard | verifies every operator readout |
 | monitor | serves the read-only operator view |
 
-`--supervise` does six things in order, and makes **no** farm calls unless the
+`--supervise` does seven things in order, and makes **no** farm calls unless the
 loop has actually gone stale:
 
 1. **Repair the schedule.** A dead scheduler makes every other signal
@@ -465,6 +466,16 @@ loop has actually gone stale:
    can never double-run the farm.
 5. **Remediate alerts** via `farm/heal.py`, then acknowledge only what it fixed.
 6. **Run at most one due bounded probe**, binding its result to durable questions.
+7. **Every 20 runs, review the whole autonomous system** against ten explicit
+   contracts, record regressions/recoveries, and retry only pre-declared bounded
+   remedies. Missed boundaries run on the next supervisor pass.
+
+The governance review is deterministic and makes no MCP or model calls. It covers
+score progress, rank, service liveness, release probation, compaction, policy/claim
+compatibility, dashboard freshness, question/probe flow, repair throughput, and
+champion/provenance integrity in `state/governance_reviews.ndjson`. The model cannot
+edit this reviewer or the safety kernel; novel strategy still travels through
+pre-registration, bounded probes, work orders, release gates, and a canary.
 
 The healer's constraints are the interesting part:
 

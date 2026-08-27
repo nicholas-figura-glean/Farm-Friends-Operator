@@ -9,7 +9,7 @@ PROBES = {
     "counterfactual_sweep": {
         "hypothesis": "A neighbouring decision constant changes historical outcomes.",
         "question_classes": ["strategy_stale", "idle_capital", "knob_age", "policy_drift"],
-        "subject_patterns": ["farm", "growth", "policy", "output_linear"],
+        "subject_patterns": ["farm", "growth", "policy", "output_linear", "governance"],
         "command": ["run.py", "--sweep"],
         "read_only": True,
         "autonomous": True,
