@@ -91,10 +91,15 @@ def main() -> int:
                         model["shape"])
             suite.check((model["regression"].get("slope") or 0) > 0.05,
                         "healthy marginal output remains positive", model["regression"])
-            # regression() publishes r at three decimals; equality is the
-            # documented floor, not evidence of a sub-threshold association.
-            suite.check((model["regression"].get("r") or 0) >= 0.7,
-                        "healthy raw herd/output association remains positive", model["regression"])
+            # Raw straight-line r remains published for diagnosis, but cannot be a
+            # safety gate: herd is nearly monotone in time, the response also measures
+            # collection phase, and the synthetic saturation cohort below produces an
+            # apparently excellent r=0.993. Require enough raw evidence here, then gate
+            # the dangerous shape on the signed slope, two scale-smoothed fits, and the
+            # independently fitted power-law exponent.
+            suite.check(model["regression"].get("r") is not None
+                        and (model["regression"].get("n") or 0) >= 20,
+                        "raw herd/output diagnostic remains populated", model["regression"])
             # Growth must still be paying. This is asserted on the scaling exponent,
             # not on the straight-line r of the bucket means, because that r cannot
             # distinguish the two failure directions and is not stable enough to gate
@@ -127,9 +132,12 @@ def main() -> int:
             suite.check((model["regression_bucketed"].get("r") or 0) > 0.85,
                         "bucket-smoothed herd/output association has not broken down",
                         model["regression_bucketed"])
-            suite.check((model["regression_bucketed_weighted"].get("r") or 0) > 0.85,
-                        "sample-weighted bucket fit agrees with the unweighted one",
+            suite.check((model["regression_bucketed_weighted"].get("r") or 0) > 0.95,
+                        "sample-weighted bucket fit independently remains strong",
                         model["regression_bucketed_weighted"])
+            suite.check((model["scaling_bucketed"].get("exponent") or 0) >= 0.95,
+                        "bucket-scale exponent independently rejects saturation",
+                        model["scaling_bucketed"])
             # The association is not causally identified; the model must say so, or the
             # dashboard will read a scaling law into a time series.
             suite.check(model["confound"]["identified"] is False,
