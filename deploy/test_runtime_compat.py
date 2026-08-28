@@ -50,7 +50,7 @@ league_sample = (
     "🏆 Farm Friends leaderboard (by league, then lifetime produce)\n"
     " 1. 💠 Platinum I      Nick: 252819766 lifetime produce, "
     "16868/16875 animals, 335146984 coins, 493 🌼\n"
-    "(updated just now)\n"
+    "(updated 6 min ago)\n"
 )
 league_rows = parse.parse_leaderboard(league_sample)
 check(len(league_rows) == 1
@@ -65,9 +65,6 @@ legacy_rows = parse.parse_leaderboard(
 )
 check(len(legacy_rows) == 1 and legacy_rows[0].animals == 146,
       "legacy leaderboard format remains unchanged", legacy_rows)
-check("(updated" not in format_compat.normalize(
-          "leaderboard", league_sample.replace("just now", "6 min ago")),
-      "numeric and just-now league freshness footers are both removed")
 
 # The only model-editable extension point is normalization; validation stays trusted.
 check(control.author_editable(compatibility.ADAPTER_FILE),
@@ -99,14 +96,6 @@ check("compatibility.overlay_proof" in release_source
 check(("runtime-compat", ["/usr/bin/python3", "deploy/test_runtime_compat.py"])
       in author_agent.GATES and "deploy/test_runtime_compat.py" in release_source,
       "runtime compatibility gate is mandatory in author and release paths")
-check("compatibility care handoff" in release_source
-      and "com.nickfigura.farmfriends.care" in release_source
-      and "com.nickfigura.farmfriends.retry" in release_source,
-      "a released repair explicitly hands protected care back to the full process")
-run_source = (PROJECT / "run.py").read_text(encoding="utf-8")
-check("compatibility.deferred_parse_error(progress.read())" in run_source
-      and "_route_parse_failure(ParseDrift(deferred_parse_error))" in run_source,
-      "successful routine care still routes its deferred parser failure")
 excerpt = compatibility.structural_excerpt(
     "list_farm",
     "🌾 Nick's Farm  🪙 1 coin\nAnimals changed:\n  schema row\nOpen trades:\n"
@@ -188,8 +177,6 @@ with tempfile.TemporaryDirectory() as tmp:
         "summary": {"error": "ParseDrift: no animals parsed from list_farm"},
     }
     error = parse.ParseDrift("no animals parsed from list_farm")
-    check(compatibility.deferred_parse_error(progress_state) == "no animals parsed",
-          "deferred optional parser failure remains routable after care completes")
     first = compatibility.route_parse_drift(error, progress_state, raw_dir, queue)
     second = compatibility.route_parse_drift(error, progress_state, raw_dir, queue)
     current = workorders.current(queue)

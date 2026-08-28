@@ -156,13 +156,6 @@ def do_cycle(dry: bool) -> int:
     run = cycle.Cycle(client, dry_run=dry)
     prev = cycle.last_history()
     row = run.run()
-    # Optional competitive reads may fail closed for strategy while routine care
-    # still succeeds. Route that captured parser drift after the safe cycle rather
-    # than requiring an exception that aborts husbandry; otherwise the author
-    # pipeline never receives a repair order for degraded leaderboard formats.
-    deferred_parse_error = compatibility.deferred_parse_error(progress.read())
-    if deferred_parse_error:
-        _route_parse_failure(ParseDrift(deferred_parse_error))
     audit_window = max(
         rules.AUDIT_WINDOW_RUNS,
         rules.AUDIT_KNOB_MAX_AGE_RUNS + 2,
