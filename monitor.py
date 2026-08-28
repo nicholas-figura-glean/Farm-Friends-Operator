@@ -1019,8 +1019,18 @@ def _release_info() -> Dict[str, Any]:
     serving_fp = release_info.fingerprint(str(PROJECT))
     pointer_fp = release_info.fingerprint(str(pointer_target))
     comparable = bool(serving_fp and pointer_fp)
-    stale = bool(pointer_revision != "unpublished"
-                 and serving_revision != pointer_revision)
+    serving_is_release = bool(re.fullmatch(r"\d{8}T\d{6}Z", serving_revision))
+    pointer_is_release = bool(re.fullmatch(r"\d{8}T\d{6}Z", pointer_revision))
+    # A mismatch is only a stale dashboard when this process predates the pointer.
+    # During a publish/rollback race launchd can already be serving a newer release
+    # while the symlink still points at the previous one; calling that stale makes
+    # the readout fail even though the browser is not looking at old code.
+    if pointer_revision == "unpublished":
+        stale = False
+    elif serving_is_release and pointer_is_release:
+        stale = serving_revision < pointer_revision
+    else:
+        stale = serving_revision != pointer_revision
     return {
         # Backward-compatible: revision/target continue to mean the current pointer.
         "revision": pointer_revision,
