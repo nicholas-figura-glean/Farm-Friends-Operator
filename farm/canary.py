@@ -361,10 +361,8 @@ def evaluate(
     # A run that ends in a hard failure is decisive on its own: the canary exists
     # to catch exactly this, and waiting for a rate average would keep broken code
     # live for several more cycles. ``zero_streak`` in a run row spans releases,
-    # however, so derive that signal strictly from candidate rows. Collection is
-    # no longer the authoritative production clock: a positive lifetime-score rate
-    # proves the game advanced even when collect_produce returned nothing. Requiring
-    # both signals to be idle prevents server cadence from being blamed on a release.
+    # however, so derive that signal strictly from candidate rows. Otherwise the
+    # first candidate run can inherit an old streak and be blamed for pre-flip state.
     broken: List[tuple[Dict[str, Any], str, int]] = []
     for index, row in enumerate(after):
         candidate_streak = _candidate_zero_streak(after[: index + 1])
@@ -463,20 +461,10 @@ def _quantity(value: Any) -> float:
 
 
 def _candidate_zero_streak(rows: List[Dict[str, Any]]) -> int:
-    """Trailing candidate inactivity corroborated by collection and score.
-
-    The server may bank produce outside ``collect_produce`` and expose lifetime-score
-    gains on a different cadence. A candidate therefore owns a hard zero only when
-    neither signal advanced. This mirrors the runtime detector's use of score rate as
-    authoritative evidence while retaining fast rollback for three truly idle runs.
-    """
+    """Trailing no-collection streak bounded to rows owned by this candidate."""
     streak = 0
     for row in reversed(rows):
-        if _exogenous_loss(row):
-            break
-        score_rate = _rate(row)
-        if (_quantity(row.get("collected")) > 0
-                or (score_rate is not None and score_rate > 0)):
+        if _quantity(row.get("collected")) > 0:
             break
         streak += 1
     return streak

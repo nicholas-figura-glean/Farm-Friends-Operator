@@ -528,23 +528,6 @@ check("a persisted global streak cannot replace candidate-owned evidence",
 check("the standalone breakage classifier still understands historical rows",
       canary._looks_broken({"zero_streak": 3, "collected": 0}))
 
-# Live runs 1199-1203 exposed a second attribution bug: collect_produce was empty
-# for several cycles while lifetime produce still advanced twice. The candidate
-# averaged above baseline, so server cadence must not be rewritten as UI breakage.
-banked_candidate = [
-    {"run": 7, "produce_per_min": 3022.8, "collected": 0, "zero_streak": 5},
-    {"run": 8, "produce_per_min": 0.0, "collected": {"egg": 13483, "honey": 89}, "zero_streak": 0},
-    {"run": 9, "produce_per_min": 2635.3, "collected": 0, "zero_streak": 1},
-    {"run": 10, "produce_per_min": 0.0, "collected": 0, "zero_streak": 2},
-    {"run": 11, "produce_per_min": 0.0, "collected": 0, "zero_streak": 3},
-]
-write_runs(base + banked_candidate)
-verdict = canary.evaluate(store, runs)
-check("score growth contradicts a collection-only candidate failure",
-      verdict["status"] == canary.WATCHING
-      and canary._candidate_zero_streak(banked_candidate) == 2,
-      str(verdict))
-
 # A release can be armed in the middle of an existing zero-collection streak. The
 # first candidate row still carries the cycle's global streak, but attribution must
 # restart at one and grow only with candidate-owned rows.
