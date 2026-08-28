@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 RUNTIME_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RUNTIME_ROOT))
 
-from farm import canary, compatibility, control, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, control, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
 
 # The process executes immutable code through release/, but edits and publishes from
 # the canonical checkout. The LaunchAgent injects FARM_PROJECT_ROOT; the fallback
@@ -79,10 +79,6 @@ STAGE_FILES = ("run.py", "monitor.py")
 MAX_PATCH_BYTES = 40_000
 MAX_FILE_BYTES = 220_000     # a file too big to send is a file too big to rewrite blind
 MAX_MODEL_OUTPUT_TOKENS = 32_000
-# A compatibility order offers one tiny adapter and cannot legally touch anything
-# else. Reserving 32k output tokens twice made a one-block outage repair cost more
-# than the remaining daily budget even though the actual answer is typically <1k.
-COMPAT_MODEL_OUTPUT_TOKENS = 8_000
 MAX_RETRY_FEEDBACK_BYTES = 4_000
 
 
@@ -195,25 +191,6 @@ def adaptive_pass_limit(
     return base, "normal quota"
 
 
-def is_runtime_compatibility_order(order: Optional[Dict[str, Any]]) -> bool:
-    """Whether containment observed a live parser failure needing the adapter."""
-    return bool(
-        order
-        and order.get("source") == "runtime_parse_drift"
-        and order.get("kind") == "runtime_parse_drift"
-        and str((order.get("provenance") or {}).get("change_class") or "")
-        == "compatibility"
-        and order.get("files") == [compatibility.ADAPTER_FILE]
-    )
-
-
-def model_output_token_limit(order: Optional[Dict[str, Any]]) -> int:
-    """Bound model output to the maximum useful scope of the admitted order."""
-    if is_runtime_compatibility_order(order):
-        return COMPAT_MODEL_OUTPUT_TOKENS
-    return MAX_MODEL_OUTPUT_TOKENS
-
-
 def budget_check(
     stored: Dict[str, Any],
     order: Optional[Dict[str, Any]] = None,
@@ -259,14 +236,9 @@ def budget_check(
 
     # Space every claimed pass, not only successful publications. Otherwise a
     # rejected patch or pre-existing gate failure retries every launchd tick.
-    # A captured runtime compatibility failure is the narrow exception: protected
-    # care cannot advance the full-run counter, so applying this gate would create
-    # a permanent recovery deadlock. Attempt count, cost, canary, source-integrity,
-    # full release gates, and remote synchronization remain independently enforced.
     last_run = stored.get("last_attempted_run", stored.get("last_authored_run"))
     current = canary.latest_run()
-    if (not is_runtime_compatibility_order(order)
-            and isinstance(last_run, int) and isinstance(current, int)):
+    if isinstance(last_run, int) and isinstance(current, int):
         if current - last_run < rules.AUTHOR_MIN_INTERVAL_RUNS:
             return "only %d run(s) since the last authored change (need %d)" % (
                 current - last_run, rules.AUTHOR_MIN_INTERVAL_RUNS,
@@ -511,7 +483,7 @@ def model_pass_reservation(order: Optional[Dict[str, Any]], root: str) -> Dict[s
     # second call uses it; this is a financial safety bound, not a usage forecast.
     input_per_attempt = len((SYSTEM_PROMPT + user).encode("utf-8")) + MAX_RETRY_FEEDBACK_BYTES
     tokens_in = input_per_attempt * rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER
-    tokens_out = model_output_token_limit(order) * rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER
+    tokens_out = MAX_MODEL_OUTPUT_TOKENS * rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER
     return {
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
@@ -637,7 +609,7 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
 
     result = llm.complete(
         SYSTEM_PROMPT, user,
-        max_output_tokens=model_output_token_limit(order),
+        max_output_tokens=MAX_MODEL_OUTPUT_TOKENS,
         run=canary.latest_run(),
         note="order=%s %s" % (order.get("id"), order.get("kind")),
         actor=ledger_actor,
@@ -687,42 +659,14 @@ GATES = (
 )
 
 
-def compatibility_overlay_proof(source_root: str) -> Dict[str, Any]:
-    """Prove whether this source can use the adapter-only release lane."""
-    active = (PROJECT / "release").resolve()
-    if not active.is_dir():
-        return {"ok": False, "reason": "no active immutable release", "changed": []}
-    return compatibility.overlay_proof(active, Path(source_root))
-
-
-def effective_change_class(order: Dict[str, Any], source_root: str) -> str:
-    """Use the narrow lane only when byte identity proves it is truly narrow.
-
-    After a canary rollback, main may contain the rejected candidate's broader
-    changes while the active release points farther back. In that case the repair
-    is still publishable, but only as an ordinary reliability release through the
-    complete gate matrix; claiming it is an adapter overlay would be unsafe.
-    """
-    requested = str((order.get("provenance") or {}).get("change_class") or "reliability")
-    if requested == "compatibility" and not compatibility_overlay_proof(source_root).get("ok"):
-        return "reliability"
-    return requested
-
-
 def compatibility_preexisting_allowed(
     order: Dict[str, Any],
     pre_existing: List[str],
     attributable: List[str],
-    source_root: Optional[str] = None,
 ) -> bool:
     """Whether release.sh may adjudicate pre-existing strategy-data failures."""
-    change_class = (
-        effective_change_class(order, source_root)
-        if source_root is not None
-        else str((order.get("provenance") or {}).get("change_class") or "")
-    )
     return (
-        change_class == "compatibility"
+        str((order.get("provenance") or {}).get("change_class") or "") == "compatibility"
         and bool(pre_existing)
         and set(pre_existing).issubset({"knowledge", "evidence"})
         and not attributable
@@ -828,7 +772,6 @@ def publish(source_root: str, order: Dict[str, Any], summary: str,
         return {"published": False, "error": "canonical release script is missing"}
     env = dict(os.environ)
     lineage = order.get("provenance") or {}
-    change_class = effective_change_class(order, source_root)
     runtime_policy = policy.runtime_context().get("policy_id")
     env.update({
         "FARM_SOURCE_ROOT": str(Path(source_root).resolve()),
@@ -836,7 +779,7 @@ def publish(source_root: str, order: Dict[str, Any], summary: str,
         "FARM_CANARY_ORDER_ID": str(order.get("id") or ""),
         "FARM_CANARY_REASON": summary[:500],
         "FARM_CANARY_COMMIT": commit or "",
-        "FARM_CANARY_CHANGE_CLASS": change_class[:40],
+        "FARM_CANARY_CHANGE_CLASS": str(lineage.get("change_class") or "reliability")[:40],
         "FARM_CANARY_HYPOTHESIS_ID": str(lineage.get("hypothesis_id") or "")[:120],
         "FARM_CANARY_POLICY_ID": str(lineage.get("policy_id") or runtime_policy or "")[:120],
         "FARM_CANARY_EXPECTED_IMPROVEMENT": str(lineage.get("expected_improvement") or 0),
@@ -1022,7 +965,7 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             pre_existing = gates_already_failing(root, failed_names)
             genuinely_ours = [n for n in failed_names if n not in pre_existing]
             compatibility_waiver = compatibility_preexisting_allowed(
-                order, pre_existing, genuinely_ours, source_root=root
+                order, pre_existing, genuinely_ours
             )
             if pre_existing and not genuinely_ours and compatibility_waiver:
                 # This is not enough to publish by itself. release.sh independently

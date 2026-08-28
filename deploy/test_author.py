@@ -27,7 +27,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "experiments"))
 
-from farm import canary, compatibility, control, llm, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, control, llm, rules, tokens, vcs, workorders  # noqa: E402
 
 import author_agent  # noqa: E402
 import research_agent  # noqa: E402
@@ -785,29 +785,6 @@ model_reserve = author_agent.max_model_pass_cost(prompt_order, sandbox)
 check("a model pass reserves both bounded attempts before claiming",
       model_reserve > tokens.cost(0, author_agent.MAX_MODEL_OUTPUT_TOKENS) * 2,
       str(model_reserve))
-runtime_compat_order = {
-    "id": "runtime-parse-leaderboard-test",
-    "source": "runtime_parse_drift",
-    "kind": "runtime_parse_drift",
-    "severity": "breaking",
-    "files": [compatibility.ADAPTER_FILE],
-    "provenance": {"change_class": "compatibility"},
-}
-compat_reserve = author_agent.max_model_pass_cost(runtime_compat_order, sandbox)
-check("narrow runtime compatibility repair reserves a bounded smaller response",
-      author_agent.model_output_token_limit(runtime_compat_order)
-      == author_agent.COMPAT_MODEL_OUTPUT_TOKENS
-      and 0 < compat_reserve < model_reserve,
-      str((author_agent.model_output_token_limit(runtime_compat_order), compat_reserve)))
-
-saved_overlay = author_agent.compatibility_overlay_proof
-author_agent.compatibility_overlay_proof = lambda root: {"ok": False, "changed": ["farm/cycle.py"]}
-check("rolled-back candidate repair falls back to the full reliability gate lane",
-      author_agent.effective_change_class(runtime_compat_order, sandbox) == "reliability")
-author_agent.compatibility_overlay_proof = lambda root: {"ok": True, "changed": [compatibility.ADAPTER_FILE]}
-check("byte-identical adapter repair retains the narrow compatibility lane",
-      author_agent.effective_change_class(runtime_compat_order, sandbox) == "compatibility")
-author_agent.compatibility_overlay_proof = saved_overlay
 
 saved = canary.latest_run
 saved_spend = author_agent.spend_today
@@ -880,12 +857,6 @@ try:
     reason = author_agent.budget_check({"last_authored_run": 50, "last_attempted_run": 98})
     check("a rejected or non-publishing pass also enforces the interval",
           reason is not None and "run" in reason, str(reason))
-    reason = author_agent.budget_check(
-        {"last_authored_run": 50, "last_attempted_run": 100},
-        runtime_compat_order, [runtime_compat_order],
-    )
-    check("contained runtime compatibility repair cannot deadlock on full-run spacing",
-          reason is None, str(reason))
     reason = author_agent.budget_check({"last_authored_run": 50})
     check("authoring is allowed once enough runs have passed",
           reason is None, str(reason))

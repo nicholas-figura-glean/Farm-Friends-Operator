@@ -46,26 +46,6 @@ for tool, parser in contract_watch.PARSER_BY_TOOL.items():
     validated.append(tool)
 check("list_farm" in validated, "compatibility gate exercised the live list_farm sample")
 
-league_sample = (
-    "🏆 Farm Friends leaderboard (by league, then lifetime produce)\n"
-    " 1. 💠 Platinum I      Nick: 252819766 lifetime produce, "
-    "16868/16875 animals, 335146984 coins, 493 🌼\n"
-    "(updated 6 min ago)\n"
-)
-league_rows = parse.parse_leaderboard(league_sample)
-check(len(league_rows) == 1
-      and league_rows[0].name == "Nick"
-      and league_rows[0].produce == 252819766
-      and league_rows[0].animals == 16868
-      and league_rows[0].coins == 335146984,
-      "league leaderboard normalization preserves semantic values", league_rows)
-legacy_rows = parse.parse_leaderboard(
-    "🏆 Farm Friends leaderboard (by lifetime produce)\n"
-    "🥇 Nick: 961 produce, 146 animals, 6 coins, 1 🌼\n"
-)
-check(len(legacy_rows) == 1 and legacy_rows[0].animals == 146,
-      "legacy leaderboard format remains unchanged", legacy_rows)
-
 # The only model-editable extension point is normalization; validation stays trusted.
 check(control.author_editable(compatibility.ADAPTER_FILE),
       "format adapter is author-editable")
@@ -168,13 +148,7 @@ with tempfile.TemporaryDirectory() as tmp:
     queue = str(root / "workorders.ndjson")
     progress_state = {
         "active": None,
-        # The cycle can defer an optional parser failure until finalization. The
-        # originating step is therefore done but explicitly unavailable.
-        "steps": [{
-            "name": "read", "status": "done",
-            "detail": {"available": False, "error": "no animals parsed"},
-        }],
-        "summary": {"error": "ParseDrift: no animals parsed from list_farm"},
+        "steps": [{"name": "read", "status": "failed"}],
     }
     error = parse.ParseDrift("no animals parsed from list_farm")
     first = compatibility.route_parse_drift(error, progress_state, raw_dir, queue)
@@ -183,8 +157,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check(first is not None and second is None and len(current) == 1,
           "runtime ParseDrift files one idempotent work order", current)
     order = next(iter(current.values()))
-    check(order.get("severity") == "breaking" and order.get("source") == "runtime_parse_drift",
-          "runtime parser failure jumps ahead of degraded and speculative work", order)
+    check(order.get("severity") == "degraded" and order.get("source") == "runtime_parse_drift",
+          "runtime parser failure outranks speculative contract work", order)
     check(order.get("files") == [compatibility.ADAPTER_FILE],
           "runtime repair cannot target the protected parser", order.get("files"))
     check((order.get("provenance") or {}).get("change_class") == "compatibility",
