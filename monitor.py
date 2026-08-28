@@ -120,6 +120,97 @@ def _launchd() -> Dict[str, Any]:
     return cycle_agent
 
 
+def _operating_mode(
+    launchd: Dict[str, Any],
+    care: Optional[Dict[str, Any]] = None,
+    retry_agent: Optional[Dict[str, Any]] = None,
+    retry: Optional[Dict[str, Any]] = None,
+    canary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Describe actual operating capacity independently of alert severity.
+
+    Launchd interval jobs are normally ``not running`` between passes, so loaded—not
+    PID presence—is the capacity signal. The care and retry agents intentionally live
+    outside the normal service registry: they survive a strategic-release rollback and
+    must therefore be projected explicitly rather than disappearing into ``down``.
+    """
+    care = care if care is not None else scheduler.status("com.nickfigura.farmfriends.care")
+    retry_agent = retry_agent if retry_agent is not None else scheduler.status("com.nickfigura.farmfriends.retry")
+    retry = retry if retry is not None else _json_object(STATE / "process_retry.json")
+    canary = canary if canary is not None else _json_object(STATE / "canary.json")
+    cycle_loaded = bool(launchd.get("loaded"))
+    supervisor_loaded = bool((launchd.get("supervisor") or {}).get("loaded"))
+    care_loaded = bool(care.get("loaded"))
+    expected = launchd.get("expected")
+    live = launchd.get("live")
+    down = list(launchd.get("down") or [])
+    all_standard = (
+        cycle_loaded
+        and supervisor_loaded
+        and isinstance(expected, int)
+        and isinstance(live, int)
+        and live >= expected
+        and not down
+    )
+
+    retry_every = 5
+    remaining = retry.get("care_runs_until_attempt")
+    if not isinstance(remaining, int):
+        remaining = retry_every
+    remaining = max(0, min(retry_every, remaining))
+    retry_progress = retry_every - remaining
+    retry_status = str(retry.get("status") or "inactive")
+    candidate = retry.get("candidate")
+    canary_watching = canary.get("status") == "watching"
+
+    if all_standard:
+        key, label, tone = "full", "Full operation", "good"
+        detail = (
+            "All %d standard loops are loaded%s"
+            % (expected, "; release canary is watching" if canary_watching else "")
+        )
+    elif cycle_loaded or supervisor_loaded:
+        key, label, tone = "partial", "Partial operation", "watch"
+        missing = ", ".join(down[:4]) if down else "one or more core loops"
+        detail = "Farm cycle capacity is available, but %s remain unavailable" % missing
+    elif care_loaded:
+        key, label, tone = "protected", "Protected care", "watch"
+        detail = (
+            "Feeding, collection, and selling continue; strategy is paused. "
+            "Full-process retry %d/%d care passes."
+            % (retry_progress, retry_every)
+        )
+    else:
+        key, label, tone = "offline", "Offline", "recovering"
+        detail = "Neither the standard farm cycle nor the protected care lane is loaded"
+
+    return {
+        "key": key,
+        "label": label,
+        "tone": tone,
+        "detail": detail,
+        "strategy": "enabled" if cycle_loaded else "paused",
+        "husbandry": "standard" if cycle_loaded else "protected" if care_loaded else "offline",
+        "cycle_loaded": cycle_loaded,
+        "supervisor_loaded": supervisor_loaded,
+        "care_loaded": care_loaded,
+        "retry_agent_loaded": bool(retry_agent.get("loaded")),
+        "standard_live": live,
+        "standard_expected": expected,
+        "standard_down": down,
+        "canary_status": canary.get("status") or "inactive",
+        "retry": {
+            "status": retry_status,
+            "attempts": int(retry.get("attempts") or 0),
+            "completed": retry_progress,
+            "every": retry_every,
+            "remaining": remaining,
+            "candidate": candidate,
+            "last_error": retry.get("last_error"),
+        },
+    }
+
+
 def _match(text: str, pattern: str) -> Optional[str]:
     found = re.search(pattern, text, re.MULTILINE)
     return found.group(1) if found else None
@@ -164,6 +255,7 @@ def _blockers(
     launchd: Dict[str, Any],
     current: Dict[str, Any],
     release: Optional[Dict[str, Any]] = None,
+    operating: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     blockers: List[Dict[str, str]] = []
     anomalies = latest.get("anomalies") or []
@@ -211,18 +303,29 @@ def _blockers(
     if latest.get("rank") not in (None, 1):
         blockers.append({"level": "recovering", "text": f"Competitive recovery active from rank #{latest.get('rank')}"})
 
+    operating = operating or {}
+    protected = operating.get("key") == "protected"
     age = _age_seconds(latest.get("ts"))
     if age is None:
         blockers.append({"level": "recovering", "text": "Scheduler is establishing the first completed farm run"})
-    elif age > CADENCE_SECONDS * 2 and not current.get("active"):
+    elif age > CADENCE_SECONDS * 2 and not current.get("active") and not protected:
         blockers.append({"level": "recovering", "text": f"Supervisor is restarting the overdue cycle ({age // 60}m since completion)"})
 
-    if not launchd.get("loaded"):
-        blockers.append({"level": "recovering", "text": "Supervisor is restoring the cycle service"})
-    if not (launchd.get("supervisor") or {}).get("loaded"):
-        blockers.append(
-            {"level": "recovering", "text": "Launchd is restoring the supervisor service"}
-        )
+    if protected:
+        retry = operating.get("retry") or {}
+        blockers.append({
+            "level": "warn",
+            "text": "Protected care lane active; strategic loops retry after %d more care pass%s"
+                    % (int(retry.get("remaining") or 0),
+                       "" if int(retry.get("remaining") or 0) == 1 else "es"),
+        })
+    else:
+        if not launchd.get("loaded"):
+            blockers.append({"level": "recovering", "text": "Supervisor is restoring the cycle service"})
+        if not (launchd.get("supervisor") or {}).get("loaded"):
+            blockers.append(
+                {"level": "recovering", "text": "Launchd is restoring the supervisor service"}
+            )
 
     # Autonomy problems belong on the overview, not only on their own tab. An operator
     # glancing at the page should not have to go looking for "the author agent is down"
@@ -336,10 +439,13 @@ def snapshot() -> Dict[str, Any]:
     launchd = _launchd()
     current = _current_intent(intents)
     release = _release_info()
+    operating = _operating_mode(launchd)
     age = _age_seconds(latest.get("ts"))
     if current["active"]:
         health = "running"
-    elif not launchd["loaded"]:
+    elif operating.get("key") == "protected":
+        health = "protected"
+    elif operating.get("key") == "offline":
         health = "offline"
     elif age is not None and age <= CADENCE_SECONDS * 2:
         health = "healthy"
@@ -370,7 +476,8 @@ def snapshot() -> Dict[str, Any]:
         "leaderboard_history": _leaderboard_history(history),
         "current": current,
         "launchd": launchd,
-        "blockers": _blockers(latest, launchd, current, release),
+        "operating_mode": operating,
+        "blockers": _blockers(latest, launchd, current, release, operating),
         "log_tail": _log_tail(),
         "release": release,
         "tokens": _tokens_summary(),
@@ -1313,6 +1420,11 @@ __OPERATOR_CSS__
   <div class="page-hero">
     <div><div class="page-kicker">Live autonomous operation</div><h2>Farm command center</h2><p>One view of the objective, the latest measured change, the decision the system made, and the evidence that the result was verified.</p><div class="delta-row" id="overview-deltas"></div></div>
     <div class="hero-verdict watch" id="overview-verdict-box"><b id="overview-verdict">Connecting</b><span id="overview-verdict-detail">Waiting for the first measured cycle</span></div>
+  </div>
+  <div class="card operating-mode-card watch" id="operating-mode-card" aria-live="polite">
+    <div class="mode-identity"><span class="mode-mark" id="operating-mode-mark">◌</span><div><div class="page-kicker">Current operating capacity</div><h2 id="operating-mode-title">Connecting</h2><p id="operating-mode-detail">Checking standard and protected farm loops.</p></div></div>
+    <div class="mode-facts"><div><small>Strategy</small><b id="operating-mode-strategy">—</b></div><div><small>Husbandry</small><b id="operating-mode-husbandry">—</b></div><div><small>Release</small><b id="operating-mode-release">—</b></div><div><small>Recovery</small><b id="operating-mode-retry">—</b></div></div>
+    <div class="mode-retry"><div><small>Five-pass recovery cadence</small><span id="operating-mode-retry-detail">Waiting for retry state</span></div><div class="mode-progress" aria-hidden="true"><i id="operating-mode-retry-bar" style="width:0%"></i></div></div>
   </div>
   <div class="hero" aria-label="Live farm summary">
     <div class="hero-cell lead"><label>Lifetime produce · live estimate</label><strong id="hero-produce">—</strong><small id="hero-produce-sub">waiting for a measured rate</small><span class="spark" id="spark-produce"></span></div>

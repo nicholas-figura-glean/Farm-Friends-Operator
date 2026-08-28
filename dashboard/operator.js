@@ -89,11 +89,15 @@ function operatorOverall(data, autonomy) {
   var detail = critical ? "Recovery guardrails are containing the condition and scheduled agents own the next action" : warning
     ? count + " bounded condition" + (count === 1 ? "" : "s") + " visible; routine production continues"
     : "Routine operation is handling itself";
-  opText("global-status", label);
-  opClass("global-status", "system-state", tone);
-  opText("autonomy-state-title", label);
-  opText("autonomy-state-detail", detail);
-  opClass("autonomy-primary", "auto-cell primary", tone);
+  var operating = data.operating_mode || {};
+  var displayLabel = operating.label || label;
+  var displayDetail = operating.detail || detail;
+  var displayTone = operating.tone || tone;
+  opText("global-status", displayLabel);
+  opClass("global-status", "system-state", displayTone);
+  opText("autonomy-state-title", displayLabel);
+  opText("autonomy-state-detail", displayDetail);
+  opClass("autonomy-primary", "auto-cell primary", displayTone);
 
   var agents = autonomy.agents || {};
   var live = agents.live, expected = agents.expected;
@@ -116,7 +120,7 @@ function operatorOverall(data, autonomy) {
   opText("autonomy-action", latest ? latest.title : "No control-plane change");
   opText("autonomy-action-detail", latest ? latest.actor + " · " + opAgoTs(latest.ts) : "Existing ledgers are quiet");
   opClass("autonomy-action-cell", "auto-cell", latest ? opTone(latest.status) : "");
-  return {tone:tone, label:label, detail:detail, farmBlockers:farmBlockers, autoBlockers:autoBlockers};
+  return {tone:displayTone, label:displayLabel, detail:displayDetail, farmBlockers:farmBlockers, autoBlockers:autoBlockers};
 }
 
 function operatorOverview(data, autonomy, overall) {
@@ -132,6 +136,30 @@ function operatorOverview(data, autonomy, overall) {
     ? "Run #" + (pipeline.run == null ? "—" : pipeline.run) + " is executing " + (pipeline.active || "startup")
     : "Last verified run #" + (latest.run == null ? "—" : latest.run) + " · " + opAgoTs(latest.ts));
   opClass("overview-verdict-box", "hero-verdict", tone);
+
+  var mode = data.operating_mode || {};
+  var retry = mode.retry || {};
+  var modeMarks = {full:"●",partial:"◐",protected:"◒",offline:"○"};
+  opText("operating-mode-mark", modeMarks[mode.key] || "◌");
+  opText("operating-mode-title", mode.label || "Operating mode unavailable");
+  opText("operating-mode-detail", mode.detail || "Waiting for standard and protected loop state.");
+  opText("operating-mode-strategy", mode.strategy || "unknown");
+  opText("operating-mode-husbandry", mode.husbandry || "unknown");
+  opText("operating-mode-release", (data.release || {}).pointer_revision || (data.release || {}).revision || "unknown");
+  var retryEvery = opN(retry.every) || 5;
+  var retryCompleted = Math.max(0, Math.min(retryEvery, opN(retry.completed) || 0));
+  var retryLabel = mode.canary_status === "watching" ? "canary watching"
+    : mode.key === "protected" ? retryCompleted + "/" + retryEvery + " care passes"
+    : retry.status || "standby";
+  opText("operating-mode-retry", retryLabel);
+  opText("operating-mode-retry-detail", mode.key === "protected"
+    ? (retry.remaining || 0) + " more completed care pass" + (Number(retry.remaining || 0) === 1 ? "" : "es") + " before full-process attempt #" + (Number(retry.attempts || 0) + 1)
+    : mode.canary_status === "watching" ? "The candidate remains provisional with automatic rollback armed"
+    : mode.key === "full" ? "All standard loops are available; recovery remains on standby"
+    : "Recovery coordinator: " + (mode.retry_agent_loaded ? "loaded" : "unavailable"));
+  var retryBar = opNode("operating-mode-retry-bar");
+  if (retryBar && retryBar.style) retryBar.style.width = (retryCompleted / retryEvery * 100) + "%";
+  opClass("operating-mode-card", "card operating-mode-card", mode.tone || "watch");
 
   var produceGain = opN(latest.our_produce_gain);
   if (produceGain == null) produceGain = opDelta(trend, "produce");

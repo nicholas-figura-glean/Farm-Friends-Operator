@@ -57,6 +57,12 @@ def _payload() -> dict:
         "updated_at": "2026-08-21T15:11:20Z",
         "cadence_seconds": 180,
         "health": "healthy",
+        "operating_mode": {"key": "full", "label": "Full operation", "tone": "good",
+                           "detail": "All 11 standard loops are loaded", "strategy": "enabled",
+                           "husbandry": "standard", "retry_agent_loaded": True,
+                           "canary_status": "healthy",
+                           "retry": {"status": "standby", "attempts": 1, "completed": 0,
+                                     "every": 5, "remaining": 5, "candidate": "20260828T185358Z"}},
         "latest": {"run": 216, "ts": "2026-08-21T15:11:56Z", "rank": 1, "animals": 11869,
                    "produce": 1410000, "units_per_chicken_min": 0.12, "max_hunger": 18,
                    "adopted": 0, "anomalies": [], "trade_coin_outflow": 0,
@@ -232,7 +238,18 @@ var RESULT = (function () {
   ok("live run: chart painted", (html("chart") || "").indexOf("<svg") >= 0);
   ok("live run: signals painted", (html("signals") || "").length > 20);
   ok("live run: overview painted", txt("last-run") === "#216", "got " + txt("last-run"));
-  ok("operator shell: healthy routine operation reads autonomous", txt("global-status") === "Autonomous", txt("global-status"));
+  ok("operating mode: full state is persistent and prominent", txt("global-status") === "Full operation" && txt("operating-mode-title") === "Full operation" && txt("operating-mode-strategy") === "enabled", txt("global-status") + " / " + txt("operating-mode-title"));
+  var PROTECTED = clone(LIVE);
+  PROTECTED.health = "protected";
+  PROTECTED.operating_mode = {key:"protected",label:"Protected care",tone:"watch",detail:"Feeding, collection, and selling continue; strategy is paused.",strategy:"paused",husbandry:"protected",retry_agent_loaded:true,canary_status:"regressed",retry:{status:"waiting",attempts:1,completed:3,every:5,remaining:2,candidate:"20260828T185358Z"}};
+  var protectedOverall = operatorOverall(PROTECTED,{}); operatorOverview(PROTECTED,{},protectedOverall);
+  ok("operating mode: protected care shows retry progress", txt("global-status") === "Protected care" && txt("operating-mode-retry") === "3/5 care passes" && (txt("operating-mode-retry-detail") || "").indexOf("2 more completed care passes") >= 0, txt("global-status") + " / " + txt("operating-mode-retry"));
+  var OFFLINE = clone(LIVE);
+  OFFLINE.health = "offline";
+  OFFLINE.operating_mode = {key:"offline",label:"Offline",tone:"recovering",detail:"Neither farm loop is loaded",strategy:"paused",husbandry:"offline",retry_agent_loaded:false,canary_status:"inactive",retry:{status:"inactive",attempts:0,completed:0,every:5,remaining:5}};
+  var offlineOverall = operatorOverall(OFFLINE,{}); operatorOverview(OFFLINE,{},offlineOverall);
+  ok("operating mode: offline state is unmistakable", txt("global-status") === "Offline" && txt("operating-mode-title") === "Offline" && txt("operating-mode-husbandry") === "offline", txt("global-status"));
+  var fullOverall = operatorOverall(LIVE,{}); operatorOverview(LIVE,{},fullOverall);
   ok("operator shell: overview explains what changed", (html("overview-deltas") || "").indexOf("Produce") >= 0 && (html("overview-deltas") || "").indexOf("Routine tokens") >= 0);
   ok("operator shell: latest cycle shows observe through verify", (html("cycle-story") || "").indexOf("Observe") >= 0 && (html("cycle-story") || "").indexOf("Verify") >= 0);
   ok("operator shell: pipeline surfaces its decision and guardrails", (txt("pipe-decision-title") || "").length > 10 && (html("pipe-guardrails") || "").indexOf("Production") >= 0);
@@ -545,6 +562,26 @@ def main() -> int:
             packaged_panels.add(panel_id.group(1))
     expected_panels = {"overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture"}
     adaptive_projection = monitor._adaptive_summary([_payload()["latest"]])
+    full_mode = monitor._operating_mode(
+        {"loaded": True, "supervisor": {"loaded": True}, "live": 11, "expected": 11, "down": []},
+        care={"loaded": False}, retry_agent={"loaded": True}, retry={"status": "standby"},
+        canary={"status": "healthy"},
+    )
+    partial_mode = monitor._operating_mode(
+        {"loaded": True, "supervisor": {"loaded": False}, "live": 10, "expected": 11, "down": ["supervisor"]},
+        care={"loaded": False}, retry_agent={"loaded": True}, retry={"status": "canary"},
+        canary={"status": "watching"},
+    )
+    protected_mode = monitor._operating_mode(
+        {"loaded": False, "supervisor": {"loaded": False}, "live": 5, "expected": 11, "down": ["cycle", "supervisor"]},
+        care={"loaded": True}, retry_agent={"loaded": True},
+        retry={"status": "waiting", "attempts": 2, "care_runs_until_attempt": 2,
+               "candidate": "candidate"}, canary={"status": "regressed"},
+    )
+    offline_mode = monitor._operating_mode(
+        {"loaded": False, "supervisor": {"loaded": False}, "live": 0, "expected": 11, "down": ["cycle", "supervisor"]},
+        care={"loaded": False}, retry_agent={"loaded": False}, retry={}, canary={},
+    )
     original_workorders_current = monitor.workorders.current
     monitor.workorders.current = lambda path: {
         "runtime-parse-list-farm": {
@@ -576,6 +613,17 @@ def main() -> int:
         ("operator stylesheet is embedded", ".autonomy-ribbon" in html and ".knowledge-flow" in html),
         ("adaptive activity is a first-class pipeline panel", 'id="adaptive-card"' in html and 'id="adaptive-events"' in html),
         ("adaptive panel styles disclose holding and resolved states", ".adaptive-card.watch" in html and ".adaptive-event.resolved" in html),
+        ("operating mode is visible globally and on Overview",
+         'id="global-status"' in html and 'id="operating-mode-card"' in html
+         and 'id="operating-mode-retry-bar"' in html),
+        ("operating mode distinguishes full, partial, protected, and offline capacity",
+         [full_mode.get("key"), partial_mode.get("key"), protected_mode.get("key"), offline_mode.get("key")]
+         == ["full", "partial", "protected", "offline"]),
+        ("protected mode publishes the five-care-pass retry countdown",
+         protected_mode.get("retry", {}).get("completed") == 3
+         and protected_mode.get("retry", {}).get("remaining") == 2
+         and protected_mode.get("strategy") == "paused"
+         and protected_mode.get("husbandry") == "protected"),
         ("adaptive server projection preserves holds and trade protection",
          adaptive_projection.get("blocked_domains") == ["offers", "trades"]
          and adaptive_projection.get("trade_coin_outflow") == 0

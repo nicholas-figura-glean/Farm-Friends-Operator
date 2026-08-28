@@ -159,6 +159,27 @@ nav.tabs button[aria-selected="true"] .tab-key { color:#a9c9b6; }
 .operator-tab .hero-cell strong { font-size:25px; }
 .operator-tab .hero-cell small { font-size:10px; }
 .operator-tab .spark { height:21px; }
+.operating-mode-card { grid-column:1/-1; display:grid; grid-template-columns:minmax(250px,1.25fr) minmax(390px,1.5fr) minmax(210px,.8fr); gap:16px; align-items:center; overflow:hidden; border-color:#476453; background:linear-gradient(120deg,#14291f,#101a16 62%); }
+.operating-mode-card.good { border-color:#4d775e; box-shadow:inset 3px 0 0 var(--green); }
+.operating-mode-card.watch { border-color:#70613b; box-shadow:inset 3px 0 0 var(--yellow); background:linear-gradient(120deg,#292515,#151912 62%); }
+.operating-mode-card.recovering { border-color:#70433d; box-shadow:inset 3px 0 0 var(--red); background:linear-gradient(120deg,#291917,#171313 62%); }
+.mode-identity { display:grid; grid-template-columns:44px minmax(0,1fr); gap:12px; align-items:center; }
+.mode-mark { width:44px; height:44px; display:grid; place-items:center; border:1px solid currentColor; border-radius:50%; color:var(--green); font-size:22px; background:#0d1813; }
+.operating-mode-card.watch .mode-mark { color:var(--yellow); }
+.operating-mode-card.recovering .mode-mark { color:var(--red); }
+.mode-identity h2 { margin:2px 0 3px; font-size:20px; }
+.mode-identity p { margin:0; color:var(--muted); font-size:10.5px; line-height:1.45; }
+.mode-facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid var(--line); border-radius:11px; overflow:hidden; }
+.mode-facts > div { min-width:0; padding:9px 10px; border-right:1px solid var(--line); background:#0b1511aa; }
+.mode-facts > div:last-child { border-right:0; }
+.mode-facts small,.mode-retry small { display:block; color:#82998b; font-size:8px; font-weight:750; letter-spacing:.09em; text-transform:uppercase; }
+.mode-facts b { display:block; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; text-transform:capitalize; }
+.mode-retry { min-width:0; }
+.mode-retry span { display:block; margin-top:3px; color:var(--muted); font-size:9.5px; line-height:1.35; }
+.mode-progress { height:6px; margin-top:8px; overflow:hidden; border-radius:99px; background:#ffffff0c; }
+.mode-progress i { display:block; height:100%; border-radius:inherit; background:var(--green); transition:width .25s ease; }
+.operating-mode-card.watch .mode-progress i { background:var(--yellow); }
+.operating-mode-card.recovering .mode-progress i { background:var(--red); }
 .overview-farm { grid-column:span 8 !important; }
 .cycle-story-card { grid-column:span 4; }
 .cycle-story-card .lifecycle { grid-template-columns:1fr; }
@@ -462,6 +483,10 @@ nav.tabs button[aria-selected="true"] .tab-key { color:#a9c9b6; }
   .run-command > section { border-right:0; border-bottom:1px solid var(--line); }
   .run-command > section:last-child { grid-column:auto; border-top:0; border-bottom:0; }
   .page-hero .hero-verdict { min-width:0; text-align:left; }
+  .operating-mode-card { grid-template-columns:1fr; }
+  .mode-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .mode-facts > div:nth-child(2) { border-right:0; }
+  .mode-facts > div:nth-child(-n+2) { border-bottom:1px solid var(--line); }
   .overview-farm,.cycle-story-card,.overview-support,.strategy-card,.trend-card,
   .latest-remedy,.safeguards,.healing-classes-card,.healing-runs-card,
   .history-story,.history-method,.finding-model,.strategy-brief { grid-column:1/-1 !important; }
