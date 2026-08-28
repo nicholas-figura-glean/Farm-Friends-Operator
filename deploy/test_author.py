@@ -523,7 +523,61 @@ verdict = canary.evaluate(store, runs)
 check("one short-interval zero remains watching", verdict["status"] == canary.WATCHING, str(verdict))
 write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0, "zero_streak": 3}])
 verdict = canary.evaluate(store, runs)
-check("a confirmed zero streak reverts at once", verdict["status"] == canary.REGRESSED, str(verdict))
+check("a persisted global streak cannot replace candidate-owned evidence",
+      verdict["status"] == canary.WATCHING, str(verdict))
+check("the standalone breakage classifier still understands historical rows",
+      canary._looks_broken({"zero_streak": 3, "collected": 0}))
+
+# A release can be armed in the middle of an existing zero-collection streak. The
+# first candidate row still carries the cycle's global streak, but attribution must
+# restart at one and grow only with candidate-owned rows.
+scope_store = os.path.join(can, "scope-canary.json")
+scope_hist = os.path.join(can, "scope-canary.ndjson")
+scope_queue = os.path.join(can, "workorders.ndjson")
+preexisting = base + [
+    {"run": 7, "animals": 100, "produce_per_min": 0.0, "collected": 0, "zero_streak": 1},
+    {"run": 8, "animals": 100, "produce_per_min": 100.0, "collected": 0, "zero_streak": 2},
+    {"run": 9, "animals": 100, "produce_per_min": 0.0, "collected": 0, "zero_streak": 3},
+]
+write_runs(preexisting)
+scope_armed = canary.arm(
+    "revScoped", "revA", reason="candidate scope", order_id="scope-order",
+    commit="a" * 40, files=["monitor.py", "farm/canary.py"],
+    store=scope_store, history=scope_hist, run_history=runs,
+)
+check("arming retains only editable repair provenance",
+      scope_armed.get("files") == ["monitor.py"], str(scope_armed.get("files")))
+first_candidate = {
+    "run": 10, "animals": 100, "produce_per_min": 0.0,
+    "collected": 0, "zero_streak": 4,
+    "anomalies": ["no produce collected in 4 consecutive runs"],
+}
+write_runs(preexisting + [first_candidate])
+scoped = canary.evaluate(scope_store, runs)
+check("the first candidate run does not inherit a pre-release zero streak",
+      scoped["status"] == canary.WATCHING and scoped["runs_observed"] == 1, str(scoped))
+second_candidate = dict(first_candidate, run=11, zero_streak=5)
+third_candidate = dict(first_candidate, run=12, zero_streak=6)
+write_runs(preexisting + [first_candidate, second_candidate, third_candidate])
+scoped_bad = canary.evaluate(scope_store, runs)
+check("three candidate-owned zero runs still trigger rollback",
+      scoped_bad["status"] == canary.REGRESSED
+      and scoped_bad.get("failure_kind") == "candidate_zero_production"
+      and scoped_bad.get("candidate_zero_streak") == 3,
+      str(scoped_bad))
+queued = canary._regression_order(scope_armed, scoped_bad, scope_queue)
+queued_again = canary._regression_order(scope_armed, scoped_bad, scope_queue)
+queued_row = workorders.current(scope_queue).get(queued.get("id")) or {}
+check("a genuine canary regression files one idempotent work order",
+      queued.get("created") is True and queued_again.get("created") is False
+      and queued_row.get("status") == workorders.OPEN,
+      "%s %s %s" % (queued, queued_again, queued_row))
+check("the regression order carries candidate evidence and editable files",
+      queued_row.get("source") == "release_canary"
+      and queued_row.get("kind") == "canary_regression"
+      and queued_row.get("files") == ["monitor.py"]
+      and (queued_row.get("detail") or {}).get("candidate_zero_streak") == 3,
+      str(queued_row))
 
 # Collection changed from a scalar to a per-produce mapping. A transport retry on
 # a productive run is not a hard failure, while an all-zero mapping still is.
@@ -609,8 +663,19 @@ check("rollback restart probes and kickstarts the monitor",
       "%s %s" % (_restart_result, _restart_calls))
 
 rev = tempfile.mkdtemp()
-os.makedirs(os.path.join(rev, "releases", "revA"))
-os.makedirs(os.path.join(rev, "releases", "revB"))
+os.makedirs(os.path.join(rev, "releases", "revA", "farm"))
+os.makedirs(os.path.join(rev, "releases", "revB", "farm"))
+with open(os.path.join(rev, "releases", "revA", "monitor.py"), "w") as handle:
+    handle.write("old dashboard\n")
+with open(os.path.join(rev, "releases", "revB", "monitor.py"), "w") as handle:
+    handle.write("new dashboard\n")
+with open(os.path.join(rev, "releases", "revA", "farm", "canary.py"), "w") as handle:
+    handle.write("old protected gate\n")
+with open(os.path.join(rev, "releases", "revB", "farm", "canary.py"), "w") as handle:
+    handle.write("new protected gate\n")
+check("release provenance records changed editable files only",
+      canary.release_editable_diff(rev, "revB", "revA") == ["monitor.py"],
+      str(canary.release_editable_diff(rev, "revB", "revA")))
 os.symlink(os.path.join(rev, "releases", "revB"), os.path.join(rev, "release"))
 
 out = canary.revert("revA", rev)

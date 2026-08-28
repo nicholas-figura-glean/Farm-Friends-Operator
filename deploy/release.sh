@@ -312,6 +312,7 @@ armed = canary.arm(
     hypothesis_id=os.environ.get("FARM_CANARY_HYPOTHESIS_ID", "")[:120],
     policy_id=os.environ.get("FARM_CANARY_POLICY_ID", "")[:120],
     expected_improvement=float(os.environ.get("FARM_CANARY_EXPECTED_IMPROVEMENT", "0") or 0),
+    files=canary.release_editable_diff(root, revision, previous),
     store=str(root / canary.STORE),
     history=str(root / canary.HISTORY),
     run_history=str(root / canary.RUN_HISTORY),

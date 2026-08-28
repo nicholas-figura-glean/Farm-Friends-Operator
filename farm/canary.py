@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import compaction, control, evaluation, rules
+from . import compaction, control, evaluation, rules, workorders
 
 STORE = os.path.join("state", "canary.json")
 # The real project root. Used only to decide whether a caller is operating on live
@@ -194,6 +194,47 @@ def latest_run(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[int]:
     return int(rows[-1]["run"]) if rows else None
 
 
+def release_editable_diff(project: Any, revision: str, previous: str) -> List[str]:
+    """Editable implementation files that differ across the release boundary.
+
+    The release directories are immutable, so this is stronger provenance than a
+    dirty working-tree diff. Protected control-plane files are deliberately omitted:
+    a regression involving one of those must remain visible for manual repair rather
+    than granting the author agent permission to rewrite its own judge.
+    """
+    root = Path(project)
+    candidate = root / "releases" / str(revision)
+    rollback = root / "releases" / str(previous)
+    relative: set[str] = set()
+    for tree in (candidate, rollback):
+        if not tree.is_dir():
+            continue
+        try:
+            for path in tree.rglob("*"):
+                if path.is_file() and not path.is_symlink():
+                    rel = path.relative_to(tree).as_posix()
+                    if control.author_editable(rel):
+                        relative.add(rel)
+        except OSError:
+            continue
+
+    changed: List[str] = []
+    for rel in sorted(relative):
+        left = candidate / rel
+        right = rollback / rel
+        try:
+            if not left.is_file() or not right.is_file() or left.read_bytes() != right.read_bytes():
+                changed.append(rel)
+        except OSError:
+            changed.append(rel)
+    priority = {
+        "farm/format_compat.py": 0,
+        "farm/parse.py": 1,
+        "monitor.py": 2,
+    }
+    return sorted(changed, key=lambda rel: (priority.get(rel, 10), rel))
+
+
 def arm(
     revision: str,
     previous: str,
@@ -204,6 +245,7 @@ def arm(
     hypothesis_id: str = "",
     policy_id: str = "",
     expected_improvement: float = 0.0,
+    files: Optional[List[str]] = None,
     store: str = STORE,
     history: str = HISTORY,
     run_history: str = RUN_HISTORY,
@@ -232,6 +274,8 @@ def arm(
         "hypothesis_id": hypothesis_id,
         "policy_id": policy_id,
         "expected_improvement": max(0.0, float(expected_improvement or 0.0)),
+        "files": [control.normalize_path(str(path)) for path in (files or [])
+                  if control.author_editable(str(path))],
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
         "baseline_rate": baseline_rate(runs),
@@ -316,13 +360,23 @@ def evaluate(
 
     # A run that ends in a hard failure is decisive on its own: the canary exists
     # to catch exactly this, and waiting for a rate average would keep broken code
-    # live for several more cycles.
-    broken = [r for r in after if _looks_broken(r)]
+    # live for several more cycles. ``zero_streak`` in a run row spans releases,
+    # however, so derive that signal strictly from candidate rows. Otherwise the
+    # first candidate run can inherit an old streak and be blamed for pre-flip state.
+    broken: List[tuple[Dict[str, Any], str, int]] = []
+    for index, row in enumerate(after):
+        candidate_streak = _candidate_zero_streak(after[: index + 1])
+        failure = _breakage(row, zero_streak=candidate_streak)
+        if failure:
+            broken.append((row, failure, candidate_streak))
     if broken:
+        row, failure, candidate_streak = broken[0]
         verdict["status"] = REGRESSED
+        verdict["failure_kind"] = failure
+        verdict["candidate_zero_streak"] = candidate_streak
         verdict["reason"] = "run %s failed under the new release: %s" % (
-            broken[0].get("run"),
-            ", ".join(str(a) for a in (broken[0].get("anomalies") or [])[:3]) or "no produce recorded",
+            row.get("run"),
+            ", ".join(str(a) for a in (row.get("anomalies") or [])[:3]) or failure,
         )
         return verdict
 
@@ -406,22 +460,89 @@ def _quantity(value: Any) -> float:
         return 0.0
 
 
-def _looks_broken(row: Dict[str, Any]) -> bool:
+def _candidate_zero_streak(rows: List[Dict[str, Any]]) -> int:
+    """Trailing no-collection streak bounded to rows owned by this candidate."""
+    streak = 0
+    for row in reversed(rows):
+        if _quantity(row.get("collected")) > 0:
+            break
+        streak += 1
+    return streak
+
+
+def _breakage(row: Dict[str, Any], zero_streak: Optional[int] = None) -> str:
+    """Classify decisive release breakage without absorbing pre-release state."""
+    streak = int(_quantity(row.get("zero_streak"))) if zero_streak is None else int(zero_streak)
+    if streak >= 3:
+        return "candidate_zero_production"
+    if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
+        return "core_transport_or_parse_failure"
+    return ""
+
+
+def _looks_broken(row: Dict[str, Any], zero_streak: Optional[int] = None) -> bool:
     """Did this run fail outright?
 
     Deliberately narrow. Risk events (wolves, sickness) are expected stochastic
     losses and must not count, or the canary would revert good releases every time
     a wolf turned up -- the precise confusion POSTMORTEM-run377 warns about.
     """
-    # One zero-rate run is not decisive: an explicitly accelerated cycle can finish
-    # before the next production tick while still collecting and verifying normally.
-    # The cycle already maintains zero_streak across real observation windows, so use
-    # its confirmed three-run signal instead of confusing cadence with parser failure.
-    if _quantity(row.get("zero_streak")) >= 3:
-        return True
-    if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
-        return True
-    return False
+    return bool(_breakage(row, zero_streak=zero_streak))
+
+
+def _regression_order(
+    record: Dict[str, Any],
+    verdict: Dict[str, Any],
+    queue: str,
+) -> Dict[str, Any]:
+    """File one durable repair order for a genuine candidate regression."""
+    identity = str(record.get("order_id") or record.get("commit") or record.get("revision") or "unknown")
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in identity).strip("-")[:120]
+    order_id = "canary-regression-%s" % (slug or "unknown")
+    files = [control.normalize_path(str(path)) for path in (record.get("files") or [])
+             if control.author_editable(str(path))]
+    change = {
+        "id": order_id,
+        "kind": "canary_regression",
+        "severity": "breaking",
+        "summary": "Release %s regressed: %s" % (
+            record.get("revision"), str(verdict.get("reason") or "unknown failure")[:260]
+        ),
+        "detail": {
+            "revision": record.get("revision"),
+            "previous": record.get("previous"),
+            "commit": record.get("commit"),
+            "originating_order": record.get("order_id"),
+            "failure_kind": verdict.get("failure_kind"),
+            "candidate_zero_streak": verdict.get("candidate_zero_streak"),
+            "verdict": dict(verdict),
+        },
+        "sites": files,
+        "we_use_it": True,
+    }
+    submitted = workorders.submit(
+        change,
+        source="release_canary",
+        intent=(
+            "Repair the implementation regression observed only after release %s. "
+            "Use the captured candidate-scoped verdict; do not weaken canary, safety, "
+            "rollback, cost, or protected-file controls."
+        ) % record.get("revision"),
+        acceptance=[
+            "the captured candidate regression is reproduced by a deterministic test",
+            "the candidate completes clean post-arm runs without suppressing genuine failures",
+            "the full guarded release matrix passes",
+        ],
+        files=files,
+        path=queue,
+        provenance={
+            "change_class": "reliability",
+            "rejected_revision": str(record.get("revision") or ""),
+            "rejected_commit": str(record.get("commit") or ""),
+        },
+    )
+    current = workorders.current(queue).get(order_id) or {}
+    return {"id": order_id, "created": submitted is not None, "status": current.get("status")}
 
 
 def resolve(
@@ -466,6 +587,11 @@ def resolve(
                 # any GitHub bookkeeping failure explicit in the immutable event so
                 # an operator never mistakes a local inverse for a synchronized one.
                 outcome["inverse_push_error"] = inverse["error"]
+        queue = os.path.join(os.path.dirname(store), os.path.basename(workorders.QUEUE))
+        try:
+            outcome["work_order"] = _regression_order(record, verdict, queue)
+        except Exception as exc:  # noqa: BLE001 - rollback remains authoritative
+            outcome["work_order_error"] = str(exc)[:200]
 
     # Clear either way. A regressed canary must not stay armed, or the next
     # supervisor pass would try to revert again and walk the pointer backwards.
