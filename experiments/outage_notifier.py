@@ -165,7 +165,7 @@ def adopt_slack_intel(previous: Dict[str, Any], intel: Dict[str, Any]) -> Dict[s
 
 
 def claim_outage_notification(state: Dict[str, Any], now: str) -> Dict[str, Any]:
-    """Durably reserve the incident's sole John mention before network delivery."""
+    """Reserve the sole John mention immediately before configured delivery."""
     claimed = dict(state)
     claimed.update({
         "outage_notification_claimed": True,
@@ -173,6 +173,30 @@ def claim_outage_notification(state: Dict[str, Any], now: str) -> Dict[str, Any]
         "announced": False,
     })
     return claimed
+
+
+def release_retryable_configuration_claim(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a pre-delivery configuration failure back to retryable state.
+
+    A missing or invalid webhook proves that no request reached Slack, so preserving
+    the non-idempotent delivery claim would suppress a notification that definitely
+    was not sent. Network delivery failures remain claimed because their outcome is
+    ambiguous and an automatic retry could duplicate the John mention.
+    """
+    error = str(state.get("delivery_error") or "")
+    retryable = (
+        error.startswith("no Slack webhook configured")
+        or error.startswith("Slack webhook file")
+        or error.startswith("Slack webhook must")
+        or error.startswith("Slack webhook URL")
+    )
+    if not retryable or state.get("announced") or not state.get("outage_notification_claimed"):
+        return state
+    released = dict(state)
+    released["outage_notification_claimed"] = False
+    released.pop("outage_notification_claimed_ts", None)
+    released["delivery_error_kind"] = "configuration"
+    return released
 
 
 def decide(
@@ -189,6 +213,7 @@ def decide(
     previous_status = str(previous.get("status") or "healthy")
     previous_announced = bool(previous.get("announced"))
     previous_claimed = bool(previous.get("outage_notification_claimed"))
+    recovery_pending = bool(previous.get("recovery_notification_pending"))
     if not local.get("ok"):
         state["local_issue_ts"] = now
         state["local_blocked"] = True
@@ -224,6 +249,8 @@ def decide(
             "incident_id": previous.get("incident_id") or _incident_id(first),
             "announced": previous_announced,
             "outage_notification_claimed": previous_claimed,
+            "recovery_notification_pending": False,
+            "recovered_incident_id": None,
         })
         if confirmed and not previous_claimed:
             return state, "outage"
@@ -252,22 +279,28 @@ def decide(
             "announced": previous_announced,
             "outage_notification_claimed": previous_claimed,
             "outage_kind": "production_stall",
+            "recovery_notification_pending": False,
+            "recovered_incident_id": None,
         })
         if not previous_claimed:
             return state, "outage"
         return state, None
 
     recovered = previous_status == "outage" and previous_announced
+    recovery_pending = recovered or recovery_pending
     state.update({
         "status": "healthy",
         "announced": False,
         "outage_notification_claimed": False,
-        "recovered_incident_id": previous.get("incident_id") if recovered else None,
+        "recovery_notification_pending": recovery_pending,
+        "recovered_incident_id": (
+            previous.get("incident_id") if recovered else previous.get("recovered_incident_id")
+        ) if recovery_pending else None,
         "first_failure_ts": None,
         "incident_id": None,
         "outage_kind": None,
     })
-    return state, "recovered" if recovered else None
+    return state, "recovered" if recovery_pending else None
 
 
 def _local_proof(local: Dict[str, Any]) -> str:
@@ -276,29 +309,24 @@ def _local_proof(local: Dict[str, Any]) -> str:
 
 
 def outage_message(state: Dict[str, Any], latest: Dict[str, Any]) -> str:
-    kind = "lifetime produce has stayed flat" if state.get("outage_kind") == "production_stall" else "the farm endpoint has failed repeated read-only checks"
+    trouble = "production has stopped moving" if state.get("outage_kind") == "production_stall" else "the leaderboard gate has stopped answering"
     runway = rules.feed_buffer_minutes(int(latest.get("feed") or 0), int(latest.get("animals") or 0))
     return (
-        "<@%s> — 🚨 *Farm Friends outage confirmed* — %s.\n"
-        "• Incident: `%s` (first seen %s)\n"
-        "• Local setup cleared first: %s\n"
-        "• Last good run: #%s, rank #%s, %s produce, %s animals, %.0f min feed runway\n"
-        "• The supervisor and recovery loops are still hitched up and will keep testing the fence. I’ll post again when production moves. 🌾"
+        "<@%s> 🚨🌾 *The farm gate is down again* — %s.\n"
+        "Last safe count: rank #%s, %s produce, %s animals, and about %.0f minutes of feed. 🐓\n"
+        "The ranch hands are still testing the fence. I’ll holler when the pasture starts moving again. 🛠️🚜"
         % (
-            JOHN_USER_ID, kind, state.get("incident_id"), state.get("first_failure_ts"),
-            _local_proof(state.get("local") or {}), latest.get("run"), latest.get("rank"),
-            latest.get("produce"), latest.get("animals"), runway,
+            JOHN_USER_ID, trouble, latest.get("rank"), latest.get("produce"),
+            latest.get("animals"), runway,
         )
     )
 
 
 def recovery_message(state: Dict[str, Any], latest: Dict[str, Any]) -> str:
     return (
-        "🌤️ *Farm Friends recovery confirmed* — the gate is answering and lifetime produce is moving again.\n"
-        "• Farm is back at rank #%s with %s lifetime produce\n"
-        "• Latest completed run: #%s; hunger %s; feed %s\n"
-        "The rig checked the line, found the pasture moving, and put the regular cycle back to work. 🐓🛠️"
-        % (latest.get("rank"), state.get("last_score") or latest.get("produce"), latest.get("run"), latest.get("max_hunger"), latest.get("feed"))
+        "🌤️🚜 *The pasture is moving again!* Farm Friends is back at rank #%s with %s lifetime produce.\n"
+        "The gate answered, the ranch hands checked the herd, and the regular farm loop is running again. 🐓🌾"
+        % (latest.get("rank"), state.get("last_score") or latest.get("produce"))
     )
 
 
@@ -312,6 +340,7 @@ def main() -> int:
         return 0
 
     previous = adopt_slack_intel(read_json(STORE), read_json(SLACK_INTEL))
+    previous = release_retryable_configuration_claim(previous)
     local = local_setup_checks()
     probe = remote_probe(str(previous.get("farmer") or "Nick")) if local.get("ok") else {"ok": False, "error": "local setup not cleared"}
     latest = _latest()
@@ -321,24 +350,57 @@ def main() -> int:
 
     if event:
         message = outage_message(state, latest) if event == "outage" else recovery_message(state, latest)
-        if event == "outage":
-            # Persist before the non-idempotent webhook call. If Slack accepts the
-            # message but the response is lost, the next pass still cannot mention
-            # John again. A failed claim requires operator review, never auto-retry.
-            state = claim_outage_notification(state, utcnow())
-            write_json(STORE, state)
-        try:
-            notify.send(message)
-            state["announced"] = event == "outage"
-            state["last_notification_ts"] = utcnow()
-            state["last_notification_event"] = event
-            incident_id = state.get("incident_id") or state.get("recovered_incident_id")
-            state.pop("delivery_error", None)
-            append_event(event, {"incident_id": incident_id, "run": latest.get("run")})
-            ledger.record("notification.%s" % event, {"channel": CHANNEL_NAME, "incident_id": incident_id}, actor="outage_notifier", run=latest.get("run"))
-        except (notify.NotificationConfigError, notify.NotificationDeliveryError) as exc:
-            state["delivery_error"] = str(exc)
-            append_event("delivery_failed", {"kind": event, "error": str(exc)})
+        config = notify.configured()
+        state["delivery_attempts"] = int(state.get("delivery_attempts") or 0) + 1
+        state["last_delivery_attempt_ts"] = utcnow()
+        if not config.get("ok"):
+            # No request can have reached Slack, so leave the incident unclaimed.
+            # The five-minute job cadence provides a bounded retry once the approved
+            # app's webhook is installed without risking duplicate channel posts.
+            state["delivery_error"] = str(config.get("detail") or "Slack notification is not configured")
+            state["delivery_error_kind"] = "configuration"
+            if event == "outage":
+                state["outage_notification_claimed"] = False
+                state.pop("outage_notification_claimed_ts", None)
+            append_event("delivery_failed", {
+                "kind": event, "error": state["delivery_error"], "retryable": True,
+            })
+        else:
+            if event == "outage":
+                # Persist immediately before the non-idempotent webhook call. A
+                # network failure can be ambiguous, so only that case keeps the
+                # claim and requires adoption/operator review before another post.
+                state = claim_outage_notification(state, utcnow())
+                write_json(STORE, state)
+            try:
+                notify.send(message)
+                state["announced"] = event == "outage"
+                state["recovery_notification_pending"] = False
+                state["last_notification_ts"] = utcnow()
+                state["last_notification_event"] = event
+                incident_id = state.get("incident_id") or state.get("recovered_incident_id")
+                state.pop("delivery_error", None)
+                state.pop("delivery_error_kind", None)
+                append_event(event, {"incident_id": incident_id, "run": latest.get("run")})
+                ledger.record("notification.%s" % event, {"channel": CHANNEL_NAME, "incident_id": incident_id}, actor="outage_notifier", run=latest.get("run"))
+            except notify.NotificationConfigError as exc:
+                # A configuration race still proves no valid Slack request was made.
+                state["delivery_error"] = str(exc)
+                state["delivery_error_kind"] = "configuration"
+                if event == "outage":
+                    state["outage_notification_claimed"] = False
+                    state.pop("outage_notification_claimed_ts", None)
+                append_event("delivery_failed", {
+                    "kind": event, "error": str(exc), "retryable": True,
+                })
+            except notify.NotificationDeliveryError as exc:
+                state["delivery_error"] = str(exc)
+                state["delivery_error_kind"] = "ambiguous_delivery"
+                if event == "recovered":
+                    state["recovery_notification_pending"] = False
+                append_event("delivery_failed", {
+                    "kind": event, "error": str(exc), "retryable": False,
+                })
     write_json(STORE, state)
     print("OUTAGE NOTIFIER status=%s event=%s local=%s delivery=%s" % (
         state.get("status"), event or "none", "ok" if local.get("ok") else "blocked",

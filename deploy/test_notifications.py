@@ -106,7 +106,17 @@ check(held_open["status"] == "outage" and held_open["announced"] and event is No
 pending_incident = {"status": "outage", "announced": False, "outage_notification_claimed": True, "incident_id": "farm-pending"}
 held_pending, event = outage_notifier.decide(pending_incident, local_bad, {"ok": False}, latest, "2026-08-27T00:02:00Z")
 check(held_pending["status"] == "outage" and held_pending["outage_notification_claimed"] and event is None,
-      "a claimed John mention survives a local verifier fault without retry")
+      "an ambiguous in-flight John mention survives a local verifier fault without retry")
+retryable_config = dict(
+    pending_incident,
+    delivery_error="no Slack webhook configured; write a mode-0600 secret",
+)
+released = outage_notifier.release_retryable_configuration_claim(retryable_config)
+check(not released["outage_notification_claimed"] and released["delivery_error_kind"] == "configuration",
+      "a proven pre-delivery configuration failure releases the incident for retry")
+ambiguous = dict(pending_incident, delivery_error="Slack delivery failed: TimeoutError")
+check(outage_notifier.release_retryable_configuration_claim(ambiguous)["outage_notification_claimed"],
+      "an ambiguous network outcome stays claimed to prevent duplicate alerts")
 
 state, event = outage_notifier.decide({}, local_ok, {"ok": False, "error": "down"}, latest, "2026-08-27T00:00:00Z")
 check(state["status"] == "suspect" and event is None,
@@ -116,14 +126,21 @@ check(state["status"] == "outage" and event == "outage" and state.get("incident_
       "two failed remote checks confirm one incident")
 claimed = outage_notifier.claim_outage_notification(state, "2026-08-27T00:05:01Z")
 check(claimed["outage_notification_claimed"] and not claimed["announced"],
-      "the sole John mention is claimed before non-idempotent delivery")
+      "the sole John mention is claimed only at the configured delivery boundary")
 claimed, event = outage_notifier.decide(claimed, local_ok, {"ok": False, "error": "still down"}, latest, "2026-08-27T00:10:00Z")
 check(event is None and claimed["status"] == "outage",
-      "a claimed incident is never automatically posted again")
+      "an ambiguous claimed incident is never automatically posted again")
 announced = dict(claimed, announced=True)
 state, event = outage_notifier.decide(announced, local_ok, {"ok": True, "score": 1001, "rank": 1}, latest, "2026-08-27T00:15:00Z")
-check(state["status"] == "healthy" and event == "recovered" and state.get("recovered_incident_id"),
-      "a successful probe closes and identifies an announced incident")
+check(state["status"] == "healthy" and event == "recovered" and state.get("recovered_incident_id")
+      and state["recovery_notification_pending"],
+      "a successful probe keeps recovery delivery pending until acknowledged")
+state, event = outage_notifier.decide(state, local_ok, {"ok": True, "score": 1002, "rank": 1}, latest, "2026-08-27T00:20:00Z")
+check(state["status"] == "healthy" and event == "recovered" and state["recovery_notification_pending"],
+      "an undelivered recovery is retried on the bounded notifier cadence")
+state["recovery_notification_pending"] = False
+state, event = outage_notifier.decide(state, local_ok, {"ok": True, "score": 1003, "rank": 1}, latest, "2026-08-27T00:25:00Z")
+check(event is None, "an acknowledged recovery is not posted again")
 
 flat = {"status": "healthy", "last_score": 1000, "flat_score_checks": 0}
 flat, event = outage_notifier.decide(flat, local_ok, {"ok": True, "score": 1000, "rank": 1}, latest, "2026-08-27T00:00:00Z")
