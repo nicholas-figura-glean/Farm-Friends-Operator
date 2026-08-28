@@ -925,7 +925,11 @@ def do_self_test() -> int:
     checks = 0
     failures = []
     fixtures = {
-        "farm": ["fixtures/start_list_farm.json", "fixtures/live_farm.json"],
+        "farm": [
+            "fixtures/start_list_farm.json",
+            "fixtures/live_farm.json",
+            "fixtures/summarized_list_farm.json",
+        ],
         "board": ["fixtures/start_leaderboard.json", "fixtures/live_leaderboard.json"],
         "collect": ["fixtures/collect.json", "fixtures/live_collect.json"],
         "sell": ["fixtures/sell_egg.json", "fixtures/live_sell_eggs.json"],
@@ -947,6 +951,47 @@ def do_self_test() -> int:
                 fn[kind](text(path))
             except Exception as exc:  # noqa: BLE001
                 failures.append("%s/%s: %s" % (kind, path, exc))
+    # The server compresses large farms into authoritative totals plus samples.
+    # Pin the distinction so a 288k herd can never be mistaken for the 25 rows
+    # shown "up close" or expanded back into hundreds of thousands of objects.
+    summary_farm = parse.parse_farm(text("fixtures/summarized_list_farm.json"))
+    checks += 1
+    if summary_farm.animal_count != 288593:
+        failures.append("summarized herd total was not authoritative")
+    checks += 1
+    if summary_farm.counts_by_kind.get("chicken") != 287353:
+        failures.append("summarized species counts were not retained")
+    checks += 1
+    if len(summary_farm.animals) != 3 or not summary_farm.animals_summarized:
+        failures.append("representative animals were confused with the full herd")
+    checks += 1
+    if summary_farm.max_hunger != 6 or summary_farm.feed != 8657835:
+        failures.append("summarized farm lost sampled hunger or inventory")
+    checks += 1
+    if summary_farm.plot_total != 493 or summary_farm.plots[0].crop != "wildflowers":
+        failures.append("summarized fields were not retained")
+    checks += 1
+    if len(summary_farm.incoming) != 1 or len(summary_farm.outgoing_recipients) != 1:
+        failures.append("summarized farm lost trade direction")
+    checks += 1
+    try:
+        parse.parse_farm(
+            text("fixtures/summarized_list_farm.json").replace(
+                "Animals (288593 total", "Animals (288594 total"
+            )
+        )
+        mismatch_rejected = False
+    except parse.ParseDrift:
+        mismatch_rejected = True
+    if not mismatch_rejected:
+        failures.append("summarized herd count mismatch did not fail closed")
+    checks += 1
+    projected_summary = cycle._project(
+        summary_farm, {"adopted": 200000, "sold": {}, "feed_bought": 0}, summary_farm.coins
+    )
+    if projected_summary.animal_count != 488593 or len(projected_summary.animals) != 3:
+        failures.append("summarized projection materialized or lost adopted animals")
+
     # adoption responses (one JSON-RPC envelope per line)
     if os.path.exists("fixtures/adoptions.ndjson"):
         import json as _json

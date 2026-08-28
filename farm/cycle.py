@@ -141,20 +141,30 @@ def _project(state: parse.Farm, actions: Dict[str, Any], coins: int) -> parse.Fa
         plots=list(state.plots),
         inventory=dict(state.inventory),
         trades=list(state.trades),
+        animal_total=state.animal_total,
+        animal_counts=dict(state.animal_counts),
+        plot_total=state.plot_total,
     )
-    next_id = max([a.id for a in state.animals], default=0)
-    for i in range(int(actions.get("adopted") or 0)):
-        projected.animals.append(
-            parse.Animal(
-                id=next_id + 1 + i,
-                name="projected",
-                kind=rules.PRIMARY_KIND,
-                mood="content",
-                hunger=0,
-                happiness=100,
-                ready=0,
-            )
+    adopted = int(actions.get("adopted") or 0)
+    if projected.animals_summarized:
+        projected.animal_total = state.animal_count + adopted
+        projected.animal_counts[rules.PRIMARY_KIND] = (
+            projected.animal_counts.get(rules.PRIMARY_KIND, 0) + adopted
         )
+    else:
+        next_id = max([a.id for a in state.animals], default=0)
+        for i in range(adopted):
+            projected.animals.append(
+                parse.Animal(
+                    id=next_id + 1 + i,
+                    name="projected",
+                    kind=rules.PRIMARY_KIND,
+                    mood="content",
+                    hunger=0,
+                    happiness=100,
+                    ready=0,
+                )
+            )
     for item in (actions.get("sold") or {}):
         projected.inventory.pop(item, None)
     if actions.get("feed_bought"):

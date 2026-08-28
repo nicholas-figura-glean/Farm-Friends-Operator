@@ -20,7 +20,23 @@ ANIMAL_RE = re.compile(
     r"hunger (?P<hunger>\d+)/100, happiness (?P<happiness>\d+)/100(?P<rest>.*)$"
 )
 READY_RE = re.compile(r"x(\d+) ready to collect")
+ANIMAL_SUMMARY_HEADER_RE = re.compile(
+    r"^Animals \((?P<total>\d+) total [^)]*summari[sz]ing by kind\):$",
+    re.IGNORECASE,
+)
+ANIMAL_KIND_SUMMARY_RE = re.compile(
+    r"^\s*\S+\s+(?P<kind>chicken|pig|beehive|sheep|cow): (?P<count>\d+)$",
+    re.IGNORECASE,
+)
 FIELD_RE = re.compile(r"^\s+\S+\s+(?P<crop>[a-z]+) plot \(#(?P<id>\d+)\): (?P<status>.+)$")
+FIELD_SUMMARY_HEADER_RE = re.compile(
+    r"^Fields \((?P<total>\d+) plots? [^)]*summari[sz]ing by kind\):$",
+    re.IGNORECASE,
+)
+FIELD_KIND_SUMMARY_RE = re.compile(
+    r"^\s*\S+\s+(?P<crop>[a-z]+): (?P<status>.+)$",
+    re.IGNORECASE,
+)
 INVENTORY_RE = re.compile(r"([a-z]+) x(\d+)")
 TRADE_RE = re.compile(
     r"^\s*#(?P<id>\d+): (?P<sender>.+?) offers (?P<offer_qty>\d+) (?P<offer_item>[a-z]+) "
@@ -112,6 +128,12 @@ class Farm:
     plots: List[Plot] = field(default_factory=list)
     inventory: Dict[str, int] = field(default_factory=dict)
     trades: List[Trade] = field(default_factory=list)
+    # Large farms are returned as authoritative totals plus representative rows.
+    # Keep the samples for hunger/mood inspection without pretending their length
+    # is the herd size or allocating hundreds of thousands of synthetic objects.
+    animal_total: Optional[int] = None
+    animal_counts: Dict[str, int] = field(default_factory=dict)
+    plot_total: Optional[int] = None
 
     @property
     def feed(self) -> int:
@@ -119,14 +141,20 @@ class Farm:
 
     @property
     def animal_count(self) -> int:
-        return len(self.animals)
+        return int(self.animal_total) if self.animal_total is not None else len(self.animals)
 
     @property
     def counts_by_kind(self) -> Dict[str, int]:
+        if self.animal_counts:
+            return dict(self.animal_counts)
         out = {}
         for a in self.animals:
             out[a.kind] = out.get(a.kind, 0) + 1
         return out
+
+    @property
+    def animals_summarized(self) -> bool:
+        return self.animal_total is not None
 
     @property
     def max_hunger(self) -> int:
@@ -175,6 +203,19 @@ def parse_farm(text: str) -> Farm:
         stripped = line.strip()
         if not stripped:
             continue
+        animal_summary = ANIMAL_SUMMARY_HEADER_RE.match(stripped)
+        if animal_summary:
+            farm.animal_total = int(animal_summary.group("total"))
+            section = "animal counts"
+            continue
+        field_summary = FIELD_SUMMARY_HEADER_RE.match(stripped)
+        if field_summary:
+            farm.plot_total = int(field_summary.group("total"))
+            section = "field counts"
+            continue
+        if stripped.lower() == "a few of them up close:":
+            section = "animal samples"
+            continue
         if stripped.startswith("Barn inventory:"):
             section = None
             farm.inventory = {
@@ -185,7 +226,15 @@ def parse_farm(text: str) -> Farm:
         if stripped.endswith(":") and not stripped.startswith("#"):
             section = stripped[:-1].lower()
             continue
-        if section == "animals":
+        if section == "animal counts":
+            m = ANIMAL_KIND_SUMMARY_RE.match(line)
+            if not m:
+                raise ParseDrift("animal summary line drift: %r" % stripped[:120])
+            kind = m.group("kind").lower()
+            if kind in farm.animal_counts:
+                raise ParseDrift("duplicate animal summary kind: %s" % kind)
+            farm.animal_counts[kind] = int(m.group("count"))
+        elif section in ("animals", "animal samples"):
             m = ANIMAL_RE.match(line)
             if not m:
                 raise ParseDrift("animal line drift: %r" % stripped[:120])
@@ -200,6 +249,13 @@ def parse_farm(text: str) -> Farm:
                     happiness=int(m.group("happiness")),
                     ready=int(ready.group(1)) if ready else 0,
                 )
+            )
+        elif section == "field counts":
+            m = FIELD_KIND_SUMMARY_RE.match(line)
+            if not m:
+                raise ParseDrift("field summary line drift: %r" % stripped[:120])
+            farm.plots.append(
+                Plot(id=0, crop=m.group("crop").lower(), status=m.group("status"))
             )
         elif section == "fields":
             m = FIELD_RE.match(line)
@@ -227,6 +283,15 @@ def parse_farm(text: str) -> Farm:
             )
     if not farm.animals:
         raise ParseDrift("no animals parsed from list_farm")
+    if farm.animal_total is not None:
+        counted = sum(farm.animal_counts.values())
+        if counted != farm.animal_total:
+            raise ParseDrift(
+                "animal summary total mismatch: declared %d, counted %d"
+                % (farm.animal_total, counted)
+            )
+        if len(farm.animals) > farm.animal_total:
+            raise ParseDrift("animal sample exceeds declared total")
     return farm
 
 
