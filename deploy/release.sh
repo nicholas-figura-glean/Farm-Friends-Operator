@@ -349,11 +349,99 @@ fi
 # been published; the KeepAlive job and dashboard verifier will continue recovery.
 MONITOR_LABEL="com.nickfigura.farmfriends.monitor"
 MONITOR_DOMAIN="gui/$(id -u)"
-if launchctl print "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1; then
-  if launchctl kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"; then
-    echo "restarted $MONITOR_LABEL on $REV"
+AGENT_DIR="$HOME/Library/LaunchAgents"
+MONITOR_PLIST="$AGENT_DIR/$MONITOR_LABEL.plist"
+MONITOR_TEMPLATE="$SOURCE_PROJECT/deploy/$MONITOR_LABEL.plist"
+if [[ -f "$MONITOR_PLIST" && -f "$MONITOR_TEMPLATE" ]]; then
+  # A containment installer once rendered the immutable candidate path into this
+  # KeepAlive plist. Refresh it from the gated template so kickstart cannot revive
+  # rejected monitor code after the release pointer moves.
+  MONITOR_RENDERED="$MONITOR_PLIST.release.$$"
+  sed "s|__PROJECT__|$DEPLOY_PROJECT|g" "$MONITOR_TEMPLATE" > "$MONITOR_RENDERED"
+  if plutil -lint "$MONITOR_RENDERED" >/dev/null && ! cmp -s "$MONITOR_RENDERED" "$MONITOR_PLIST"; then
+    mv "$MONITOR_RENDERED" "$MONITOR_PLIST"
+    launchctl bootout "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1 || true
+    if launchctl bootstrap "$MONITOR_DOMAIN" "$MONITOR_PLIST"; then
+      launchctl enable "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1 || true
+      echo "refreshed and restarted $MONITOR_LABEL on $REV"
+    else
+      echo "WARNING: released code is live but $MONITOR_LABEL did not reload" >&2
+    fi
   else
+    rm -f "$MONITOR_RENDERED"
+    if launchctl print "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1; then
+      if launchctl kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL"; then
+        echo "restarted $MONITOR_LABEL on $REV"
+      else
+        echo "WARNING: released code is live but $MONITOR_LABEL did not restart" >&2
+      fi
+    fi
+  fi
+elif launchctl print "$MONITOR_DOMAIN/$MONITOR_LABEL" >/dev/null 2>&1; then
+  launchctl kickstart -k "$MONITOR_DOMAIN/$MONITOR_LABEL" || \
     echo "WARNING: released code is live but $MONITOR_LABEL did not restart" >&2
+fi
+
+# compatibility care handoff: an adapter repair may be published while canary
+# containment has unloaded the normal loop. A successful, fully gated release must
+# retire that temporary lane and restore the standard supervised process; otherwise
+# source heals while operations remain permanently stuck in Protected care.
+CARE_LABEL="com.nickfigura.farmfriends.care"
+RETRY_LABEL="com.nickfigura.farmfriends.retry"
+if launchctl print "$MONITOR_DOMAIN/$CARE_LABEL" >/dev/null 2>&1; then
+  load_installed_label() {
+    local label="$1"
+    local plist="$AGENT_DIR/$label.plist"
+    if launchctl print "$MONITOR_DOMAIN/$label" >/dev/null 2>&1; then
+      return 0
+    fi
+    [[ -f "$plist" ]] || return 1
+    launchctl bootstrap "$MONITOR_DOMAIN" "$plist" || return 1
+    launchctl enable "$MONITOR_DOMAIN/$label" >/dev/null 2>&1 || true
+  }
+
+  HANDOFF_OK=1
+  for label in \
+    com.nickfigura.farmfriends.eod \
+    com.nickfigura.farmfriends.research \
+    com.nickfigura.farmfriends.dashboard \
+    com.nickfigura.farmfriends.author \
+    com.nickfigura.farmfriends.contract \
+    com.nickfigura.farmfriends.outage \
+    com.nickfigura.farmfriends.recovery; do
+    if ! load_installed_label "$label"; then
+      HANDOFF_OK=0
+      echo "WARNING: compatibility handoff could not load $label; Protected care retained" >&2
+      break
+    fi
+  done
+
+  if [[ "$HANDOFF_OK" -eq 1 ]]; then
+    launchctl bootout "$MONITOR_DOMAIN/$CARE_LABEL" >/dev/null 2>&1 || true
+    for label in \
+      com.nickfigura.farmfriends \
+      com.nickfigura.farmfriends.supervisor \
+      com.nickfigura.farmfriends.expand; do
+      if ! load_installed_label "$label"; then
+        HANDOFF_OK=0
+        echo "WARNING: compatibility handoff could not load $label" >&2
+        break
+      fi
+    done
+  fi
+
+  if [[ "$HANDOFF_OK" -eq 1 ]]; then
+    launchctl bootout "$MONITOR_DOMAIN/$RETRY_LABEL" >/dev/null 2>&1 || true
+    echo "compatibility repair handed Protected care back to the full process"
+  else
+    for label in \
+      com.nickfigura.farmfriends.supervisor \
+      com.nickfigura.farmfriends \
+      com.nickfigura.farmfriends.expand; do
+      launchctl bootout "$MONITOR_DOMAIN/$label" >/dev/null 2>&1 || true
+    done
+    load_installed_label "$CARE_LABEL" || \
+      echo "WARNING: compatibility handoff failed and care could not be restored" >&2
   fi
 fi
 
