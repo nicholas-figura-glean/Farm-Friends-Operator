@@ -79,6 +79,7 @@ LAYERS: List[Dict[str, str]] = [
 # module shows up as a gap to classify rather than silently landing in a default.
 MODULE_LAYER: Dict[str, str] = {
     "cycle": "play", "rules": "play", "mcp": "play", "parse": "play",
+    "format_compat": "play",
     "planner": "play", "actions": "play", "policy": "play", "growth": "play",
     "journal": "observe", "analysis": "observe", "evidence": "observe",
     "knowledge": "observe", "ledger": "observe", "compaction": "observe",
@@ -89,6 +90,7 @@ MODULE_LAYER: Dict[str, str] = {
     "llm": "decide", "research": "decide",
     "canary": "guard", "evaluation": "guard", "provenance": "guard", "governance": "guard",
     "workorders": "guard", "vcs": "guard", "heal": "guard", "notify": "guard",
+    "compatibility": "guard",
     "scheduler": "operate", "autonomy": "operate", "architecture": "operate",
     "progress": "operate", "release": "operate", "control": "guard",
     "run": "operate", "monitor": "operate", "expand": "play",
