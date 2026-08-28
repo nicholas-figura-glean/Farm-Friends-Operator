@@ -57,6 +57,22 @@ def failed_step(progress_state: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def deferred_parse_error(progress_state: Dict[str, Any]) -> Optional[str]:
+    """Return a parser error deliberately deferred so routine care could finish."""
+    step = failed_step(progress_state)
+    if not step:
+        return None
+    for row in reversed(list(progress_state.get("steps") or [])):
+        if str(row.get("name") or "") != step:
+            continue
+        detail = row.get("detail") or {}
+        if (isinstance(detail, dict)
+                and detail.get("available") is False
+                and detail.get("error")):
+            return str(detail.get("error"))[:500]
+    return None
+
+
 def latest_sample(tool: str, raw_dir: Path) -> Optional[Path]:
     """Newest already-captured response for a tool; never makes an MCP call."""
     candidates = []
