@@ -166,6 +166,8 @@ outage_text = outage_notifier.outage_message(dict(adopted, local={"checks": {}})
 recovery_text = outage_notifier.recovery_message({"last_score": 1001}, latest)
 check(outage_text.count("<@%s>" % outage_notifier.JOHN_USER_ID) == 1,
       "the outage alert mentions John exactly once")
+check("scoreboard fence" in outage_text and "Routine farm care may still be healthy" in outage_text,
+      "a leaderboard probe never claims the whole farm is down")
 check("<@%s>" % outage_notifier.JOHN_USER_ID not in recovery_text,
       "recovery updates do not notify John again")
 

@@ -42,6 +42,8 @@ HISTORY = os.path.join(STATE_DIR, "history.ndjson")
 INTENTS = os.path.join(STATE_DIR, "intents.ndjson")
 META = os.path.join(STATE_DIR, "meta.json")
 _INTENT_STATE = threading.local()
+LEADERBOARD_TIMEOUT_SECONDS = 45
+LEADERBOARD_HOLD_DOMAINS = ("adopt", "offers", "trades")
 
 
 def utcnow() -> str:
@@ -188,6 +190,9 @@ class Cycle(object):
         self.policy = policy.runtime_context()
         self.recon_findings: List[str] = []
         self.reentry: Optional[Dict[str, Any]] = None
+        self.board_snapshot: Optional[List[parse.LeaderRow]] = None
+        self.board_error: Optional[str] = None
+        self.board_attempted = False
         # Supervisor-set knobs. They can only throttle growth or add bounded
         # extra work, and they relax on their own once runs are clean again.
         self.knobs = heal.knobs()
@@ -482,8 +487,21 @@ class Cycle(object):
         tools: List[str],
         farm: parse.Farm,
         board: List[parse.LeaderRow],
+        board_available: bool = True,
     ) -> Dict[str, Any]:
         rivals = [entry for entry in board if entry.name.strip().lower() != "nick"]
+        # Preserve the last evidence baseline while standings are unavailable.
+        # Recasting old rival numbers as a fresh observation would be dishonest,
+        # but replacing them with an empty player set would create false novelty
+        # when the board returns.
+        rival_herds = (
+            {entry.name: entry.animals for entry in rivals}
+            if board_available else dict((self.prev or {}).get("rival_herds") or {})
+        )
+        rival_coins = (
+            {entry.name: entry.coins for entry in rivals}
+            if board_available else dict((self.prev or {}).get("rival_coins") or {})
+        )
         snapshot = {
             "run": run_no,
             "tools": tools,
@@ -500,8 +518,8 @@ class Cycle(object):
                 }
                 for trade in farm.trades
             ],
-            "rival_herds": {entry.name: entry.animals for entry in rivals},
-            "rival_coins": {entry.name: entry.coins for entry in rivals},
+            "rival_herds": rival_herds,
+            "rival_coins": rival_coins,
             "risk_kinds": sorted((self.actions.get("risk_event_counts") or {}).keys()),
             "event_signatures": self.actions.get("risk_event_signatures") or [],
         }
@@ -517,6 +535,27 @@ class Cycle(object):
         )
         self.meta["novelty"] = assessed.pop("state")
         self.novelty = assessed
+        self.novelty["leaderboard"] = {
+            "available": board_available,
+            "error": self.board_error if not board_available else None,
+        }
+        if not board_available:
+            availability_hold = {
+                "class": "leaderboard_unavailable",
+                "subject": "competitive standings",
+                "domains": list(LEADERBOARD_HOLD_DOMAINS),
+                "alert": "LEADERBOARD UNAVAILABLE: holding competitive mutation while routine care continues",
+                "evidence": {"error": self.board_error},
+                "first_run": run_no,
+                "last_run": run_no,
+            }
+            self.novelty["active_blocks"] = list(
+                self.novelty.get("active_blocks") or []
+            ) + [availability_hold]
+            self.novelty["blocked_domains"] = sorted(
+                set(self.novelty.get("blocked_domains") or [])
+                | set(LEADERBOARD_HOLD_DOMAINS)
+            )
         for resolved in self.novelty.get("resolved_blocks") or []:
             self.notes_soft.append(
                 "novelty hold released: %s (%s)"
@@ -848,8 +887,37 @@ class Cycle(object):
         if not self.dry:
             progress.skip(name, note)
 
+    def _read_leaderboard(self, raw_name: str) -> Optional[List[parse.LeaderRow]]:
+        """Read standings once with a bounded, nonessential transport budget.
+
+        A leaderboard fault must hold competitive mutation, not starve the herd.
+        The result (including failure) is cached so blind-window recon and the
+        ordinary board phase cannot create a same-cycle retry storm.
+        """
+        if self.board_attempted:
+            return self.board_snapshot
+        self.board_attempted = True
+        try:
+            text = self.c.call(
+                "leaderboard",
+                _transport_timeout=LEADERBOARD_TIMEOUT_SECONDS,
+                _transport_retries=1,
+            )
+            board = parse.parse_leaderboard(text)
+        except (McpError, ToolError, parse.ParseDrift) as exc:
+            self.board_error = str(exc)[:180]
+            self.notes.append(
+                "leaderboard unavailable; competitive mutation held while routine care continues: %s"
+                % self.board_error
+            )
+            return None
+        _raw(raw_name, text)
+        self.board_snapshot = board
+        self.board_error = None
+        return board
+
     def _reentry_recon(self, run_no: int) -> Optional[Dict[str, Any]]:
-        """Read standings before mutation after a blind window."""
+        """Read standings before mutation after a blind window, without blocking care."""
         previous_ts = parse_ts((self.prev or {}).get("ts"))
         if not previous_ts:
             return None
@@ -857,9 +925,16 @@ class Cycle(object):
         minutes = (now - previous_ts).total_seconds() / 60.0
         if minutes <= rules.GAP_RECON_MINUTES:
             return None
-        text = self.c.call("leaderboard")
-        _raw("leaderboard_reentry", text)
-        board = parse.parse_leaderboard(text)
+        board = self._read_leaderboard("leaderboard_reentry")
+        if board is None:
+            self.reentry = {
+                "minutes": round(minutes, 2),
+                "observed": None,
+                "findings": [],
+                "leaderboard_available": False,
+                "error": self.board_error,
+            }
+            return self.reentry
         me = next((entry for entry in board if entry.name.strip().lower() == "nick"), None)
         rivals = [entry for entry in board if entry.name.strip().lower() != "nick"]
         observed = {
@@ -955,7 +1030,11 @@ class Cycle(object):
                 state.committed_feed,
                 cap=decision["cap"],
             )
-            board = parse.parse_leaderboard(self.c.call("leaderboard"))
+            board = self._read_leaderboard("leaderboard_dry") or []
+            if not board and plan.get("adopt", 0) > 0:
+                plan["adopt_before_leaderboard_hold"] = plan["adopt"]
+                plan["adopt"] = 0
+                plan["availability_hold"] = "leaderboard"
             return self._finish(started, tools, state, board, state, plan)
 
         # Both herd-scale operations are now constant-time bulk calls. Collection
@@ -994,10 +1073,12 @@ class Cycle(object):
         # These reads used to happen after adoption and offers, which meant the
         # system could notice a new regime only after acting inside it.
         with self._step("board") as step:
-            board_text = self.c.call("leaderboard")
-            _raw("leaderboard", board_text)
-            board = parse.parse_leaderboard(board_text)
+            # Reuse the blind-window snapshot or failure. Never retry the same
+            # nonessential read inside one cycle.
+            board = self._read_leaderboard("leaderboard") or []
             me = next((r for r in board if r.name.strip().lower() == "nick"), None)
+            step["available"] = bool(board)
+            step["error"] = self.board_error
             step["rank"] = me.rank if me else None
             step["produce"] = me.produce if me else None
 
@@ -1008,11 +1089,15 @@ class Cycle(object):
             step["charges"] = self.actions["risk_charges"]
 
         with self._step("novelty") as step:
-            assessed = self.assess_novelty(run_no, tools, state, board)
+            assessed = self.assess_novelty(
+                run_no, tools, state, board, board_available=not bool(self.board_error)
+            )
             step["signals"] = len(assessed.get("signals") or [])
             step["blocked"] = assessed.get("blocked_domains") or []
 
-        if state.incoming:
+        if state.incoming and self.domain_blocked("trades"):
+            self._skip("trades", "strategic hold; leaving incoming offers untouched")
+        elif state.incoming:
             with self._step("trades") as step:
                 self.handle_incoming_trades(state)
                 step["accepted"] = self.actions["trades_accepted"]

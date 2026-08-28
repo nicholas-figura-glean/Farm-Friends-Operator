@@ -312,9 +312,9 @@ def outage_message(state: Dict[str, Any], latest: Dict[str, Any]) -> str:
     trouble = "production has stopped moving" if state.get("outage_kind") == "production_stall" else "the leaderboard gate has stopped answering"
     runway = rules.feed_buffer_minutes(int(latest.get("feed") or 0), int(latest.get("animals") or 0))
     return (
-        "<@%s> 🚨🌾 *The farm gate is down again* — %s.\n"
+        "<@%s> 🚨🏆 *The scoreboard fence is stuck* — %s.\n"
         "Last safe count: rank #%s, %s produce, %s animals, and about %.0f minutes of feed. 🐓\n"
-        "The ranch hands are still testing the fence. I’ll holler when the pasture starts moving again. 🛠️🚜"
+        "Routine farm care may still be healthy while the ranch hands test the scoreboard. I’ll holler when standings move again. 🛠️🌾"
         % (
             JOHN_USER_ID, trouble, latest.get("rank"), latest.get("produce"),
             latest.get("animals"), runway,
@@ -324,8 +324,8 @@ def outage_message(state: Dict[str, Any], latest: Dict[str, Any]) -> str:
 
 def recovery_message(state: Dict[str, Any], latest: Dict[str, Any]) -> str:
     return (
-        "🌤️🚜 *The pasture is moving again!* Farm Friends is back at rank #%s with %s lifetime produce.\n"
-        "The gate answered, the ranch hands checked the herd, and the regular farm loop is running again. 🐓🌾"
+        "🌤️🏆 *The scoreboard is answering again!* Farm Friends is back at rank #%s with %s lifetime produce.\n"
+        "The ranch hands confirmed fresh standings; routine farm care kept tending the herd. 🐓🌾"
         % (latest.get("rank"), state.get("last_score") or latest.get("produce"))
     )
 

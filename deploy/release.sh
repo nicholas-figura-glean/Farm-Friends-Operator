@@ -108,6 +108,7 @@ fi
 /usr/bin/python3 deploy/test_dashboard.py
 /usr/bin/python3 deploy/test_recovery_watch.py
 /usr/bin/python3 deploy/test_notifications.py
+/usr/bin/python3 deploy/test_degraded_cycle.py
 # The self-healing loop is part of the runtime, so its deterministic suites gate
 # releases too. The paid live gateway smoke test is opt-in and never runs here.
 /usr/bin/python3 deploy/test_contract.py

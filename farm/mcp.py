@@ -175,8 +175,15 @@ class Client(object):
         return out.replace(host, "<host>")
 
     # -- transport ---------------------------------------------------------
-    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(
+        self,
+        payload: Dict[str, Any],
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
+        timeout_budget = self._timeout if timeout is None else max(1, int(timeout))
+        attempt_budget = self._retries if retries is None else max(1, int(retries))
         req = urllib.request.Request(
             self._endpoint,
             data=body,
@@ -188,11 +195,11 @@ class Client(object):
             method="POST",
         )
         last = None
-        for attempt in range(self._retries):
+        for attempt in range(attempt_budget):
             try:
                 LIMITER.acquire()
                 _started = time.time()
-                with urllib.request.urlopen(req, timeout=self._timeout, context=self._ctx) as resp:
+                with urllib.request.urlopen(req, timeout=timeout_budget, context=self._ctx) as resp:
                     raw = resp.read().decode("utf-8", "replace")
                 self.last_service_seconds = time.time() - _started
                 return _decode(raw)
@@ -209,24 +216,41 @@ class Client(object):
                 self.transport_errors_by_tool[self._current_tool] = (
                     self.transport_errors_by_tool.get(self._current_tool, 0) + 1
                 )
-                if attempt < self._retries - 1:
+                if attempt < attempt_budget - 1:
                     time.sleep(BACKOFF ** (attempt + 1))
         raise McpError(
-            self.scrub("transport failure after %d tries: %r" % (self._retries, last))
+            self.scrub("transport failure after %d tries: %r" % (attempt_budget, last))
         )
 
-    def rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def rpc(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         self._id += 1
         payload = {"jsonrpc": "2.0", "id": self._id, "method": method}
         if params is not None:
             payload["params"] = params
-        data = self._post(payload)
+        data = self._post(payload, timeout=timeout, retries=retries)
         if "error" in data:
             raise McpError(self.scrub("rpc error on %s: %s" % (method, json.dumps(data["error"]))))
         return data.get("result", {})
 
-    def call(self, tool: str, **arguments: Any) -> str:
-        """Call a tool and record the process boundary as a real trace span."""
+    def call(
+        self,
+        tool: str,
+        _transport_timeout: Optional[int] = None,
+        _transport_retries: Optional[int] = None,
+        **arguments: Any,
+    ) -> str:
+        """Call a tool and record the process boundary as a real trace span.
+
+        A caller may narrow the transport budget for a nonessential read. Tool
+        arguments remain separate so the reduced budget can never leak into the
+        MCP payload or silently change a mutation request.
+        """
         self.call_count += 1
         call_id = "%d-%x-%d" % (os.getpid(), id(self), self.call_count)
         started = time.monotonic()
@@ -244,7 +268,18 @@ class Client(object):
         })
         try:
             self._current_tool = tool
-            result = self.rpc("tools/call", {"name": tool, "arguments": arguments})
+            params = {"name": tool, "arguments": arguments}
+            if _transport_timeout is None and _transport_retries is None:
+                # Preserve the long-standing rpc(method, params) extension point
+                # for fixtures and sibling clients that override it.
+                result = self.rpc("tools/call", params)
+            else:
+                result = self.rpc(
+                    "tools/call",
+                    params,
+                    timeout=_transport_timeout,
+                    retries=_transport_retries,
+                )
             text = "\n".join(
                 block.get("text", "")
                 for block in (result.get("content") or [])
