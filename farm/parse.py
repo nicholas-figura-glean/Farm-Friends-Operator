@@ -9,9 +9,27 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from . import format_compat
+
 
 class ParseDrift(ValueError):
     """Server text no longer matches the shapes this module knows."""
+
+
+def _normalize(tool: str, text: str) -> str:
+    """Apply the narrow compatibility adapter, then enforce parser bounds."""
+    source = str(text or "")
+    try:
+        normalized = format_compat.normalize(tool, source)
+    except Exception as exc:  # noqa: BLE001 - adapter failures are parser drift
+        raise ParseDrift("%s compatibility adapter failed: %s" % (tool, str(exc)[:160]))
+    if not isinstance(normalized, str):
+        raise ParseDrift("%s compatibility adapter returned non-text" % tool)
+    # A format translation may add bounded canonical labels, never materialize a
+    # summarized 288k-animal response or turn a tiny payload into memory pressure.
+    if len(normalized) > len(source) + 1_000_000:
+        raise ParseDrift("%s compatibility adapter expanded response beyond bound" % tool)
+    return normalized
 
 
 ANIMAL_RE = re.compile(
@@ -25,7 +43,8 @@ ANIMAL_SUMMARY_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 ANIMAL_KIND_SUMMARY_RE = re.compile(
-    r"^\s*\S+\s+(?P<kind>chicken|pig|beehive|sheep|cow): (?P<count>\d+)$",
+    r"^\s*\S+\s+(?P<kind>chicken|pig|beehive|sheep|cow): (?P<count>\d+)"
+    r"(?:, (?P<ready>\d+) (?P<item>egg|truffle|honey|wool|milk) ready to collect)?$",
     re.IGNORECASE,
 )
 FIELD_RE = re.compile(r"^\s+\S+\s+(?P<crop>[a-z]+) plot \(#(?P<id>\d+)\): (?P<status>.+)$")
@@ -77,6 +96,13 @@ RISK_EVENT_PATTERNS = (
 COIN_EVENT_RE = re.compile(r"(\d+) coins?", re.IGNORECASE)
 
 SALEABLE = ("egg", "honey", "truffle", "milk", "wool", "pumpkin", "corn", "wheat")
+KIND_PRODUCE = {
+    "chicken": "egg",
+    "beehive": "honey",
+    "cow": "milk",
+    "pig": "truffle",
+    "sheep": "wool",
+}
 
 
 @dataclass
@@ -133,6 +159,7 @@ class Farm:
     # is the herd size or allocating hundreds of thousands of synthetic objects.
     animal_total: Optional[int] = None
     animal_counts: Dict[str, int] = field(default_factory=dict)
+    summary_ready: Dict[str, int] = field(default_factory=dict)
     plot_total: Optional[int] = None
 
     @property
@@ -162,6 +189,8 @@ class Farm:
 
     @property
     def ready_units(self) -> int:
+        if self.summary_ready:
+            return sum(self.summary_ready.values())
         return sum(a.ready for a in self.animals)
 
     @property
@@ -191,6 +220,7 @@ class LeaderRow:
 
 
 def parse_farm(text: str) -> Farm:
+    text = _normalize("list_farm", text)
     lines = text.split("\n")
     if "Farm" not in lines[0]:
         raise ParseDrift("list_farm header changed: %r" % text[:80])
@@ -234,6 +264,14 @@ def parse_farm(text: str) -> Farm:
             if kind in farm.animal_counts:
                 raise ParseDrift("duplicate animal summary kind: %s" % kind)
             farm.animal_counts[kind] = int(m.group("count"))
+            if m.group("ready"):
+                item = str(m.group("item") or "").lower()
+                if KIND_PRODUCE.get(kind) != item:
+                    raise ParseDrift(
+                        "animal summary produce mismatch: %s cannot produce %s"
+                        % (kind, item)
+                    )
+                farm.summary_ready[item] = int(m.group("ready"))
         elif section in ("animals", "animal samples"):
             m = ANIMAL_RE.match(line)
             if not m:
@@ -296,6 +334,7 @@ def parse_farm(text: str) -> Farm:
 
 
 def parse_leaderboard(text: str) -> List[LeaderRow]:
+    text = _normalize("leaderboard", text)
     rows = []
     for line in text.split("\n")[1:]:
         if not line.strip():
@@ -319,6 +358,7 @@ def parse_leaderboard(text: str) -> List[LeaderRow]:
 
 def parse_collect(text: str) -> Dict[str, int]:
     """Return {item: qty} collected. Empty dict when nothing was ready."""
+    text = _normalize("collect_produce", text)
     for line in text.split("\n"):
         if line.startswith("Total:"):
             return {m.group(2): int(m.group(1)) for m in TOTAL_RE.finditer(line)}
@@ -329,6 +369,7 @@ def parse_collect(text: str) -> Dict[str, int]:
 
 
 def parse_sell(text: str) -> Dict[str, object]:
+    text = _normalize("sell", text)
     m = SOLD_RE.search(text)
     if not m:
         raise ParseDrift("sell output drift: %r" % text[:160])
@@ -341,6 +382,7 @@ def parse_sell(text: str) -> Dict[str, object]:
 
 
 def parse_buy_feed(text: str) -> Dict[str, int]:
+    text = _normalize("buy_feed", text)
     m = BOUGHT_RE.search(text)
     if not m:
         raise ParseDrift("buy_feed output drift: %r" % text[:160])
@@ -348,6 +390,7 @@ def parse_buy_feed(text: str) -> Dict[str, int]:
 
 
 def parse_adopt(text: str) -> Dict[str, int]:
+    text = _normalize("adopt_animal", text)
     m = ADOPT_RE.search(text)
     if not m:
         raise ParseDrift("adopt output drift: %r" % text[:160])
@@ -391,6 +434,7 @@ class Event:
 
 
 def parse_events(text: str) -> List[Event]:
+    text = _normalize("farm_events", text)
     events = []
     for line in text.split("\n"):
         if not line.strip():

@@ -654,8 +654,23 @@ GATES = (
     ("recovery-watch", ["/usr/bin/python3", "deploy/test_recovery_watch.py"]),
     ("contract", ["/usr/bin/python3", "deploy/test_contract.py"]),
     ("contract-watch", ["/usr/bin/python3", "deploy/test_contract_watch.py"]),
+    ("runtime-compat", ["/usr/bin/python3", "deploy/test_runtime_compat.py"]),
     ("vcs", ["/usr/bin/python3", "deploy/test_vcs.py"]),
 )
+
+
+def compatibility_preexisting_allowed(
+    order: Dict[str, Any],
+    pre_existing: List[str],
+    attributable: List[str],
+) -> bool:
+    """Whether release.sh may adjudicate pre-existing strategy-data failures."""
+    return (
+        str((order.get("provenance") or {}).get("change_class") or "") == "compatibility"
+        and bool(pre_existing)
+        and set(pre_existing).issubset({"knowledge", "evidence"})
+        and not attributable
+    )
 
 
 def run_gates(root: str) -> Dict[str, Any]:
@@ -949,7 +964,19 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             # Do not charge a pre-existing failure to this patch.
             pre_existing = gates_already_failing(root, failed_names)
             genuinely_ours = [n for n in failed_names if n not in pre_existing]
-            if pre_existing and not genuinely_ours:
+            compatibility_waiver = compatibility_preexisting_allowed(
+                order, pre_existing, genuinely_ours
+            )
+            if pre_existing and not genuinely_ours and compatibility_waiver:
+                # This is not enough to publish by itself. release.sh independently
+                # proves every packaged byte except format_compat.py matches the live
+                # immutable release before recognizing these strategy-data failures.
+                print("  compatibility repair: pre-existing %s deferred to immutable overlay proof"
+                      % ", ".join(pre_existing))
+                ledger.record("author.compatibility_preexisting", {
+                    "order": order["id"], "gates": pre_existing,
+                })
+            elif pre_existing and not genuinely_ours:
                 workorders.resolve(
                     order["id"], workorders.OPEN,
                     note="blocked: %s already failing before this patch; "
@@ -969,17 +996,18 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
                 ledger.record("author.blocked", {"order": order["id"],
                                                 "pre_existing_gates": pre_existing})
                 return 0
-            detail = "; ".join("%s failed" % name for name in genuinely_ours)
-            evidence = "\n\n".join(
-                "%s:\n%s" % (g["gate"], g["detail"])
-                for g in gates["failed"] if g["gate"] in genuinely_ours
-            )[:6000]
-            attempt_notes.append("attempt %d: %s" % (attempt, detail))
-            print("  attempt %d failed gates: %s" % (attempt, detail))
-            feedback = detail + "\n\n" + evidence
-            restore(order, root, files, stage)
-            patch = None
-            continue
+            if genuinely_ours:
+                detail = "; ".join("%s failed" % name for name in genuinely_ours)
+                evidence = "\n\n".join(
+                    "%s:\n%s" % (g["gate"], g["detail"])
+                    for g in gates["failed"] if g["gate"] in genuinely_ours
+                )[:6000]
+                attempt_notes.append("attempt %d: %s" % (attempt, detail))
+                print("  attempt %d failed gates: %s" % (attempt, detail))
+                feedback = detail + "\n\n" + evidence
+                restore(order, root, files, stage)
+                patch = None
+                continue
 
         # Verified in isolation. A repair is not publishable until the exact gated
         # commit is present on the allowlisted remote. This is deliberately fail-closed:

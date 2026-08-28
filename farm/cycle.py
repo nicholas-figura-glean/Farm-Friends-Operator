@@ -143,6 +143,7 @@ def _project(state: parse.Farm, actions: Dict[str, Any], coins: int) -> parse.Fa
         trades=list(state.trades),
         animal_total=state.animal_total,
         animal_counts=dict(state.animal_counts),
+        summary_ready=dict(state.summary_ready),
         plot_total=state.plot_total,
     )
     adopted = int(actions.get("adopted") or 0)
@@ -171,6 +172,7 @@ def _project(state: parse.Farm, actions: Dict[str, Any], coins: int) -> parse.Fa
         projected.inventory["feed"] = state.feed + int(actions["feed_bought"])
     for animal in projected.animals:
         animal.ready = 0
+    projected.summary_ready = {}
     return projected
 
 

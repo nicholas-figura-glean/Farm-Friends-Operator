@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import contract, journal, ledger, parse, policy, workorders  # noqa: E402
+from farm import compatibility, contract, journal, ledger, parse, policy, workorders  # noqa: E402
 from farm.mcp import Client, McpError  # noqa: E402
 
 STATE = PROJECT / "state"
@@ -123,8 +123,13 @@ def shape_parser_verdict(change: Dict[str, Any], raw_dir: Path) -> Dict[str, Any
         text = sample.read_text(encoding="utf-8", errors="replace")
         parser(text)
     except Exception as exc:  # noqa: BLE001 - any consumer failure is actionable
-        return {"accepted": False, "consumed": True, "sample": sample.name,
-                "reason": "%s: %s" % (type(exc).__name__, str(exc)[:180])}
+        return {
+            "accepted": False,
+            "consumed": True,
+            "sample": sample.name,
+            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:180]),
+            "structural_excerpt": compatibility.structural_excerpt(tool, text),
+        }
     return {"accepted": True, "consumed": True, "sample": sample.name,
             "reason": "current parser accepted the captured sample"}
 
@@ -259,14 +264,15 @@ def order_for(change: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str
         added = ", ".join(str(x) for x in (detail.get("added") or [])[:8])
         return (
             "The text `%s` returns has changed shape (removed: %s | added: %s), which is "
-            "how the parser silently starts producing wrong numbers. Update farm/parse.py "
-            "to handle the new format, keeping backward compatibility with the old one so "
-            "a rollback stays safe." % (tool, removed or "none", added or "none"),
+            "how a parser can silently start producing wrong numbers. Normalize the new "
+            "prose in farm/format_compat.py while leaving the core parser and all "
+            "semantic values unchanged." % (tool, removed or "none", added or "none"),
             [
-                "farm/parse.py handles both the old and the new format",
+                "the core parser handles both the old and the new format",
                 "parsing the captured sample in state/raw/latest yields no ParseDrift",
+                "normalization is pure, bounded, and changes no strategy semantics",
             ],
-            ["farm/parse.py"],
+            ["farm/format_compat.py"],
         )
 
     return None
@@ -415,22 +421,55 @@ def main() -> int:
     failed_shapes: List[Dict[str, Any]] = []
     unknown_shapes: List[Dict[str, Any]] = []
     raw_dir = PROJECT / contract.RAW_DIR
-    for change in confirmed:
+    # A parser rejecting the exact captured sample is direct breakage evidence;
+    # it must not wait for the ordinary two-scan noise filter. Parser-accepted
+    # shape variation still needs confirmation before the baseline can move.
+    for change in changes:
         if change.get("severity") != "shape":
             continue
         verdict = shape_parser_verdict(change, raw_dir)
         change["parser_validation"] = verdict
-        if verdict.get("accepted") is True:
-            accepted_shapes.append(change)
-        elif verdict.get("accepted") is False:
+        if verdict.get("accepted") is False:
+            change["detail"] = dict(
+                change.get("detail") or {},
+                captured_sample={
+                    key: verdict.get(key)
+                    for key in ("sample", "reason", "structural_excerpt")
+                },
+            )
+        confirmed_shape = str(change.get("id") or "") in confirmed_ids
+        if verdict.get("accepted") is False:
             failed_shapes.append(change)
+        elif not confirmed_shape:
+            continue
+        elif verdict.get("accepted") is True:
+            accepted_shapes.append(change)
         else:
             unknown_shapes.append(change)
 
+    # One malformed response often changes templates, fields, vocabulary, and
+    # symbols at once. They all need the same adapter repair; queueing each family
+    # would spend multiple author passes on one incident. Keep the most actionable
+    # line-template diff per tool, then fields, numeric labels, and the rest.
+    shape_priority = {
+        "response_templates_changed": 0,
+        "response_fields_changed": 1,
+        "response_numeric_labels_changed": 2,
+    }
+    failed_by_tool: Dict[str, Dict[str, Any]] = {}
+    for change in failed_shapes:
+        tool = str(change.get("tool") or "")
+        current = failed_by_tool.get(tool)
+        if current is None or shape_priority.get(str(change.get("kind")), 9) < shape_priority.get(str(current.get("kind")), 9):
+            failed_by_tool[tool] = change
+    failed_shapes = [failed_by_tool[key] for key in sorted(failed_by_tool)]
+
+    failed_shape_ids = {str(change.get("id") or "") for change in failed_shapes}
     pending_shapes = [
         change for change in changes
         if change.get("severity") == "shape"
         and str(change.get("id") or "") not in confirmed_ids
+        and str(change.get("id") or "") not in failed_shape_ids
     ]
     blocking = [c for c in confirmed if c.get("severity") == "breaking"] + failed_shapes
     opportunities = [c for c in confirmed if c.get("severity") == "opportunity"]
@@ -460,9 +499,14 @@ def main() -> int:
         if not built:
             continue
         intent, acceptance, files = built
+        provenance = (
+            {"change_class": "compatibility", "tool": change.get("tool")}
+            if str(change.get("kind") or "").startswith("response_") else None
+        )
         order = workorders.submit(
             change, source="contract_watch", intent=intent,
             acceptance=acceptance, files=files, path=queue_path,
+            provenance=provenance,
         )
         if order:
             filed.append(order)

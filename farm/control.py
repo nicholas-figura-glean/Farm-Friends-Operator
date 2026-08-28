@@ -140,6 +140,7 @@ TRUSTED_PATHS = frozenset(
         "farm/canary.py",
         "farm/claims.py",
         "farm/compaction.py",
+        "farm/compatibility.py",
         "farm/contract.py",
         "farm/control.py",
         "farm/cycle.py",
@@ -179,7 +180,9 @@ TRUSTED_PATHS = frozenset(
 # Autonomous patches stay in existing Python implementation files. ``monitor.py`` is
 # intentionally editable: the independent dashboard verifier and release gates can
 # safely judge a renderer/route repair, while the health and architecture truth it
-# displays remain protected above.
+# displays remain protected above. Compatibility work orders offer only
+# ``farm/format_compat.py``; adapter-only activation independently proves that no
+# parser, strategy, policy, or control-plane byte changed with that repair.
 AUTHOR_EDITABLE_PREFIXES = ("farm/", "experiments/")
 AUTHOR_EDITABLE_FILES = ("monitor.py",)
 

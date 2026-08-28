@@ -228,7 +228,7 @@ def arm(
         # The commit this release was built from, so a revert can undo the change by
         # content and not only by re-pointing at the previous directory.
         "commit": commit,
-        "change_class": change_class if change_class in {"reliability", "strategy", "research_probe"} else "reliability",
+        "change_class": change_class if change_class in {"reliability", "compatibility", "strategy", "research_probe"} else "reliability",
         "hypothesis_id": hypothesis_id,
         "policy_id": policy_id,
         "expected_improvement": max(0.0, float(expected_improvement or 0.0)),

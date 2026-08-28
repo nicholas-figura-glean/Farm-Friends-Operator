@@ -356,6 +356,39 @@ check(
 code = contract_watch.main()
 check("an absorbed change stops being reported", code == 0, "exit=%s" % code)
 
+# A parser-rejected response is direct breakage evidence and cannot wait for a
+# second 15-minute shape scan.
+root = fresh_env()
+valid_farm = (
+    "🌾 Nick's Farm  🪙 10 coins\n\nAnimals:\n"
+    "  🐔 Hen the chicken (#1) is content. hunger 0/100, happiness 100/100\n\n"
+    "Fields:\n  🌼 wildflowers plot (#1): in full bloom\n\n"
+    "Barn inventory: 🌱 feed x30\n\nOpen trades:\n  none\n"
+)
+farm_sample = pathlib.Path(root) / "state" / "raw" / "latest" / "list_farm_state.txt"
+farm_sample.write_text(valid_farm, encoding="utf-8")
+StubClient.payload = BASE_TOOLS
+contract_watch.main()
+farm_sample.write_text(
+    "🌾 Nick's Farm  🪙 10 coins\n\nCreatures changed:\n  unparseable\n",
+    encoding="utf-8",
+)
+code = contract_watch.main()
+queue_path = os.path.join(root, "state", "workorders.ndjson")
+orders = workorders.open_orders(queue_path)
+check("a parser-rejected first shape scan routes immediately",
+      code == 0 and len(orders) == 1, str(orders))
+if orders:
+    check("shape repair targets only the format adapter",
+          orders[0].get("files") == ["farm/format_compat.py"], str(orders[0].get("files")))
+    check("shape repair carries compatibility provenance",
+          (orders[0].get("provenance") or {}).get("change_class") == "compatibility",
+          str(orders[0].get("provenance")))
+    captured = (orders[0].get("detail") or {}).get("captured_sample") or {}
+    check("shape repair carries bounded structural evidence",
+          "Creatures changed" in str(captured.get("structural_excerpt") or ""),
+          str(captured))
+
 # An opportunity: a brand new tool should be probed, not wired in.
 root = fresh_env()
 StubClient.payload = BASE_TOOLS

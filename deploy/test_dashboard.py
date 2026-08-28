@@ -108,6 +108,7 @@ def _payload() -> dict:
                   "produce_per_sec": 29.8, "produce_delta": 11491,
                   "ts": "2026-08-21T15:11:56Z"},
         "adaptive": {"status": "holding", "blocked_domains": ["offers", "trades"],
+                     "compatibility": {"status": "clear", "orders": []},
                      "active_blocks": [{"class": "activity_novelty_rival",
                                         "subject": "competitive activity",
                                         "domains": ["offers", "trades"],
@@ -241,6 +242,11 @@ var RESULT = (function () {
   ok("adaptive guard: recent evidence identifies the rival change", (html("adaptive-events") || "").indexOf("John coins increased by 823,576") >= 0, html("adaptive-events"));
   operatorAdaptive(LIVE,{questions:{questions:[{id:"q-rival",class:"activity_novelty_rival",status:"answered",generation:2,last_seen_run:216,probe_result_status:"passed",hypothesis:"John entered a materially different capital regime"}]}});
   ok("adaptive guard: durable question and probe are linked", (html("adaptive-question") || "").indexOf("q-rival") >= 0 && (html("adaptive-question") || "").indexOf("passed") >= 0 && (html("adaptive-question") || "").indexOf("generation") >= 0, html("adaptive-question"));
+  var REPAIRING = clone(LIVE);
+  REPAIRING.adaptive.compatibility = {status:"repairing",orders:[{id:"runtime-parse-list-farm",tool:"list_farm",status:"open",sample:"list_farm_state.txt"}]};
+  operatorAdaptive(REPAIRING,{});
+  ok("adaptive guard: parser drift is visibly self-healing", txt("adaptive-state") === "Repairing server format" && (html("adaptive-metrics") || "").indexOf("list_farm") >= 0, txt("adaptive-state") + " " + html("adaptive-metrics"));
+  operatorAdaptive(LIVE,{});
   ok("operator shell: healing remains a closed loop when quiet", (html("healing-loop") || "").indexOf("Defaults preserved") >= 0);
   var HEALING = {knobs:{},classes:[
     {class:"threat",count:4,last_run:216,last_action:"contained wolf",alerts:["wolf"]},
@@ -539,6 +545,22 @@ def main() -> int:
             packaged_panels.add(panel_id.group(1))
     expected_panels = {"overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture"}
     adaptive_projection = monitor._adaptive_summary([_payload()["latest"]])
+    original_workorders_current = monitor.workorders.current
+    monitor.workorders.current = lambda path: {
+        "runtime-parse-list-farm": {
+            "id": "runtime-parse-list-farm",
+            "status": "open",
+            "tool": "list_farm",
+            "summary": "list_farm response changed",
+            "detail": {"sample": "list_farm_state.txt"},
+            "provenance": {"change_class": "compatibility"},
+            "created_ts": "2026-08-28T17:00:00Z",
+        }
+    }
+    try:
+        compatibility_projection = monitor._adaptive_summary([_payload()["latest"]])
+    finally:
+        monitor.workorders.current = original_workorders_current
     static_checks = [
         ("real /api/state snapshot survives trace helpers", snapshot_error is None),
         ("bootstrap runs before the game bundle", boot != -1 and game != -1 and boot < game),
@@ -559,6 +581,11 @@ def main() -> int:
          and adaptive_projection.get("trade_coin_outflow") == 0
          and adaptive_projection.get("trade_coin_outflow_blocked") == 400000
          and len(adaptive_projection.get("recent_events") or []) == 1),
+        ("adaptive server projection exposes compatibility self-healing",
+         compatibility_projection.get("status") == "repairing"
+         and compatibility_projection.get("compatibility", {}).get("orders", [{}])[0].get("tool") == "list_farm"
+         and any(block.get("class") == "compatibility_repair"
+                 for block in compatibility_projection.get("active_blocks") or [])),
         ("served page has no operator-attention state token",
          all(token not in html for token in (
              "system-state attention", "hero-verdict attention",

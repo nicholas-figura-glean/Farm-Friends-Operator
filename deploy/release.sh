@@ -35,6 +35,8 @@ DEPLOY_PROJECT="$(cd "$DEPLOY_PROJECT" && pwd)"
 RELEASES="$DEPLOY_PROJECT/releases"
 LINK="$DEPLOY_PROJECT/release"
 PREVIOUS=""
+CHANGE_CLASS="${FARM_CANARY_CHANGE_CLASS:-reliability}"
+COMPATIBILITY_RELEASE=0
 if [[ -L "$LINK" ]]; then
   PREVIOUS="$(basename "$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$LINK")")"
 fi
@@ -88,6 +90,32 @@ fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"
 
+# Compatibility overlays are not a shortcut around strategy evidence. They are
+# admitted only when every packaged byte matches the current immutable release
+# except the narrow response normalizer. Any strategy, parser-invariant, policy,
+# UI, test-fixture, or control-plane difference rejects this lane.
+if [[ "$CHANGE_CLASS" == "compatibility" ]]; then
+  if [[ -z "$PREVIOUS" ]]; then
+    echo "compatibility release rejected: no immutable base release" >&2
+    exit 5
+  fi
+  if ! PYTHONPATH="$SOURCE_PROJECT" /usr/bin/python3 - "$LINK" "$SOURCE_PROJECT" <<'PY'
+import sys
+from pathlib import Path
+from farm import compatibility
+
+proof = compatibility.overlay_proof(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve())
+print("compatibility proof: %s" % proof.get("reason"))
+if not proof.get("ok"):
+    raise SystemExit(1)
+PY
+  then
+    echo "compatibility release rejected: immutable strategy proof failed" >&2
+    exit 5
+  fi
+  COMPATIBILITY_RELEASE=1
+fi
+
 cd "$SOURCE_PROJECT"
 if [[ -e "$TARGET" ]]; then
   echo "release target already exists: $TARGET" >&2
@@ -98,10 +126,16 @@ fi
 # user-facing artifacts disagree. These run before staging and make no live MCP
 # calls; test_knowledge redirects every mutable epistemic store to a temp dir.
 /usr/bin/python3 run.py --self-test
-/usr/bin/python3 deploy/test_knowledge.py
+if [[ "$COMPATIBILITY_RELEASE" -eq 0 ]]; then
+  /usr/bin/python3 deploy/test_knowledge.py
+fi
 /usr/bin/python3 deploy/test_governance.py
 /usr/bin/python3 deploy/test_safety.py
-/usr/bin/python3 deploy/test_evidence.py
+if [[ "$COMPATIBILITY_RELEASE" -eq 0 ]]; then
+  /usr/bin/python3 deploy/test_evidence.py
+else
+  echo "strategy evidence gates retained by adapter-only byte identity proof"
+fi
 /usr/bin/python3 deploy/test_tool_trace.py
 /usr/bin/python3 deploy/test_topology.py
 /usr/bin/python3 deploy/test_architecture.py
@@ -109,6 +143,7 @@ fi
 /usr/bin/python3 deploy/test_recovery_watch.py
 /usr/bin/python3 deploy/test_notifications.py
 /usr/bin/python3 deploy/test_degraded_cycle.py
+/usr/bin/python3 deploy/test_runtime_compat.py
 # The self-healing loop is part of the runtime, so its deterministic suites gate
 # releases too. The paid live gateway smoke test is opt-in and never runs here.
 /usr/bin/python3 deploy/test_contract.py

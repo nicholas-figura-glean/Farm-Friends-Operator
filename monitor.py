@@ -30,7 +30,7 @@ sys.path.insert(0, str(PROJECT))
 
 # Reuse the operator's own modules so the dashboard can never disagree with the
 # loop about knobs, cost, or which agents are supposed to exist.
-from farm import compaction, evidence, growth, heal, progress, release as release_info, rules, scheduler, tokens, topology  # noqa: E402
+from farm import compaction, evidence, growth, heal, progress, release as release_info, rules, scheduler, tokens, topology, workorders  # noqa: E402
 
 STATE = PROJECT / "state"
 HISTORY = STATE / "history.ndjson"
@@ -279,10 +279,44 @@ def _adaptive_summary(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         if len(events) >= 12:
             break
     blocked = list(current.get("blocked_domains") or [])
+    compatibility_orders: List[Dict[str, Any]] = []
+    try:
+        for order in workorders.current(str(STATE / "workorders.ndjson")).values():
+            if ((order.get("provenance") or {}).get("change_class") != "compatibility"
+                    or order.get("status") not in {workorders.OPEN, workorders.CLAIMED}):
+                continue
+            compatibility_orders.append({
+                "id": order.get("id"),
+                "status": order.get("status"),
+                "tool": order.get("tool"),
+                "summary": order.get("summary"),
+                "sample": (order.get("detail") or {}).get("sample")
+                          or ((order.get("detail") or {}).get("captured_sample") or {}).get("sample"),
+                "attempts": order.get("attempts"),
+                "created_ts": order.get("created_ts") or order.get("ts"),
+            })
+    except Exception:  # noqa: BLE001 - adaptive projection must remain available
+        compatibility_orders = []
+    compatibility_orders.sort(key=lambda row: str(row.get("created_ts") or ""), reverse=True)
+    compatibility_blocks = [
+        {
+            "class": "compatibility_repair",
+            "subject": "Server format repair · %s" % (order.get("tool") or "unknown tool"),
+            "domains": ["runtime"],
+            "alert": order.get("summary") or "Captured response no longer passes its parser",
+            "status": order.get("status"),
+            "sample": order.get("sample"),
+        }
+        for order in compatibility_orders
+    ]
     return {
-        "status": "holding" if blocked else "clear",
+        "status": "repairing" if compatibility_orders else "holding" if blocked else "clear",
         "blocked_domains": blocked,
-        "active_blocks": current.get("active_blocks") or [],
+        "active_blocks": list(current.get("active_blocks") or []) + compatibility_blocks,
+        "compatibility": {
+            "status": "repairing" if compatibility_orders else "clear",
+            "orders": compatibility_orders,
+        },
         "signals": current.get("signals") or [],
         "resolved_blocks": current.get("resolved_blocks") or [],
         "recent_events": events[:12],

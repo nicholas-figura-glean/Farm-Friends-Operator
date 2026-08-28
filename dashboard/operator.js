@@ -226,17 +226,20 @@ function operatorAdaptive(data, evidence) {
   var domains = opList(adaptive.blocked_domains);
   var blocks = opList(adaptive.active_blocks);
   var events = opList(adaptive.recent_events);
+  var compatibilityOrders = opList(((adaptive.compatibility || {}).orders));
   var noveltyQuestions = opList(((evidence.questions || {}).questions)).filter(function (row) {
     return String(row && row.class || "").indexOf("activity_novelty_") === 0;
   }).sort(function (a,b) {
     return Number(b.last_seen_run || b.closed_run || 0) - Number(a.last_seen_run || a.closed_run || 0);
   });
   var question = noveltyQuestions[0] || null;
-  var holding = domains.length > 0;
-  var state = holding ? "Containing novel activity" : question && (question.status === "open" || question.status === "probing")
+  var repairing = compatibilityOrders.length > 0;
+  var holding = domains.length > 0 || repairing;
+  var state = repairing ? "Repairing server format" : domains.length ? "Containing novel activity" : question && (question.status === "open" || question.status === "probing")
     ? "Investigating new activity" : "Adaptive guard clear";
-  var detail = holding
-    ? "Holding " + domains.join(", ") + " while evidence is gathered"
+  var detail = repairing
+    ? "Captured " + (compatibilityOrders[0].tool || "server") + " drift · repair " + (compatibilityOrders[0].status || "open")
+    : domains.length ? "Holding " + domains.join(", ") + " while evidence is gathered"
     : question ? "Latest question " + question.status + " · run #" + (question.last_seen_run == null ? "—" : question.last_seen_run)
     : "No unexplained strategic behavior is active";
   opText("adaptive-state", state);
@@ -249,7 +252,7 @@ function operatorAdaptive(data, evidence) {
     ["Domains held", domains.length ? domains.join(", ") : "none", holding ? "watch" : "good"],
     ["Coin outflow", num(adaptive.trade_coin_outflow || 0), Number(adaptive.trade_coin_outflow || 0) ? "bad" : "good"],
     ["Coins protected", num(adaptive.trade_coin_outflow_blocked || 0), Number(adaptive.trade_coin_outflow_blocked || 0) ? "watch" : ""],
-    ["Latest signal", latestEvent.run == null ? "none" : "run #" + latestEvent.run, latestEvent.kind === "signal" ? "watch" : ""]
+    ["Format repair", repairing ? (compatibilityOrders[0].tool || "open") : "none", repairing ? "watch" : "good"]
   ].map(function (row) {
     return '<div class="adaptive-metric ' + esc(row[2]) + '"><small>' + esc(row[0]) + '</small><b>' + esc(row[1]) + '</b></div>';
   }).join(""));

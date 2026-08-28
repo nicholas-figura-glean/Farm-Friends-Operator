@@ -22,6 +22,7 @@ import sys
 import time
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +32,7 @@ from farm import (  # noqa: E402
     canary,
     claims,
     compaction,
+    compatibility,
     contract,
     control,
     cycle,
@@ -124,6 +126,29 @@ def _run_age_seconds() -> Optional[float]:
     if not stamp:
         return None
     return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def _route_parse_failure(exc: ParseDrift):
+    """Best-effort durable routing for an exact captured parser failure."""
+    try:
+        order = compatibility.route_parse_drift(
+            exc,
+            progress.read(),
+            Path(cycle.RAW_DIR),
+            queue_path=workorders.QUEUE,
+        )
+        if order:
+            ledger.record(
+                "compatibility.parse_drift_routed",
+                {"order": order.get("id"), "tool": order.get("tool")},
+            )
+        return order
+    except Exception as route_exc:  # noqa: BLE001 - routing cannot replace containment
+        ledger.record(
+            "compatibility.routing_failed",
+            {"error": "%s: %s" % (type(route_exc).__name__, str(route_exc)[:200])},
+        )
+        return None
 
 
 def do_cycle(dry: bool) -> int:
@@ -536,6 +561,10 @@ def do_supervise(cadence: int = 300) -> int:
             do_cycle(dry=False)
             recovered = True
         except (ParseDrift, McpError, Timeout) as exc:
+            if isinstance(exc, ParseDrift):
+                order = _route_parse_failure(exc)
+                if order:
+                    notes.append("parser repair routed: %s" % order.get("id"))
             notes.append("recovery cycle failed: %s: %s" % (exc.__class__.__name__, str(exc)[:80]))
         except SystemExit:
             notes.append("recovery skipped: a run already holds the lock")
@@ -965,8 +994,9 @@ def do_self_test() -> int:
     if len(summary_farm.animals) != 3 or not summary_farm.animals_summarized:
         failures.append("representative animals were confused with the full herd")
     checks += 1
-    if summary_farm.max_hunger != 6 or summary_farm.feed != 8657835:
-        failures.append("summarized farm lost sampled hunger or inventory")
+    if (summary_farm.max_hunger != 6 or summary_farm.feed != 8657835
+            or summary_farm.ready_units != 297685):
+        failures.append("summarized farm lost sampled hunger, aggregate readiness, or inventory")
     checks += 1
     if summary_farm.plot_total != 493 or summary_farm.plots[0].crop != "wildflowers":
         failures.append("summarized fields were not retained")
@@ -2317,6 +2347,10 @@ def main() -> int:
             _arm_watchdog(rules.CYCLE_HARD_TIMEOUT)
             return do_health()
         except (ParseDrift, McpError, Timeout) as exc:
+            if isinstance(exc, ParseDrift):
+                order = _route_parse_failure(exc)
+                if order:
+                    print("compatibility_order: %s" % order.get("id"))
             print("HEALTH FAILED: %s: %s" % (exc.__class__.__name__, exc))
             print("autonomy_recovery: launchd will retry")
             return 4
@@ -2335,9 +2369,12 @@ def main() -> int:
             _align()
         return do_cycle(dry=args.dry_run)
     except (ParseDrift, McpError, Timeout) as exc:
+        order = _route_parse_failure(exc) if isinstance(exc, ParseDrift) else None
         progress.finish("failed", error="%s: %s" % (exc.__class__.__name__, exc))
         print("FARM FAILED: %s: %s" % (exc.__class__.__name__, exc))
         print("raw responses in %s" % cycle.RAW_DIR)
+        if order:
+            print("compatibility_order: %s" % order.get("id"))
         print("autonomy_recovery: supervisor will retry")
         return 4
     except Exception:  # noqa: BLE001
