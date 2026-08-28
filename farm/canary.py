@@ -43,10 +43,11 @@ Safety properties this module must preserve:
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import compaction, control, evaluation, rules, workorders
 
@@ -170,23 +171,52 @@ def _mean(values: List[float]) -> Optional[float]:
     return sum(clean) / len(clean) if clean else None
 
 
+def _sample_weight(row: Dict[str, Any]) -> float:
+    """Minutes represented by a rate sample, bounded to the stall horizon.
+
+    A hand-started cycle can land seconds before launchd starts the scheduled one.
+    Giving that ten-second zero the same weight as a ten-minute score window cut the
+    measured candidate rate in half and repeatedly rolled back an unchanged UI.
+    Historical rows without interval telemetry retain equal weight for compatibility.
+    """
+    try:
+        value = float(row.get("interval_min"))
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(value) or value <= 0:
+        return 1.0
+    return min(value, rules.CANARY_STALL_SECONDS / 60.0)
+
+
+def _weighted_mean(
+    rows: List[Dict[str, Any]],
+    getter: Callable[[Dict[str, Any]], Optional[float]],
+) -> Optional[float]:
+    samples = []
+    for row in rows:
+        value = getter(row)
+        if value is not None:
+            samples.append((value, _sample_weight(row)))
+    total_weight = sum(weight for _, weight in samples)
+    if not samples or total_weight <= 0:
+        return None
+    return sum(value * weight for value, weight in samples) / total_weight
+
+
 def baseline_rate(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
-    """Mean produce rate over the runs immediately before now."""
+    """Time-weighted produce rate over the runs immediately before now."""
     rows = runs if runs is not None else _runs()
-    rates = [r for r in (_rate(row) for row in rows[-rules.CANARY_BASELINE_RUNS :]) if r is not None]
-    return _mean(rates)
+    return _weighted_mean(rows[-rules.CANARY_BASELINE_RUNS :], _rate)
 
 
 def baseline_per_animal(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
-    """Mean per-animal produce rate over the runs immediately before now.
+    """Time-weighted per-animal rate over the runs immediately before now.
 
     This is the figure the verdict actually uses. `baseline_rate` is still recorded
     because it is what an operator recognises, but it must not decide a revert.
     """
     rows = runs if runs is not None else _runs()
-    rates = [r for r in (_per_animal(row) for row in rows[-rules.CANARY_BASELINE_RUNS :])
-             if r is not None]
-    return _mean(rates)
+    return _weighted_mean(rows[-rules.CANARY_BASELINE_RUNS :], _per_animal)
 
 
 def latest_run(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[int]:
@@ -326,14 +356,14 @@ def evaluate(
     # cannot hold a canary open forever.
     contaminated = [r for r in after if _exogenous_loss(r)]
     usable = [r for r in after if not _exogenous_loss(r)]
-    rates = [r for r in (_rate(row) for row in usable) if r is not None]
-    per_animal = [r for r in (_per_animal(row) for row in usable) if r is not None]
 
-    # Absolute rate is reported for legibility; the per-animal figure decides.
+    # Absolute rate is reported for legibility; the per-animal figure decides. Rate
+    # windows are time-weighted so a rapid duplicate run cannot outweigh minutes of
+    # measured production merely because it contributes another row.
     baseline = record.get("baseline_rate")
-    observed = _mean(rates)
+    observed = _weighted_mean(usable, _rate)
     baseline_pa = record.get("baseline_per_animal")
-    observed_pa = _mean(per_animal)
+    observed_pa = _weighted_mean(usable, _per_animal)
 
     verdict: Dict[str, Any] = {
         "status": WATCHING,
@@ -358,22 +388,21 @@ def evaluate(
         )
         return verdict
 
-    # A run that ends in a hard failure is decisive on its own: the canary exists
-    # to catch exactly this, and waiting for a rate average would keep broken code
-    # live for several more cycles. ``zero_streak`` in a run row spans releases,
-    # however, so derive that signal strictly from candidate rows. Otherwise the
-    # first candidate run can inherit an old streak and be blamed for pre-flip state.
-    broken: List[tuple[Dict[str, Any], str, int]] = []
-    for index, row in enumerate(after):
-        candidate_streak = _candidate_zero_streak(after[: index + 1])
-        failure = _breakage(row, zero_streak=candidate_streak)
+    # A core transport/parser failure is decisive on its own: waiting for a rate
+    # average would keep broken code live for several more cycles. Empty collections
+    # are not independently decisive. The server banks produce and updates lifetime
+    # score in bursts, so seven empty collections occurred while rank, herd, and the
+    # time-weighted score rate stayed healthy. Sustained inactivity is still rejected
+    # by the authoritative rate floor below.
+    broken: List[tuple[Dict[str, Any], str]] = []
+    for row in after:
+        failure = _breakage(row)
         if failure:
-            broken.append((row, failure, candidate_streak))
+            broken.append((row, failure))
     if broken:
-        row, failure, candidate_streak = broken[0]
+        row, failure = broken[0]
         verdict["status"] = REGRESSED
         verdict["failure_kind"] = failure
-        verdict["candidate_zero_streak"] = candidate_streak
         verdict["reason"] = "run %s failed under the new release: %s" % (
             row.get("run"),
             ", ".join(str(a) for a in (row.get("anomalies") or [])[:3]) or failure,
@@ -460,21 +489,9 @@ def _quantity(value: Any) -> float:
         return 0.0
 
 
-def _candidate_zero_streak(rows: List[Dict[str, Any]]) -> int:
-    """Trailing no-collection streak bounded to rows owned by this candidate."""
-    streak = 0
-    for row in reversed(rows):
-        if _quantity(row.get("collected")) > 0:
-            break
-        streak += 1
-    return streak
-
-
 def _breakage(row: Dict[str, Any], zero_streak: Optional[int] = None) -> str:
-    """Classify decisive release breakage without absorbing pre-release state."""
-    streak = int(_quantity(row.get("zero_streak"))) if zero_streak is None else int(zero_streak)
-    if streak >= 3:
-        return "candidate_zero_production"
+    """Classify decisive breakage; collection-only streaks defer to score rate."""
+    del zero_streak  # retained for callers that replay the historical signature
     if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
         return "core_transport_or_parse_failure"
     return ""

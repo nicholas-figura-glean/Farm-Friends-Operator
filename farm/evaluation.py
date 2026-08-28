@@ -82,6 +82,31 @@ def metric_samples(rows: Iterable[Dict[str, Any]], metric: str = "per_animal") -
     return [value for value in (getter(row) for row in rows) if value is not None]
 
 
+def _weighted_metric(rows: Iterable[Dict[str, Any]], metric: str) -> Optional[float]:
+    """Time-weight a reliability metric without changing strategy cohorts.
+
+    Reliability canaries sometimes include a near-simultaneous manual and launchd
+    run. Equal row weighting lets that seconds-long zero count as much as a normal
+    five- or ten-minute window. Strategy experiments retain independent row samples;
+    this aggregate is only the operational point estimate used for equivalence.
+    """
+    getter = _per_animal if metric == "per_animal" else _rate
+    weighted: List[Tuple[float, float]] = []
+    for row in rows:
+        value = getter(row)
+        if value is None:
+            continue
+        weight = _number(row.get("interval_min"))
+        if weight is None or weight <= 0:
+            weight = 1.0
+        weight = min(weight, rules.CANARY_STALL_SECONDS / 60.0)
+        weighted.append((value, weight))
+    total = sum(weight for _, weight in weighted)
+    if not weighted or total <= 0:
+        return None
+    return sum(value * weight for value, weight in weighted) / total
+
+
 def _contaminated(row: Dict[str, Any]) -> bool:
     counts = row.get("risk_event_counts") or {}
     if isinstance(counts, dict) and int(counts.get("aliens") or 0) > 0:
@@ -211,6 +236,26 @@ def judge(
         result["reason"] = "%d/%d efficacy runs observed" % (len(candidate), rules.EFFICACY_MIN_RUNS)
         return result
     interval = _effect_interval(baseline, candidate)
+    if change_class == "reliability":
+        baseline_field = "baseline_per_animal" if metric == "per_animal" else "baseline_rate"
+        weighted_baseline = _number(record.get(baseline_field))
+        weighted_candidate = _weighted_metric(usable_runs, metric)
+        if (weighted_baseline is not None and weighted_baseline > 0
+                and weighted_candidate is not None):
+            result["unweighted_interval"] = {
+                key: (round(value, 8) if isinstance(value, float) else value)
+                for key, value in interval.items()
+            }
+            interval = {
+                "baseline": weighted_baseline,
+                "candidate": weighted_candidate,
+                "effect": (weighted_candidate - weighted_baseline) / weighted_baseline,
+                # Reliability uses the declared operational point-estimate band;
+                # confidence bounds remain available in unweighted_interval.
+                "lower": None,
+                "upper": None,
+            }
+            result["weighting"] = "interval_min"
     result.update({
         key: (round(value, 8) if isinstance(value, float) else value)
         for key, value in interval.items()
@@ -237,9 +282,9 @@ def judge(
         )
         return result
 
-    lower = float(interval["lower"])
     effect = float(interval["effect"])
     if change_class == "strategy":
+        lower = float(interval["lower"])
         expected = max(
             rules.STRATEGY_MIN_IMPROVEMENT,
             float(record.get("expected_improvement") or 0.0),

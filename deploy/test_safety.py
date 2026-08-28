@@ -382,6 +382,23 @@ def main() -> int:
                         "strategy candidate with no gain is rejected", flat)
             suite.check(reliable["accepted"] and reliable["status"] == evaluation.EQUIVALENT,
                         "reliability release can pass a tight equivalence gate", reliable)
+            duplicate_window = runs(23, 10, 1.0)
+            for row in duplicate_window:
+                row["interval_min"] = 5.0
+            duplicate_window[-1].update(produce_per_min=0.0, interval_min=0.2, collected=0)
+            weighted_reliable = evaluation.judge(
+                dict(base_record, change_class="reliability", baseline_per_animal=1.0),
+                duplicate_window,
+                store,
+            )
+            suite.check(
+                weighted_reliable["accepted"]
+                and weighted_reliable.get("weighting") == "interval_min"
+                and weighted_reliable.get("candidate", 0) > 0.99
+                and (weighted_reliable.get("unweighted_interval") or {}).get("candidate") == 0.9,
+                "a seconds-long duplicate zero cannot fail reliability equivalence",
+                weighted_reliable,
+            )
 
             bootstrap = evaluation.ensure_champion(store, "rev-a", policy_id="pol-a", run=12)
             repeated = evaluation.ensure_champion(store, "rev-other", policy_id="pol-b", run=13)

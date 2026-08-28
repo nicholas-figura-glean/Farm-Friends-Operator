@@ -160,12 +160,43 @@ check("an explicitly offered Python file can be created",
       "experiments/bounded_probe.py" in new_result["files"], str(new_result))
 check("new-file accounting measures the created bytes",
       0 < new_result["changed_bytes"] < 100, str(new_result["changed_bytes"]))
+placeholder_new = author_agent.apply_edits(
+    [{
+        "path": "experiments/placeholder_probe.py",
+        "search": "# new file",
+        "replace": '"""Bounded generated probe."""\n\nVALUE = 2\n',
+    }],
+    sandbox,
+    allowed=["experiments/placeholder_probe.py"],
+)
+check("a placeholder SEARCH cannot strand an explicitly offered new file",
+      "experiments/placeholder_probe.py" in placeholder_new["files"]
+      and placeholder_new["problems"] == [],
+      str(placeholder_new))
+empty_new = author_agent.apply_edits(
+    [{"path": "experiments/empty_probe.py", "search": "# new file", "replace": ""}],
+    sandbox,
+    allowed=["experiments/empty_probe.py"],
+)
+check("a new file still requires a nonempty replacement",
+      empty_new["files"] == {}
+      and any("nonempty REPLACE" in p for p in empty_new["problems"]),
+      str(empty_new))
 refused_new = author_agent.apply_edits(
     new_block, sandbox, allowed=["experiments/different_probe.py"],
 )
 check("a model cannot invent an unoffered new path",
       refused_new["files"] == {} and any("not offered" in p for p in refused_new["problems"]),
       str(refused_new))
+existing_empty = author_agent.apply_edits(
+    [{"path": "farm/parse.py", "search": "", "replace": "VALUE = 3\n"}],
+    sandbox,
+    allowed=["farm/parse.py"],
+)
+check("empty SEARCH remains invalid for an existing file",
+      existing_empty["files"] == {}
+      and any("only valid for a new file" in p for p in existing_empty["problems"]),
+      str(existing_empty))
 large_existing = "PREFIX = 1\n" + ("# padding\n" * 6000)
 with open(os.path.join(sandbox, "farm", "large.py"), "w") as handle:
     handle.write(large_existing)
@@ -525,8 +556,29 @@ write_runs(base + [{"run": 7, "produce_per_min": 0.0, "collected": 0, "zero_stre
 verdict = canary.evaluate(store, runs)
 check("a persisted global streak cannot replace candidate-owned evidence",
       verdict["status"] == canary.WATCHING, str(verdict))
-check("the standalone breakage classifier still understands historical rows",
-      canary._looks_broken({"zero_streak": 3, "collected": 0}))
+check("a collection-only streak is not a hard release failure",
+      not canary._looks_broken({"zero_streak": 3, "collected": 0}))
+
+# Live runs 1204-1207 exposed both proxies at once: four empty collections included
+# one 9.9-minute productive score window and one 13-second duplicate launchd run.
+# Equal row weighting reported 683/min and reverted; elapsed-time weighting reports
+# the actual ~1,337/min represented by those windows.
+banked_candidate = [
+    {"run": 7, "animals": 16875, "interval_min": 9.90,
+     "produce_per_min": 2732.5, "collected": 0, "zero_streak": 4},
+    {"run": 8, "animals": 16875, "interval_min": 0.22,
+     "produce_per_min": 0.0, "collected": 0, "zero_streak": 5},
+    {"run": 9, "animals": 16875, "interval_min": 5.05,
+     "produce_per_min": 0.0, "collected": 0, "zero_streak": 6},
+    {"run": 10, "animals": 16875, "interval_min": 5.07,
+     "produce_per_min": 0.0, "collected": 0, "zero_streak": 7},
+]
+write_runs(base + banked_candidate)
+verdict = canary.evaluate(store, runs)
+check("bursty score growth outweighs collection-only and duplicate-row proxies",
+      verdict["status"] == canary.WATCHING
+      and 1300.0 < verdict.get("observed_rate", 0) < 1400.0,
+      str(verdict))
 
 # A release can be armed in the middle of an existing zero-collection streak. The
 # first candidate row still carries the cycle's global streak, but attribution must
@@ -560,10 +612,10 @@ second_candidate = dict(first_candidate, run=11, zero_streak=5)
 third_candidate = dict(first_candidate, run=12, zero_streak=6)
 write_runs(preexisting + [first_candidate, second_candidate, third_candidate])
 scoped_bad = canary.evaluate(scope_store, runs)
-check("three candidate-owned zero runs still trigger rollback",
+check("three genuinely score-zero candidate runs still trigger rate rollback",
       scoped_bad["status"] == canary.REGRESSED
-      and scoped_bad.get("failure_kind") == "candidate_zero_production"
-      and scoped_bad.get("candidate_zero_streak") == 3,
+      and scoped_bad.get("failure_kind") is None
+      and "produce" in scoped_bad.get("reason", ""),
       str(scoped_bad))
 queued = canary._regression_order(scope_armed, scoped_bad, scope_queue)
 queued_again = canary._regression_order(scope_armed, scoped_bad, scope_queue)
@@ -576,7 +628,8 @@ check("the regression order carries candidate evidence and editable files",
       queued_row.get("source") == "release_canary"
       and queued_row.get("kind") == "canary_regression"
       and queued_row.get("files") == ["monitor.py"]
-      and (queued_row.get("detail") or {}).get("candidate_zero_streak") == 3,
+      and ((queued_row.get("detail") or {}).get("verdict") or {}).get("status")
+          == canary.REGRESSED,
       str(queued_row))
 
 # Collection changed from a scalar to a per-produce mapping. A transport retry on

@@ -590,11 +590,18 @@ def apply_edits(
         path = os.path.join(root, rel)
         body = files.get(rel)
         if body is None and not os.path.isfile(path):
-            if edit["search"]:
-                problems.append("refused %s: new files require an empty SEARCH" % rel)
+            # The path is explicitly offered and absent, so there is no existing
+            # occurrence to match ambiguously. Models repeatedly put a harmless
+            # placeholder in SEARCH despite the empty-SEARCH instruction; rejecting
+            # both bounded attempts stranded every new-probe work order. Treat the
+            # nonempty replacement as the complete file while retaining all path,
+            # scope, size, compile, and release gates.
+            replacement = edit["replace"]
+            if not replacement.strip():
+                problems.append("refused %s: new files require a nonempty REPLACE" % rel)
                 continue
-            files[rel] = edit["replace"]
-            changed_bytes += len(edit["replace"].encode("utf-8"))
+            files[rel] = replacement
+            changed_bytes += len(replacement.encode("utf-8"))
             continue
         if body is None:
             try:
