@@ -27,7 +27,7 @@ _LEAGUE_LEADER_ROW = re.compile(
     r"(?P<coins>\d+)\s+coins?(?P<rest>.*)$"
 )
 _LEAGUE_UPDATED_FOOTER = re.compile(
-    r"^\(updated (?:just now|\d+ (?:sec|secs|second|seconds|min|mins|minute|minutes|hour|hours) ago)\)$",
+    r"^\(updated \d+ (?:sec|secs|second|seconds|min|mins|minute|minutes|hour|hours) ago\)$",
     re.IGNORECASE,
 )
 
