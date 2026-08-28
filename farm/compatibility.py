@@ -29,16 +29,32 @@ STEP_TO_TOOL = {
 
 
 def failed_step(progress_state: Dict[str, Any]) -> Optional[str]:
-    """Return the explicit failed pipeline step, even after active was cleared."""
+    """Return the step whose parser failed, even after deferred finalization.
+
+    Some optional reads (notably the pre-action leaderboard) deliberately record
+    ``available=false`` and let the cycle continue before the same ParseDrift is
+    raised at the final fail-closed boundary. By then the step is marked ``done``
+    and ``active`` is clear. Treat that explicit unavailable/error pair as the
+    failed step so containment can still create a compatibility work order.
+    """
     active = str(progress_state.get("active") or "")
     if active:
         return active
+    steps = list(progress_state.get("steps") or [])
     failed = [
         str(row.get("name") or "")
-        for row in (progress_state.get("steps") or [])
+        for row in steps
         if row.get("status") == "failed"
     ]
-    return failed[-1] if failed else None
+    if failed:
+        return failed[-1]
+    for row in reversed(steps):
+        detail = row.get("detail") or {}
+        if (isinstance(detail, dict)
+                and detail.get("available") is False
+                and detail.get("error")):
+            return str(row.get("name") or "") or None
+    return None
 
 
 def latest_sample(tool: str, raw_dir: Path) -> Optional[Path]:
@@ -155,7 +171,9 @@ def route_parse_drift(
     order_id = _shape_id(tool, text)
     change = {
         "id": order_id,
-        "severity": "degraded",
+        # The full cycle is already contained. This must outrank stale dashboard
+        # degradation and speculative research in the author queue.
+        "severity": "breaking",
         "kind": "runtime_parse_drift",
         "tool": tool,
         "summary": "%s rejected captured %s response: %s"
