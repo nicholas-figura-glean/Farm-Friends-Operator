@@ -50,8 +50,10 @@ def main() -> int:
     ok("no plateau: the two regimes agree within a factor of two",
        below > 0 and 0.5 <= above / below <= 2.0,
        f"below={below:.5f}, above={above:.5f}, ratio={above/below:.3f}" if below else "below=0")
+    # regression() publishes r at three decimals, so the documented 0.700
+    # boundary must pass rather than becoming an accidental >0.7005 gate.
     ok("the raw fit above 8k remains positively associated",
-       (ceiling["regression"].get("r") or 0) > 0.7, str(ceiling["regression"]))
+       (ceiling["regression"].get("r") or 0) >= 0.7, str(ceiling["regression"]))
     # See the long note in deploy/test_knowledge.py: straight-line r reads 0.993 on a
     # truly saturating cohort and swings 0.917-0.992 across defensible weightings of
     # the live one, so growth is gated on the scaling exponent instead.

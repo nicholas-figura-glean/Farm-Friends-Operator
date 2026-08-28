@@ -247,6 +247,53 @@ def _blockers(
     return blockers
 
 
+def _adaptive_summary(history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact the pre-action novelty ledger for the 2s dashboard payload."""
+    latest = history[-1] if history else {}
+    current = latest.get("novelty") or {}
+    events: List[Dict[str, Any]] = []
+    for row in reversed(history[-30:]):
+        novelty = row.get("novelty") or {}
+        for signal in reversed(novelty.get("signals") or []):
+            events.append({
+                "run": row.get("run"),
+                "ts": row.get("ts"),
+                "kind": "signal",
+                "class": signal.get("class"),
+                "subject": signal.get("subject"),
+                "detail": signal.get("detail"),
+                "domains": signal.get("domains") or [],
+                "status": "holding",
+            })
+        for resolved in reversed(novelty.get("resolved_blocks") or []):
+            events.append({
+                "run": row.get("run"),
+                "ts": row.get("ts"),
+                "kind": "resolved",
+                "class": resolved.get("class"),
+                "subject": "Strategy hold released",
+                "detail": resolved.get("reason"),
+                "domains": [],
+                "status": "resolved",
+            })
+        if len(events) >= 12:
+            break
+    blocked = list(current.get("blocked_domains") or [])
+    return {
+        "status": "holding" if blocked else "clear",
+        "blocked_domains": blocked,
+        "active_blocks": current.get("active_blocks") or [],
+        "signals": current.get("signals") or [],
+        "resolved_blocks": current.get("resolved_blocks") or [],
+        "recent_events": events[:12],
+        "trade_coin_outflow": int(latest.get("trade_coin_outflow") or 0),
+        "trade_coin_outflow_blocked": int(latest.get("trade_coin_outflow_blocked") or 0),
+        "trade_decisions": (latest.get("trade_decisions") or [])[-8:],
+        "run": latest.get("run"),
+        "ts": latest.get("ts"),
+    }
+
+
 def snapshot() -> Dict[str, Any]:
     history = _json_lines(HISTORY, 100)
     intents = _json_lines(INTENTS, 80)
@@ -301,6 +348,7 @@ def snapshot() -> Dict[str, Any]:
         "cost": _cost_detail(history),
         "signals": _signals(latest, previous),
         "scene": _scene(latest, previous),
+        "adaptive": _adaptive_summary(history),
     }
 
 
@@ -1268,6 +1316,7 @@ __OPERATOR_CSS__
     <section><h2>Last completed outcome</h2><div class="kv" id="pipe-summary"></div></section>
   </div>
   <div class="card pipeline-decision"><div class="decision-copy"><div class="page-kicker">Current autonomous decision</div><h3 id="pipe-decision-title">Compiling plan…</h3><p id="pipe-decision-body">Waiting for decision evidence.</p></div><div id="pipe-lifecycle"></div></div>
+  <div class="card adaptive-card" id="adaptive-card"><div class="adaptive-head"><div><div class="page-kicker">Pre-action strategy guard</div><h2>Adaptive activity</h2><p class="method">New trade, rival, game-mechanic, or capability behavior is contained before strategic mutation, then linked to a durable question and bounded probe.</p></div><div class="adaptive-verdict" id="adaptive-verdict"><b id="adaptive-state">Loading sentinel state</b><span id="adaptive-detail">Reading the latest novelty decision</span></div></div><div class="adaptive-metrics" id="adaptive-metrics"></div><div class="adaptive-grid"><section><h3>Current containment</h3><div id="adaptive-holds"><div class="empty">Loading domain holds…</div></div></section><section><h3>Question & probe</h3><div id="adaptive-question"><div class="empty">Loading evidence link…</div></div></section></div><div><h3>Recent adaptation timeline</h3><div class="adaptive-events" id="adaptive-events"><div class="empty">No novelty events recorded.</div></div></div></div>
   <div class="card trace">
     <div class="head"><div><h2>Execution trace <small>Measured spans + source-derived reachability</small></h2><div class="trace-sub">Run Trace shows what happened when. Tool Matrix shows which pipeline steps can reach each external MCP tool. Select a span or cell for measured arguments, result, source and call path.</div><details class="trace-explain"><summary>How to interpret measured time versus static code</summary><div class="trace-sub">Step and MCP spans share one measured clock. Python functions are static reachability only, never as invented runtime spans.</div></details></div></div>
     <div id="trace-explorer" class="trace-explorer" aria-live="polite" aria-label="Pipeline execution trace and MCP tool matrix"><div class="te-empty">Loading execution trace…</div></div>
@@ -2007,6 +2056,7 @@ function renderEvidence(ev) {
   slider.oninput=()=>paintCostCounterfactual(ev.cost||{},Number(slider.value));
   paintCostCounterfactual(ev.cost||{},Number(slider.value));
   operatorFindings(ev,OP_AUTONOMY);
+  if (LAST) operatorAdaptive(LAST,ev);
 }
 function evidenceChart(buckets, divider) {
   if (!buckets.length) return `<div class="empty">No comparable runs yet</div>`;

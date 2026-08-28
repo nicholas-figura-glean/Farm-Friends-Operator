@@ -136,11 +136,15 @@ function operatorOverview(data, autonomy, overall) {
   var produceGain = opN(latest.our_produce_gain);
   if (produceGain == null) produceGain = opDelta(trend, "produce");
   var herdGain = opDelta(trend, "animals");
+  var adaptive = data.adaptive || {};
+  var adaptiveDomains = opList(adaptive.blocked_domains);
+  var adaptiveLabel = adaptiveDomains.length ? "holding " + adaptiveDomains.join(" + ") : "clear";
   var deltas = [
     '<span class="delta good">Produce <b>' + esc(opSigned(produceGain)) + '</b></span>',
     '<span class="delta good">Herd <b>' + esc(opSigned(herdGain)) + '</b></span>',
     '<span class="delta">Adopted <b>' + esc(num(latest.adopted)) + '</b></span>',
     '<span class="delta">Feed restored <b>' + esc(num(latest.feed_bought)) + '</b></span>',
+    '<span class="delta ' + (adaptiveDomains.length ? "watch" : "good") + '">Adaptive guard <b>' + esc(adaptiveLabel) + '</b></span>',
     '<span class="delta ' + (opList(latest.anomalies).length ? "watch" : "good") + '">Verification <b>'
       + (opList(latest.anomalies).length ? opList(latest.anomalies).length + " explained" : "clean") + '</b></span>',
     '<span class="delta good">Routine tokens <b>0</b></span>'
@@ -213,6 +217,70 @@ function operatorPipeline(data) {
     return '<div class="guardrail ' + g.tone + '"><small>' + esc(g.label) + '</small><b>' + esc(g.value)
       + '</b><span>' + esc(g.detail) + '</span></div>';
   }).join(""));
+}
+
+function operatorAdaptive(data, evidence) {
+  data = data || {};
+  evidence = evidence || {};
+  var adaptive = data.adaptive || {};
+  var domains = opList(adaptive.blocked_domains);
+  var blocks = opList(adaptive.active_blocks);
+  var events = opList(adaptive.recent_events);
+  var noveltyQuestions = opList(((evidence.questions || {}).questions)).filter(function (row) {
+    return String(row && row.class || "").indexOf("activity_novelty_") === 0;
+  }).sort(function (a,b) {
+    return Number(b.last_seen_run || b.closed_run || 0) - Number(a.last_seen_run || a.closed_run || 0);
+  });
+  var question = noveltyQuestions[0] || null;
+  var holding = domains.length > 0;
+  var state = holding ? "Containing novel activity" : question && (question.status === "open" || question.status === "probing")
+    ? "Investigating new activity" : "Adaptive guard clear";
+  var detail = holding
+    ? "Holding " + domains.join(", ") + " while evidence is gathered"
+    : question ? "Latest question " + question.status + " · run #" + (question.last_seen_run == null ? "—" : question.last_seen_run)
+    : "No unexplained strategic behavior is active";
+  opText("adaptive-state", state);
+  opText("adaptive-detail", detail);
+  opClass("adaptive-verdict", "adaptive-verdict", holding ? "watch" : "");
+  opClass("adaptive-card", "card adaptive-card", holding ? "watch" : "");
+
+  var latestEvent = events[0] || {};
+  opHtml("adaptive-metrics", [
+    ["Domains held", domains.length ? domains.join(", ") : "none", holding ? "watch" : "good"],
+    ["Coin outflow", num(adaptive.trade_coin_outflow || 0), Number(adaptive.trade_coin_outflow || 0) ? "bad" : "good"],
+    ["Coins protected", num(adaptive.trade_coin_outflow_blocked || 0), Number(adaptive.trade_coin_outflow_blocked || 0) ? "watch" : ""],
+    ["Latest signal", latestEvent.run == null ? "none" : "run #" + latestEvent.run, latestEvent.kind === "signal" ? "watch" : ""]
+  ].map(function (row) {
+    return '<div class="adaptive-metric ' + esc(row[2]) + '"><small>' + esc(row[0]) + '</small><b>' + esc(row[1]) + '</b></div>';
+  }).join(""));
+
+  opHtml("adaptive-holds", blocks.length ? blocks.map(function (block) {
+    return '<article class="adaptive-hold"><div><b>' + esc(block.subject || block.class || "Novel activity") + '</b><p>'
+      + esc(opTrim(block.alert || ((block.evidence || {}).detail) || "Evidence review is active", 220)) + '</p></div><div class="adaptive-tags">'
+      + opList(block.domains).map(function (domain) { return opPill(domain, "watch"); }).join("")
+      + '<span class="delta">runs <b>' + esc(block.first_run == null ? "—" : block.first_run) + '–' + esc(block.last_run == null ? "—" : block.last_run) + '</b></span></div></article>';
+  }).join("") : '<div class="adaptive-safe"><b>No strategic domains held</b><span>Known husbandry and growth actions may continue under promoted policy.</span></div>');
+
+  if (!question) {
+    opHtml("adaptive-question", '<div class="adaptive-safe"><b>No novelty question yet</b><span>The next material rising edge will create one automatically.</span></div>');
+  } else {
+    var probe = question.active_probe_id || question.probe_result_status || "not started";
+    opHtml("adaptive-question", '<article class="adaptive-question ' + esc(opTone(question.status)) + '"><div class="adaptive-question-head"><b>'
+      + esc(question.id || question.class) + '</b>' + opPill(question.status || "open", opTone(question.status)) + '</div><p>'
+      + esc(opTrim(question.hypothesis || question.answer || "Evidence question recorded", 230)) + '</p><div class="adaptive-tags"><span class="delta">class <b>'
+      + esc(question.class) + '</b></span><span class="delta">probe <b>' + esc(probe) + '</b></span><span class="delta">generation <b>'
+      + esc(question.generation == null ? 1 : question.generation) + '</b></span></div></article>');
+  }
+
+  opHtml("adaptive-events", events.length ? events.map(function (event) {
+    var held = event.kind === "signal";
+    return '<article class="adaptive-event ' + (held ? "holding" : "resolved") + '"><span class="adaptive-event-mark">'
+      + (held ? "!" : "✓") + '</span><div><b>' + esc(event.subject || event.class || "Adaptive event") + '</b><p>'
+      + esc(opTrim(event.detail || "No detail recorded", 240)) + '</p><div class="adaptive-tags"><span class="delta">run <b>#'
+      + esc(event.run) + '</b></span><span class="delta"><b>' + esc(event.status || event.kind) + '</b></span>'
+      + opList(event.domains).map(function (domain) { return opPill(domain, "watch"); }).join("") + '</div></div><time>'
+      + esc(opAgoTs(event.ts)) + '</time></article>';
+  }).join("") : '<div class="adaptive-safe"><b>No novelty events recorded</b><span>The sentinel is armed before strategic mutation.</span></div>');
 }
 
 function operatorHealing(data) {
@@ -382,6 +450,7 @@ function renderOperator(data, autonomy) {
   var overall = operatorOverall(data, autonomy || OP_AUTONOMY || {});
   operatorOverview(data, autonomy || OP_AUTONOMY || {}, overall);
   operatorPipeline(data);
+  operatorAdaptive(data, typeof EVIDENCE !== "undefined" ? EVIDENCE : null);
   operatorHealing(data);
   operatorWire(data);
   if (typeof EVIDENCE !== "undefined" && EVIDENCE) operatorFindings(EVIDENCE, autonomy || OP_AUTONOMY || {});
@@ -391,6 +460,7 @@ function renderOperatorTick(data) {
   if (!data) return;
   operatorOverall(data, OP_AUTONOMY || {});
   operatorPipeline(data);
+  operatorAdaptive(data, typeof EVIDENCE !== "undefined" ? EVIDENCE : null);
   operatorWire(data);
 }
 

@@ -59,7 +59,19 @@ def _payload() -> dict:
         "health": "healthy",
         "latest": {"run": 216, "ts": "2026-08-21T15:11:56Z", "rank": 1, "animals": 11869,
                    "produce": 1410000, "units_per_chicken_min": 0.12, "max_hunger": 18,
-                   "adopted": 0, "anomalies": []},
+                   "adopted": 0, "anomalies": [], "trade_coin_outflow": 0,
+                   "trade_coin_outflow_blocked": 400000,
+                   "novelty": {"blocked_domains": ["offers", "trades"],
+                               "active_blocks": [{"class": "activity_novelty_rival",
+                                                  "subject": "competitive activity",
+                                                  "domains": ["offers", "trades"],
+                                                  "first_run": 216, "last_run": 216,
+                                                  "alert": "John entered a new capital regime"}],
+                               "signals": [{"class": "activity_novelty_rival",
+                                            "subject": "competitive activity",
+                                            "domains": ["offers", "trades"],
+                                            "detail": "John coins increased by 823,576"}],
+                               "resolved_blocks": []}},
         "current": {"active": True, "stage": "feed"},
         "launchd": {"cycle": {"state": "running"}, "supervisor": {"state": "ok"}},
         "blockers": [],
@@ -95,6 +107,20 @@ def _payload() -> dict:
                   "ready_units": 3303, "rank": 1, "produce": 1410000,
                   "produce_per_sec": 29.8, "produce_delta": 11491,
                   "ts": "2026-08-21T15:11:56Z"},
+        "adaptive": {"status": "holding", "blocked_domains": ["offers", "trades"],
+                     "active_blocks": [{"class": "activity_novelty_rival",
+                                        "subject": "competitive activity",
+                                        "domains": ["offers", "trades"],
+                                        "first_run": 216, "last_run": 216,
+                                        "alert": "John entered a new capital regime"}],
+                     "signals": [{"class": "activity_novelty_rival"}],
+                     "resolved_blocks": [], "trade_coin_outflow": 0,
+                     "trade_coin_outflow_blocked": 400000,
+                     "recent_events": [{"run": 216, "ts": "2026-08-21T15:11:56Z",
+                                        "kind": "signal", "class": "activity_novelty_rival",
+                                        "subject": "competitive activity",
+                                        "detail": "John coins increased by 823,576",
+                                        "domains": ["offers", "trades"], "status": "holding"}]},
         "log_tail": ["FARM 2026-08-21T15:11:56Z run=216 ok"],
         "release": {"revision": "20260821T150327Z", "stale": False},
         "trace": {
@@ -209,6 +235,12 @@ var RESULT = (function () {
   ok("operator shell: overview explains what changed", (html("overview-deltas") || "").indexOf("Produce") >= 0 && (html("overview-deltas") || "").indexOf("Routine tokens") >= 0);
   ok("operator shell: latest cycle shows observe through verify", (html("cycle-story") || "").indexOf("Observe") >= 0 && (html("cycle-story") || "").indexOf("Verify") >= 0);
   ok("operator shell: pipeline surfaces its decision and guardrails", (txt("pipe-decision-title") || "").length > 10 && (html("pipe-guardrails") || "").indexOf("Production") >= 0);
+  ok("adaptive guard: overview chip names held domains", (html("overview-deltas") || "").indexOf("Adaptive guard") >= 0 && (html("overview-deltas") || "").indexOf("offers + trades") >= 0, html("overview-deltas"));
+  ok("adaptive guard: pipeline verdict surfaces containment", txt("adaptive-state") === "Containing novel activity", txt("adaptive-state"));
+  ok("adaptive guard: held domains and protected coins are visible", (html("adaptive-holds") || "").indexOf("competitive activity") >= 0 && (html("adaptive-metrics") || "").indexOf("400,000") >= 0, html("adaptive-holds"));
+  ok("adaptive guard: recent evidence identifies the rival change", (html("adaptive-events") || "").indexOf("John coins increased by 823,576") >= 0, html("adaptive-events"));
+  operatorAdaptive(LIVE,{questions:{questions:[{id:"q-rival",class:"activity_novelty_rival",status:"answered",generation:2,last_seen_run:216,probe_result_status:"passed",hypothesis:"John entered a materially different capital regime"}]}});
+  ok("adaptive guard: durable question and probe are linked", (html("adaptive-question") || "").indexOf("q-rival") >= 0 && (html("adaptive-question") || "").indexOf("passed") >= 0 && (html("adaptive-question") || "").indexOf("generation") >= 0, html("adaptive-question"));
   ok("operator shell: healing remains a closed loop when quiet", (html("healing-loop") || "").indexOf("Defaults preserved") >= 0);
   var HEALING = {knobs:{},classes:[
     {class:"threat",count:4,last_run:216,last_action:"contained wolf",alerts:["wolf"]},
@@ -506,6 +538,7 @@ def main() -> int:
         if panel_id and classes and "tab" in classes.group(1).split():
             packaged_panels.add(panel_id.group(1))
     expected_panels = {"overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture"}
+    adaptive_projection = monitor._adaptive_summary([_payload()["latest"]])
     static_checks = [
         ("real /api/state snapshot survives trace helpers", snapshot_error is None),
         ("bootstrap runs before the game bundle", boot != -1 and game != -1 and boot < game),
@@ -519,6 +552,13 @@ def main() -> int:
         ("game bundle is embedded exactly once", html.count(monitor.GAME_JS) == 1),
         ("operator bundle is embedded exactly once", html.count(monitor.OPERATOR_JS) == 1),
         ("operator stylesheet is embedded", ".autonomy-ribbon" in html and ".knowledge-flow" in html),
+        ("adaptive activity is a first-class pipeline panel", 'id="adaptive-card"' in html and 'id="adaptive-events"' in html),
+        ("adaptive panel styles disclose holding and resolved states", ".adaptive-card.watch" in html and ".adaptive-event.resolved" in html),
+        ("adaptive server projection preserves holds and trade protection",
+         adaptive_projection.get("blocked_domains") == ["offers", "trades"]
+         and adaptive_projection.get("trade_coin_outflow") == 0
+         and adaptive_projection.get("trade_coin_outflow_blocked") == 400000
+         and len(adaptive_projection.get("recent_events") or []) == 1),
         ("served page has no operator-attention state token",
          all(token not in html for token in (
              "system-state attention", "hero-verdict attention",
