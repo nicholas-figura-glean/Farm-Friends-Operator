@@ -59,6 +59,18 @@ check(len(league_rows) == 1
       and league_rows[0].animals == 16868
       and league_rows[0].coins == 335146984,
       "league leaderboard normalization preserves semantic values", league_rows)
+just_now_rows = parse.parse_leaderboard(
+    "🏆 Farm Friends leaderboard (by league, then lifetime produce)\n"
+    " 1. 💠 Platinum II     Nick: 253023881 lifetime produce, "
+    "16875/16875 animals, 335560201 coins, 493 🌼 👽 Alien invasion!\n"
+    "(updated just now)\n"
+)
+check(len(just_now_rows) == 1
+      and just_now_rows[0].name == "Nick"
+      and just_now_rows[0].produce == 253023881
+      and just_now_rows[0].animals == 16875
+      and just_now_rows[0].coins == 335560201,
+      "just-now footer and crisis suffix preserve leaderboard values", just_now_rows)
 legacy_rows = parse.parse_leaderboard(
     "🏆 Farm Friends leaderboard (by lifetime produce)\n"
     "🥇 Nick: 961 produce, 146 animals, 6 coins, 1 🌼\n"
