@@ -38,6 +38,7 @@ INTENTS = STATE / "intents.ndjson"
 TOOL_CALLS = STATE / "tool_calls.ndjson"
 ALERTS = STATE / "alerts.ndjson"
 LOG = STATE / "launchd.log"
+RAW_LATEST = STATE / "raw" / "latest"
 LABEL = "com.nickfigura.farmfriends"
 APP_ID = "farmfriends-monitor"   # identity marker in /api/state, so a launcher can
                                 # tell our dashboard from anything else on the port
@@ -431,6 +432,152 @@ def _adaptive_summary(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+_FARM_LEAGUE_RE = re.compile(
+    r"\s(?P<badge>\S+)\s+(?P<league>[A-Za-z]+)\s+(?P<tier>[IVXLCDM]+)\s+"
+    r"\(level (?P<level>\d+)\)",
+)
+_FARM_PROGRESS_RE = re.compile(
+    r"Lifetime produce (?P<produce>\d+)\s+·\s+animals "
+    r"(?P<animals>\d+)/(?P<capacity>\d+)"
+    r"(?:\s+·\s+plots (?P<plots>\d+)/(?P<plot_capacity>\d+))?",
+)
+_LEAGUE_STANDING_RE = re.compile(
+    r"^\s*(?P<rank>\d+)\.\s+(?P<badge>\S+)\s+"
+    r"(?P<league>[A-Za-z]+)\s+(?P<tier>[IVXLCDM]+)\s{2,}"
+    r"(?P<name>.+?):\s+(?P<produce>\d+)\s+lifetime produce,\s+"
+    r"(?P<animals>\d+)/(?P<capacity>\d+)\s+animals?,\s+"
+    r"(?P<coins>\d+)\s+coins?(?:,\s+(?P<flowers>\d+)\s+🌼)?(?P<status>.*)$",
+)
+
+
+def _latest_raw(prefix: str) -> Dict[str, Any]:
+    """Newest captured response for a prefix; never makes a farm API call."""
+    try:
+        candidates = [path for path in RAW_LATEST.glob(prefix + "*.txt") if path.is_file()]
+        path = max(candidates, key=lambda item: item.stat().st_mtime)
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        return {
+            "text": path.read_text(encoding="utf-8", errors="replace"),
+            "sample": path.name,
+            "captured_at": stamp,
+        }
+    except (OSError, ValueError):
+        return {}
+
+
+def _parse_farm_progression(text: str) -> Dict[str, Any]:
+    """Project league/capacity facts from an already-captured list_farm response."""
+    lines = str(text or "").splitlines()
+    if not lines:
+        return {}
+    league = _FARM_LEAGUE_RE.search(lines[0])
+    progress = next((_FARM_PROGRESS_RE.search(line) for line in lines[1:3]
+                     if _FARM_PROGRESS_RE.search(line)), None)
+    if league is None or progress is None:
+        return {}
+    produce = int(progress.group("produce"))
+    capacity = int(progress.group("capacity"))
+    animals = int(progress.group("animals"))
+    body = "\n".join(lines[:3])
+    next_level = re.search(r"next level at (\d+) produce", body, re.IGNORECASE)
+    prestige = "prestige available" in body.lower()
+    next_produce = int(next_level.group(1)) if next_level else None
+    threshold_pct = (
+        min(100.0, produce / next_produce * 100.0)
+        if next_produce else (100.0 if prestige else None)
+    )
+    return {
+        "badge": league.group("badge"),
+        "league": "%s %s" % (league.group("league"), league.group("tier")),
+        "league_name": league.group("league"),
+        "tier": league.group("tier"),
+        "level": int(league.group("level")),
+        "produce": produce,
+        "animals": animals,
+        "capacity": capacity,
+        "capacity_used_pct": round(animals / capacity * 100.0, 2) if capacity else None,
+        "capacity_remaining": max(0, capacity - animals),
+        "plots": int(progress.group("plots")) if progress.group("plots") else None,
+        "plot_capacity": (int(progress.group("plot_capacity"))
+                          if progress.group("plot_capacity") else None),
+        "next_level_produce": next_produce,
+        "produce_to_next": max(0, next_produce - produce) if next_produce else 0,
+        "threshold_pct": round(threshold_pct, 2) if threshold_pct is not None else None,
+        "prestige_available": prestige,
+        "full": bool(capacity and animals >= capacity),
+    }
+
+
+def _latest_farm_progression() -> Dict[str, Any]:
+    """Newest list_farm capture that actually contains progression metadata."""
+    try:
+        candidates = sorted(
+            (path for path in RAW_LATEST.glob("list_farm*.txt") if path.is_file()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return {}
+    for path in candidates:
+        try:
+            progression = _parse_farm_progression(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+            if progression:
+                progression.update({
+                    "sample": path.name,
+                    "captured_at": datetime.fromtimestamp(
+                        path.stat().st_mtime, timezone.utc
+                    ).isoformat(),
+                })
+                return progression
+        except OSError:
+            continue
+    return {}
+
+
+def _parse_league_standings(text: str) -> List[Dict[str, Any]]:
+    """Parse league metadata for display without replacing protected game parsers."""
+    rows: List[Dict[str, Any]] = []
+    for line in str(text or "").splitlines():
+        match = _LEAGUE_STANDING_RE.match(line)
+        if match is None:
+            continue
+        animals = int(match.group("animals"))
+        capacity = int(match.group("capacity"))
+        status = str(match.group("status") or "")
+        rows.append({
+            "rank": int(match.group("rank")),
+            "badge": match.group("badge"),
+            "league": "%s %s" % (match.group("league"), match.group("tier")),
+            "league_name": match.group("league"),
+            "tier": match.group("tier"),
+            "name": match.group("name"),
+            "produce": int(match.group("produce")),
+            "animals": animals,
+            "capacity": capacity,
+            "capacity_used_pct": round(animals / capacity * 100.0, 2) if capacity else None,
+            "capacity_remaining": max(0, capacity - animals),
+            "coins": int(match.group("coins")),
+            "flowers": int(match.group("flowers")) if match.group("flowers") else 0,
+            "full": "FULL" in status.upper() or bool(capacity and animals >= capacity),
+            "prestige_available": "prestige" in status.lower(),
+        })
+    return rows
+
+
+def _league_state() -> Dict[str, Any]:
+    board_raw = _latest_raw("leaderboard")
+    progression = _latest_farm_progression()
+    standings = _parse_league_standings(str(board_raw.get("text") or ""))
+    return {
+        "progression": progression,
+        "standings": standings,
+        "sample": board_raw.get("sample"),
+        "captured_at": board_raw.get("captured_at"),
+    }
+
+
 def snapshot() -> Dict[str, Any]:
     history = _json_lines(HISTORY, 100)
     intents = _json_lines(INTENTS, 80)
@@ -465,6 +612,30 @@ def snapshot() -> Dict[str, Any]:
             }
         )
 
+    league_state = _league_state()
+    progression = dict(league_state.get("progression") or {})
+    league_standings = list(league_state.get("standings") or [])
+    deltas = {row["name"]: row.get("delta", 0) for row in rival_rows}
+    own_score = next(
+        (row.get("produce") for row in league_standings if row.get("name") == "Nick"),
+        latest.get("produce") or 0,
+    )
+    for row in league_standings:
+        row["self"] = row.get("name") == "Nick"
+        row["delta"] = (
+            (latest.get("produce") or own_score) - (previous.get("produce") or own_score)
+            if row["self"] else deltas.get(str(row.get("name")), 0)
+        )
+        row["gap"] = int(own_score or 0) - int(row.get("produce") or 0)
+    own_live = next((row for row in league_standings if row.get("self")), {})
+    if own_live:
+        for key in ("badge", "league", "league_name", "tier", "animals", "capacity",
+                    "capacity_used_pct", "capacity_remaining", "full", "prestige_available"):
+            if progression.get(key) is None and own_live.get(key) is not None:
+                progression[key] = own_live.get(key)
+    scene = _scene(latest, previous)
+    scene["progression"] = progression
+
     return {
         "app": APP_ID,
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -473,6 +644,12 @@ def snapshot() -> Dict[str, Any]:
         "latest": latest,
         "trend": history[-20:],
         "leaderboard": rival_rows,
+        "league_standings": league_standings,
+        "league_snapshot": {
+            "sample": league_state.get("sample"),
+            "captured_at": league_state.get("captured_at"),
+        },
+        "progression": progression,
         "leaderboard_history": _leaderboard_history(history),
         "current": current,
         "launchd": launchd,
@@ -488,7 +665,7 @@ def snapshot() -> Dict[str, Any]:
         "recovery_watch": _json_object(STATE / "recovery_watch.json"),
         "cost": _cost_detail(history),
         "signals": _signals(latest, previous),
-        "scene": _scene(latest, previous),
+        "scene": scene,
         "adaptive": _adaptive_summary(history),
     }
 
@@ -1428,7 +1605,7 @@ __OPERATOR_CSS__
 <div class="tab operator-tab" id="tab-overview">
 <section class="grid">
   <div class="page-hero">
-    <div><div class="page-kicker">Live autonomous operation</div><h2>Farm command center</h2><p>One view of the objective, the latest measured change, the decision the system made, and the evidence that the result was verified.</p><div class="delta-row" id="overview-deltas"></div></div>
+    <div><div class="page-kicker">Live autonomous operation</div><h2>Farm command center</h2><p>League position, farm capacity, current production, autonomous decisions, and recovery evidence in one measured view.</p><div class="delta-row" id="overview-deltas"></div></div>
     <div class="hero-verdict watch" id="overview-verdict-box"><b id="overview-verdict">Connecting</b><span id="overview-verdict-detail">Waiting for the first measured cycle</span></div>
   </div>
   <div class="card operating-mode-card watch" id="operating-mode-card" aria-live="polite">
@@ -1436,22 +1613,23 @@ __OPERATOR_CSS__
     <div class="mode-facts"><div><small>Strategy</small><b id="operating-mode-strategy">—</b></div><div><small>Husbandry</small><b id="operating-mode-husbandry">—</b></div><div><small>Release</small><b id="operating-mode-release">—</b></div><div><small>Recovery</small><b id="operating-mode-retry">—</b></div></div>
     <div class="mode-retry"><div><small>Five-pass recovery cadence</small><span id="operating-mode-retry-detail">Waiting for retry state</span></div><div class="mode-progress" aria-hidden="true"><i id="operating-mode-retry-bar" style="width:0%"></i></div></div>
   </div>
-  <div class="hero" aria-label="Live farm summary">
+  <div class="hero league-hero" aria-label="Live farm and league summary">
+    <div class="hero-cell league-cell"><label>League · current tier</label><strong><span id="hero-league-badge">◇</span> <span id="hero-league">—</span></strong><small id="hero-level">waiting for progression telemetry</small><span class="league-mini-track"><i id="hero-league-progress" style="width:0%"></i></span></div>
     <div class="hero-cell lead"><label>Lifetime produce · live estimate</label><strong id="hero-produce">—</strong><small id="hero-produce-sub">waiting for a measured rate</small><span class="spark" id="spark-produce"></span></div>
     <div class="hero-cell"><label>Production rate</label><strong id="hero-rate">—</strong><small id="hero-rate-sub">score delta over the real interval</small><span class="spark" id="spark-rate"></span></div>
-    <div class="hero-cell"><label>Leaderboard</label><strong id="hero-rank">—</strong><small id="hero-gap">waiting for rivals</small><span class="spark" id="spark-rank"></span></div>
-    <div class="hero-cell"><label>Herd</label><strong id="hero-animals">—</strong><small id="hero-herd-sub">growth policy loading</small><span class="spark" id="spark-animals"></span></div>
+    <div class="hero-cell"><label>Overall rank</label><strong id="hero-rank">—</strong><small id="hero-gap">waiting for rivals</small><span class="spark" id="spark-rank"></span></div>
+    <div class="hero-cell"><label>Barn capacity</label><strong id="hero-animals">—</strong><small id="hero-herd-sub">capacity telemetry loading</small><span class="spark" id="spark-animals"></span></div>
     <div class="hero-cell"><label>Safety headroom</label><strong id="hero-hunger">—</strong><small id="hero-hunger-sub">production stops at 70 hunger</small><span class="spark" id="spark-hunger"></span></div>
   </div>
-  <div class="card farmview overview-farm"><h2>Live farm <small>Every object is measured telemetry</small></h2><div class="scene" id="farm-scene"><div class="empty">Waiting for farm state…</div></div></div>
+  <div class="card farmview overview-farm"><h2>Live farm & progression <small>League, capacity, species, reserves, and output from captured telemetry</small></h2><div class="scene" id="farm-scene"><div class="empty">Waiting for farm state…</div></div></div>
   <div class="card cycle-story-card"><h2><span id="cycle-story-summary">Latest cycle</span> <small>Observe → decide → act → verify</small></h2><div id="cycle-story"><div class="empty">Loading decision evidence…</div></div></div>
   <div class="card overview-support"><h2>Loop status</h2><div id="health"><span class="pill waiting">connecting</span></div><div class="metrics"><div class="metric"><label>Last run</label><strong id="last-run">—</strong></div><div class="metric"><label>Run age</label><strong id="run-age">—</strong></div><div class="metric"><label>Stage</label><strong id="stage">—</strong></div><div class="metric"><label>Cadence</label><strong id="cadence">—</strong></div></div></div>
   <div class="card overview-support"><h2>Autonomous handling queue</h2><ul id="blockers"><li class="empty">Loading agent-owned guardrails…</li></ul></div>
   <div class="card overview-support"><h2>Scheduler & release</h2><div class="kv" id="system"></div></div>
-  <div class="card full grand-prix">
-    <div class="gp-head"><div><div class="gp-kicker">Measured competition</div><h2>Produce Grand Prix</h2><div class="subtitle">The same recorded leaderboard snapshots, with no additional farm calls.</div></div>
+  <div class="card full grand-prix league-grand-prix">
+    <div class="gp-head"><div><div class="gp-kicker">Measured competition</div><h2>League standings & produce race</h2><div class="subtitle">Current league/capacity context plus the same recorded score history, with no additional farm calls.</div></div>
       <div class="gp-controls"><div class="chips" id="gp-modes" aria-label="Leaderboard chart mode"><button class="chip" data-gpmode="absolute" aria-pressed="true">Total score</button><button class="chip" data-gpmode="gain" aria-pressed="false">Window gain</button></div><div class="chips" id="gp-ranges" aria-label="Leaderboard chart range"><button class="chip" data-gprange="20" aria-pressed="false">20 runs</button><button class="chip" data-gprange="50" aria-pressed="false">50</button><button class="chip" data-gprange="100" aria-pressed="true">100</button></div></div></div>
-    <div class="competition-workspace"><div class="gp-chart" id="gp-chart"><div class="empty">Waiting for leaderboard history…</div></div><aside class="competition-side"><h3>Live standings</h3><div id="leaderboard"></div></aside></div>
+    <div class="competition-workspace"><div class="gp-chart" id="gp-chart"><div class="empty">Waiting for leaderboard history…</div></div><aside class="competition-side"><h3>Live league standings</h3><div id="leaderboard"></div></aside></div>
     <details class="gp-standings"><summary>Show every recorded racer</summary><div class="gp-legend" id="gp-legend"></div></details><div class="gp-note" id="gp-note">Scores come directly from the run ledger.</div>
   </div>
   <div class="card trend-card"><h2 id="chart-title">Farm trend</h2><div class="chips" id="chart-metrics" aria-label="Chart metric">
@@ -1670,6 +1848,7 @@ function spark(values, label) {
 }
 function renderHero(data) {
   const r=data.latest || {}, s=data.scene || {}, signal=data.signals || {}, rows=data.trend || [];
+  const p=data.progression || s.progression || {};
   const rateSec=Number.isFinite(Number(s.produce_per_sec)) ? Number(s.produce_per_sec)
     : (Number.isFinite(Number(signal.produce_per_min)) ? Number(signal.produce_per_min)/60 : 0);
   const base=Number(s.produce != null ? s.produce : r.produce);
@@ -1678,6 +1857,12 @@ function renderHero(data) {
   // once per cycle, but production accrues continuously on the server.
   const cap=Math.max(0,Number(data.cadence_seconds || 300)*1.25);
   const live=Number.isFinite(base) ? base + rateSec*Math.min(elapsed,cap) : null;
+  $("hero-league-badge").textContent=p.badge || "◇";
+  $("hero-league").textContent=p.league || "Unclassified";
+  $("hero-level").textContent=p.level == null ? "level unavailable"
+    : `Level ${num(p.level)} · ${p.prestige_available?"prestige available":p.next_level_produce?num(p.produce_to_next)+" produce to next level":"threshold unavailable"}`;
+  const leagueProgress=$("hero-league-progress");
+  if (leagueProgress && leagueProgress.style) leagueProgress.style.width=`${Math.max(0,Math.min(100,Number(p.threshold_pct)||0))}%`;
   $("hero-produce").textContent=live == null ? "—" : num(Math.floor(live));
   $("hero-produce-sub").textContent=rateSec > 0 ? `+${num(Math.round(rateSec))}/s estimated between score reads` : "waiting for a measured rate";
   const perMin=Number(s.produce_per_sec)*60 || Number(signal.produce_per_min);
@@ -1687,8 +1872,11 @@ function renderHero(data) {
   const rivals=Array.isArray(data.leaderboard) ? data.leaderboard : [];
   const closest=rivals.slice().sort((a,b) => Math.abs(a.gap)-Math.abs(b.gap))[0];
   $("hero-gap").textContent=closest ? `${closest.gap>=0?"+":""}${num(closest.gap)} ahead of ${closest.name}` : "no rival score available";
-  $("hero-animals").textContent=num(s.animals != null ? s.animals : r.animals);
-  $("hero-herd-sub").textContent=data.growth && data.growth.saturated ? `maintenance mode · ${num(data.growth.cap)} adoptions/run` : `growing · up to ${num((data.growth||{}).cap)} adoptions/run`;
+  const animals=s.animals != null ? s.animals : r.animals, capacity=p.capacity;
+  $("hero-animals").textContent=capacity == null ? num(animals) : `${num(animals)} / ${num(capacity)}`;
+  $("hero-herd-sub").textContent=capacity == null
+    ? (data.growth && data.growth.saturated ? `maintenance mode · ${num(data.growth.cap)} adoptions/run` : `growing · up to ${num((data.growth||{}).cap)} adoptions/run`)
+    : p.capacity_remaining===0 ? "barn full · prestige pressure active" : `${num(p.capacity_remaining)} slot${Number(p.capacity_remaining)===1?"":"s"} open · ${fixed(p.capacity_used_pct,1)}% used`;
   const hunger=s.hunger != null ? s.hunger : r.max_hunger;
   $("hero-hunger").textContent=hunger == null ? "—" : `${hunger} / ${s.hunger_stop || 70}`;
   $("hero-hunger-sub").textContent=hunger == null ? "production stops at 70" : hunger >= (s.hunger_stop || 70) ? "production stopped" : `${(s.hunger_stop || 70)-hunger} points of headroom`;
@@ -1699,7 +1887,7 @@ function renderHero(data) {
   $("spark-hunger").innerHTML=spark(rows.map(x=>x.max_hunger),"hunger");
 }
 function renderScene(s, rows) {
-  const kinds=Object.entries(s.by_kind || {}), statuses=s.species_status||{};
+  const kinds=Object.entries(s.by_kind || {}), statuses=s.species_status||{}, p=s.progression||{};
   const pens=kinds.map(([kind,count],ki) => {
     // Logarithmic marks: a pen with 11,000 chickens should look much fuller than
     // 100 cows without attempting to place eleven thousand DOM nodes.
@@ -1711,7 +1899,10 @@ function renderScene(s, rows) {
   }).join("") || `<div class="empty">No species data</div>`;
   const feedPct=s.feed_fill==null?0:Math.round(s.feed_fill*100), hungerPct=s.hunger_fill==null?0:Math.round(s.hunger_fill*100);
   const readyMax=Math.max(1,...(rows||[]).map(x=>Number(x.ready_units)||0)), readyPct=Math.min(100,Math.round((Number(s.ready_units)||0)/readyMax*100));
-  $("farm-scene").innerHTML=`<div class="scene-sky"><span class="scene-sun">${Number(s.hunger||0)>50?"🌥️":"☀️"}</span><div class="scene-rank"><b>${s.rank==null?"—":`#${s.rank}${s.rank===1?" 👑":""}`}</b><span>${num(s.produce)} lifetime produce</span></div></div><div class="pens">${pens}</div><div class="scene-ground"><div class="gauge"><label>Feed silo <b>${num(s.feed)} / ${num(s.reserve_target)}</b></label><div class="gtrack"><i style="width:${feedPct}%"></i></div><small>${fixed(s.feed_runway_min,0)}m runway · ${num(s.feed_runway_floor_min)}m floor</small></div><div class="gauge"><label>Hunger pressure <b>${num(s.hunger)} / ${num(s.hunger_stop)}</b></label><div class="gtrack hunger"><i style="width:${hungerPct}%"></i><u style="left:100%"></u></div><small>${Math.max(0,(s.hunger_stop||70)-(s.hunger||0))} points before production stops</small></div><div class="gauge"><label>Barn backlog <b>${num(s.ready_units)}</b></label><div class="gtrack"><i style="width:${readyPct}%"></i></div><small>${s.produce_delta==null?"waiting for a score delta":`${num(s.produce_delta)} produced since last run`}</small></div></div>`;
+  const levelPct=Math.max(0,Math.min(100,Number(p.threshold_pct)||0));
+  const capacityPct=Math.max(0,Math.min(100,Number(p.capacity_used_pct)||0));
+  const progression=p.league?`<div class="scene-progression${p.prestige_available?" prestige":""}"><div class="league-identity"><span class="league-badge">${esc(p.badge||"◇")}</span><div><small>Current league</small><b>${esc(p.league)}</b><span>Level ${num(p.level)} · overall rank ${s.rank==null?"—":"#"+num(s.rank)}</span></div></div><div class="league-threshold"><label>${p.prestige_available?"Prestige unlocked":"Next level"} <b>${p.prestige_available?"Ready":fixed(levelPct,1)+"%"}</b></label><div class="league-track"><i style="width:${levelPct}%"></i></div><small>${p.prestige_available?"Barn cap reached; strategy remains evidence-gated":p.next_level_produce?num(p.produce_to_next)+" produce remaining":"Waiting for next threshold"}</small></div><div class="league-capacity"><label>Barn capacity <b>${num(p.animals)} / ${num(p.capacity)}</b></label><div class="league-track capacity"><i style="width:${capacityPct}%"></i></div><small>${num(p.capacity_remaining)} open slot${Number(p.capacity_remaining)===1?"":"s"}${p.plots!=null?` · ${num(p.plots)} / ${num(p.plot_capacity)} plots`:""}</small></div></div>`:"";
+  $("farm-scene").innerHTML=`${progression}<div class="scene-sky"><span class="scene-sun">${Number(s.hunger||0)>50?"🌥️":"☀️"}</span><div class="scene-rank"><b>${s.rank==null?"—":`#${s.rank}${s.rank===1?" 👑":""}`}</b><span>${num(s.produce)} lifetime produce</span></div></div><div class="pens">${pens}</div><div class="scene-ground"><div class="gauge"><label>Feed silo <b>${num(s.feed)} / ${num(s.reserve_target)}</b></label><div class="gtrack"><i style="width:${feedPct}%"></i></div><small>${fixed(s.feed_runway_min,0)}m runway · ${num(s.feed_runway_floor_min)}m floor</small></div><div class="gauge"><label>Hunger pressure <b>${num(s.hunger)} / ${num(s.hunger_stop)}</b></label><div class="gtrack hunger"><i style="width:${hungerPct}%"></i><u style="left:100%"></u></div><small>${Math.max(0,(s.hunger_stop||70)-(s.hunger||0))} points before production stops</small></div><div class="gauge"><label>Barn backlog <b>${num(s.ready_units)}</b></label><div class="gtrack"><i style="width:${readyPct}%"></i></div><small>${s.produce_delta==null?"waiting for a score delta":`${num(s.produce_delta)} produced since last run`}</small></div></div>`;
 }
 function renderOverview(data) {
   const r = data.latest || {}, current = data.current || {}, ld = data.launchd || {};
@@ -1740,10 +1931,13 @@ function renderOverview(data) {
         : `matches release`],
     ["server calls", num(r.calls)],
   ]);
+  const progression=data.progression || {};
   $("farm").innerHTML = kv([
+    ["league", progression.league ? `${esc(progression.badge||"")} ${esc(progression.league)} · level ${num(progression.level)}` : "—"],
     ["leaderboard", r.rank == null ? "—" : `#${r.rank}`],
     ["lifetime produce", num(r.produce)],
-    ["animals", num(r.animals)],
+    ["animals / capacity", progression.capacity == null ? num(r.animals) : `${num(r.animals)} / ${num(progression.capacity)}`],
+    ["prestige", progression.prestige_available ? "available · strategy-gated" : "not available"],
     ["by kind", Object.entries(r.by_kind || {}).map(([k,v]) => `${esc(k)} ${num(v)}`).join(" · ") || "—"],
     ["coins", num(r.coins)],
     ["feed / reserve", `${num(r.feed)} / ${num(r.reserve_target)}`],
@@ -1756,10 +1950,16 @@ function renderOverview(data) {
   ]);
 
   const board = Array.isArray(data.leaderboard) ? data.leaderboard : [];
-  const racers=[{name:"Nick",produce:Number(r.produce)||0,gap:0,self:true},...board]
-    .sort((a,b)=>b.produce-a.produce), top=Math.max(1,...racers.map(x=>x.produce));
-  const leaders=racers.slice(0,5);
-  $("leaderboard").innerHTML = leaders.length ? `<div class="race">${leaders.map((x,i)=>`<div class="racer${x.self?" self":""}"><div class="race-label"><span>${i===0?"👑 ":""}${esc(x.name)}</span><b>${num(x.produce)}</b></div><div class="race-track"><i style="width:${Math.max(2,x.produce/top*100).toFixed(1)}%"></i></div>${x.self?"":`<small>${x.gap>=0?num(x.gap)+" behind Nick":num(Math.abs(x.gap))+" ahead"}</small>`}</div>`).join("")}</div>${racers.length>leaders.length?`<div class="hint" style="margin-top:9px">${num(racers.length-leaders.length)} more racers in full standings</div>`:""}` : `<div class="empty">No leaderboard data</div>`;
+  const fallback=[{name:"Nick",produce:Number(r.produce)||0,gap:0,self:true},...board]
+    .sort((a,b)=>b.produce-a.produce);
+  const leagueBoard=Array.isArray(data.league_standings)&&data.league_standings.length?data.league_standings:fallback;
+  const leaders=leagueBoard.slice(0,6);
+  $("leaderboard").innerHTML = leaders.length ? `<div class="league-race">${leaders.map(x=>{
+    const used=Number(x.capacity_used_pct), cap=Number.isFinite(used)?Math.max(0,Math.min(100,used)):0;
+    const status=x.prestige_available?"prestige":x.full?"full":x.capacity_remaining!=null?num(x.capacity_remaining)+" slots":"capacity unknown";
+    const movement=Number(x.delta)||0;
+    return `<div class="league-racer${x.self?" self":""}"><div class="league-rank">${x.rank==null?"—":"#"+num(x.rank)}</div><div class="league-racer-main"><div class="league-racer-head"><span class="league-name">${x.self?"👑 ":""}${esc(x.name)}</span><span class="league-tier">${esc(x.badge||"◇")} ${esc(x.league||"Unclassified")}</span></div><div class="league-score"><b>${num(x.produce)}</b><small>${movement?`${movement>0?"+":""}${num(movement)} latest window`:"no score movement"}</small></div><div class="league-cap-track"><i style="width:${cap}%"></i></div><div class="league-cap-copy"><span>${x.capacity==null?"herd "+num(x.animals):num(x.animals)+" / "+num(x.capacity)+" animals"}</span><b class="${x.prestige_available||x.full?"watch":""}">${esc(status)}</b></div></div></div>`;
+  }).join("")}</div>${leagueBoard.length>leaders.length?`<div class="hint" style="margin-top:9px">${num(leagueBoard.length-leaders.length)} more racers in full standings</div>`:""}` : `<div class="empty">No leaderboard data</div>`;
   $("intent").innerHTML = kv([
     ["status", current.active ? "active" : "idle"],
     ["stage", esc(current.stage)],

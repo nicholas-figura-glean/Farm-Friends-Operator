@@ -127,9 +127,12 @@ function operatorOverview(data, autonomy, overall) {
   var latest = data.latest || {};
   var pipeline = data.pipeline || {};
   var growth = data.growth || {};
+  var progression = data.progression || {};
   var trend = opList(data.trend);
   var producing = !(data.signals || {}).below_floor && opN(latest.produce_per_min) !== 0;
-  var state = pipeline.status === "running" ? "Cycle in progress" : producing ? "Growing autonomously" : overall.label;
+  var state = pipeline.status === "running" ? "Cycle in progress"
+    : producing && progression.league ? progression.league + " · producing autonomously"
+    : producing ? "Growing autonomously" : overall.label;
   var tone = pipeline.status === "running" ? "watch" : overall.tone;
   opText("overview-verdict", state);
   opText("overview-verdict-detail", pipeline.status === "running"
@@ -168,8 +171,13 @@ function operatorOverview(data, autonomy, overall) {
   var adaptiveDomains = opList(adaptive.blocked_domains);
   var adaptiveLabel = adaptiveDomains.length ? "holding " + adaptiveDomains.join(" + ") : "clear";
   var deltas = [
+    '<span class="delta league">League <b>' + esc(progression.league || "unclassified") + (progression.level == null ? "" : " · L" + esc(progression.level)) + '</b></span>',
     '<span class="delta good">Produce <b>' + esc(opSigned(produceGain)) + '</b></span>',
     '<span class="delta good">Herd <b>' + esc(opSigned(herdGain)) + '</b></span>',
+    '<span class="delta ' + (progression.capacity_remaining === 0 ? "watch" : "good") + '">Barn <b>'
+      + (progression.capacity_remaining == null ? "—" : esc(num(progression.capacity_remaining)) + " slots open") + '</b></span>',
+    '<span class="delta ' + (progression.prestige_available ? "watch" : "") + '">Prestige <b>'
+      + (progression.prestige_available ? "available · evidence-gated" : "not available") + '</b></span>',
     '<span class="delta">Adopted <b>' + esc(num(latest.adopted)) + '</b></span>',
     '<span class="delta">Feed restored <b>' + esc(num(latest.feed_bought)) + '</b></span>',
     '<span class="delta ' + (adaptiveDomains.length ? "watch" : "good") + '">Adaptive guard <b>' + esc(adaptiveLabel) + '</b></span>',
@@ -181,6 +189,10 @@ function operatorOverview(data, autonomy, overall) {
 
   var selected = ((latest.decision_trace || {}).selected) || latest.plan || {};
   var riskCount = Object.values ? Object.values(latest.risk_event_counts || {}).reduce(function (sum, value) { return sum + (opN(value) || 0); }, 0) : 0;
+  var verifyStep = opList(pipeline.steps).filter(function (step) { return step.name === "verify"; })[0] || {};
+  var verifyPending = pipeline.status === "running" && verifyStep.status !== "failed";
+  var verifyDeferred = !verifyPending && latest.verified === false && verifyStep.status === "skipped";
+  var verifyFailed = latest.verified === false && verifyStep.status === "failed";
   var lifecycle = [
     {phase:"Observe", title:num(latest.animals) + " animals · hunger " + (latest.max_hunger == null ? "—" : latest.max_hunger),
       detail:(riskCount ? riskCount + " stochastic risk event(s) normalized" : "Farm, events, market and leaderboard read"),
@@ -190,9 +202,9 @@ function operatorOverview(data, autonomy, overall) {
     {phase:"Act", title:num(latest.units_collected) + " collected · " + num(latest.adopted) + " adopted",
       detail:(latest.fed ? "Herd fed" : "Feed not due") + " · " + num(latest.feed_bought) + " feed purchased",
       status:opStepState(pipeline,["collect","feed","buy_feed","adopt","sell"])},
-    {phase:"Verify", title:latest.verified === false ? "Outcome not verified" : "Rank #" + (latest.rank == null ? "—" : latest.rank) + " · " + num(Math.round(opN(latest.produce_per_min) || 0)) + "/min",
+    {phase:"Verify", title:verifyPending ? "Verification pending in live run" : verifyDeferred ? "Projection recorded · full verify on cadence" : verifyFailed ? "Verification failed" : "Rank #" + (latest.rank == null ? "—" : latest.rank) + " · " + num(Math.round(opN(latest.produce_per_min) || 0)) + "/min",
       detail:opList(latest.anomalies).length ? opList(latest.anomalies).length + " explained anomaly signal(s) retained" : "Observed state matched the bounded plan",
-      status:latest.verified === false ? "failed" : opStepState(pipeline,["verify","finish"])}
+      status:verifyFailed ? "failed" : opStepState(pipeline,["verify","finish"])}
   ];
   opHtml("cycle-story", opLifecycle(lifecycle));
   opText("cycle-story-summary", pipeline.status === "running" ? "Live run" : "Last completed cycle");

@@ -65,6 +65,7 @@ def _payload() -> dict:
                                      "every": 5, "remaining": 5, "candidate": "20260828T185358Z"}},
         "latest": {"run": 216, "ts": "2026-08-21T15:11:56Z", "rank": 1, "animals": 11869,
                    "produce": 1410000, "units_per_chicken_min": 0.12, "max_hunger": 18,
+                   "verified": False,
                    "adopted": 0, "anomalies": [], "trade_coin_outflow": 0,
                    "trade_coin_outflow_blocked": 400000,
                    "novelty": {"blocked_domains": ["offers", "trades"],
@@ -84,6 +85,29 @@ def _payload() -> dict:
         "leaderboard": [
             {"name": "Moe", "produce": 56166, "delta": 166, "gap": 1353834},
             {"name": "John", "produce": 1210000, "delta": 10000, "gap": 200000},
+        ],
+        "progression": {"badge": "💠", "league": "Platinum II", "league_name": "Platinum",
+                        "tier": "II", "level": 11, "produce": 1410000,
+                        "animals": 11869, "capacity": 12000, "capacity_used_pct": 98.91,
+                        "capacity_remaining": 131, "plots": 493, "plot_capacity": 24000,
+                        "next_level_produce": 2000000, "produce_to_next": 590000,
+                        "threshold_pct": 70.5, "prestige_available": False, "full": False},
+        "league_standings": [
+            {"rank": 1, "badge": "💠", "league": "Platinum II", "name": "Nick",
+             "produce": 1410000, "animals": 11869, "capacity": 12000,
+             "capacity_used_pct": 98.91, "capacity_remaining": 131, "coins": 500000,
+             "flowers": 493, "full": False, "prestige_available": False,
+             "delta": 11491, "gap": 0, "self": True},
+            {"rank": 2, "badge": "🥇", "league": "Gold II", "name": "John",
+             "produce": 1210000, "animals": 11250, "capacity": 11250,
+             "capacity_used_pct": 100.0, "capacity_remaining": 0, "coins": 386231,
+             "flowers": 400, "full": True, "prestige_available": True,
+             "delta": 10000, "gap": 200000, "self": False},
+            {"rank": 3, "badge": "🥉", "league": "Bronze III", "name": "Moe",
+             "produce": 56166, "animals": 4991, "capacity": 5000,
+             "capacity_used_pct": 99.82, "capacity_remaining": 9, "coins": 200000,
+             "flowers": 1, "full": False, "prestige_available": False,
+             "delta": 166, "gap": 1353834, "self": False},
         ],
         "leaderboard_history": [
             {"run": 214, "ts": "2026-08-21T15:03:40Z",
@@ -108,6 +132,12 @@ def _payload() -> dict:
                     "prev_below_floor": False, "hunger": 18, "hunger_stop": 70,
                     "hunger_alarm": 66, "feed": 23753, "reserve_target": 23753, "soft": []},
         "scene": {"animals": 11869, "by_kind": {"chicken": 11669, "sheep": 100, "cow": 100},
+                  "progression": {"badge": "💠", "league": "Platinum II", "level": 11,
+                                  "produce": 1410000, "animals": 11869, "capacity": 12000,
+                                  "capacity_used_pct": 98.91, "capacity_remaining": 131,
+                                  "plots": 493, "plot_capacity": 24000,
+                                  "next_level_produce": 2000000, "produce_to_next": 590000,
+                                  "threshold_pct": 70.5, "prestige_available": False},
                   "idle_kinds": ["sheep", "cow"], "feed": 23753, "reserve_target": 23753,
                   "feed_fill": 1.0, "hunger": 18, "hunger_stop": 70, "hunger_fill": 18/70,
                   "ready_units": 3303, "rank": 1, "produce": 1410000,
@@ -292,10 +322,30 @@ var RESULT = (function () {
   ok("live run: hero paints the live estimate", (txt("hero-produce") || "").indexOf("1,410,000") >= 0,
      txt("hero-produce"));
   ok("live run: hero carries recent sparklines", (html("spark-produce") || "").indexOf("<svg") >= 0);
+  ok("live run: hero names the current league and level", txt("hero-league") === "Platinum II" && (txt("hero-level") || "").indexOf("Level 11") >= 0,
+     txt("hero-league") + " / " + txt("hero-level"));
   ok("live run: farm scene is telemetry, not a placeholder", (html("farm-scene") || "").indexOf("Feed silo") >= 0,
      html("farm-scene"));
+  ok("live run: farm scene exposes league progress and barn capacity", (html("farm-scene") || "").indexOf("Current league") >= 0 && (html("farm-scene") || "").indexOf("Barn capacity") >= 0,
+     html("farm-scene"));
   ok("live run: alternative species are not falsely labelled zero", (html("farm-scene") || "").indexOf("measured output: zero") < 0 && (html("farm-scene") || "").indexOf("nonzero observed") >= 0);
-  ok("live run: leaderboard is a race", (html("leaderboard") || "").indexOf("race-track") >= 0);
+  ok("live run: leaderboard is league-aware", (html("leaderboard") || "").indexOf("Platinum II") >= 0 && (html("leaderboard") || "").indexOf("Gold II") >= 0 && (html("leaderboard") || "").indexOf("prestige") >= 0,
+     html("leaderboard"));
+  ok("live run: future verification is pending rather than failed", (html("cycle-story") || "").indexOf("Verification pending in live run") >= 0 && (html("cycle-story") || "").indexOf("Verification failed") < 0,
+     html("cycle-story"));
+  var deferredVerify=clone(LIVE);
+  deferredVerify.pipeline.status="ok";
+  deferredVerify.pipeline.steps.push({name:"verify",status:"skipped",detail:{},note:"projected; next verify on cadence"});
+  operatorOverview(deferredVerify,{}, {label:"Autonomous",tone:""});
+  ok("scheduled verification is disclosed without a false red failure", (html("cycle-story") || "").indexOf("full verify on cadence") >= 0 && (html("cycle-story") || "").indexOf("Verification failed") < 0,
+     html("cycle-story"));
+  var failedVerify=clone(LIVE);
+  failedVerify.pipeline.status="failed";
+  failedVerify.pipeline.steps.push({name:"verify",status:"failed",detail:{},note:"parser rejected response"});
+  operatorOverview(failedVerify,{}, {label:"Self-healing",tone:"recovering"});
+  ok("a real verification failure remains explicit and red", (html("cycle-story") || "").indexOf("Verification failed") >= 0 && (html("cycle-story") || "").indexOf("life-step failed") >= 0,
+     html("cycle-story"));
+  render(LIVE);
   ok("live run: Grand Prix plots every recorded racer", (html("gp-chart") || "").indexOf("<svg") >= 0 && (html("gp-legend") || "").indexOf("Aaron") >= 0, html("gp-legend"));
   ok("live run: Grand Prix exposes exact sampled scores", (html("gp-chart") || "").indexOf("run 216") >= 0 && (html("gp-chart") || "").indexOf("1,410,000") >= 0, html("gp-chart"));
   RACE_MODE="gain"; RACE_RANGE=20; renderLeaderboardHistory(LIVE.leaderboard_history);
@@ -598,6 +648,18 @@ def main() -> int:
         compatibility_projection = monitor._adaptive_summary([_payload()["latest"]])
     finally:
         monitor.workorders.current = original_workorders_current
+    progression = monitor._parse_farm_progression(
+        "🌾 Nick's Farm  🪙 335422577 coins  💠 Platinum II (level 11)\n"
+        "   Lifetime produce 252969557 · animals 16873/16875 · plots 493/33750 "
+        "· ✨ prestige available — call prestige\n"
+    )
+    league_rows = monitor._parse_league_standings(
+        "🏆 Farm Friends leaderboard (by league, then lifetime produce)\n"
+        " 1. 💠 Platinum II     Nick: 252955929 lifetime produce, 16875/16875 animals, "
+        "335422577 coins, 493 🌼 ⚠️ FULL — prestige!\n"
+        " 2. 🥇 Gold II         Neill: 40855781 lifetime produce, 11250/11250 animals, "
+        "902463 coins, 1132067 🌼 ⚠️ FULL — prestige!\n"
+    )
     static_checks = [
         ("real /api/state snapshot survives trace helpers", snapshot_error is None),
         ("bootstrap runs before the game bundle", boot != -1 and game != -1 and boot < game),
@@ -611,6 +673,18 @@ def main() -> int:
         ("game bundle is embedded exactly once", html.count(monitor.GAME_JS) == 1),
         ("operator bundle is embedded exactly once", html.count(monitor.OPERATOR_JS) == 1),
         ("operator stylesheet is embedded", ".autonomy-ribbon" in html and ".knowledge-flow" in html),
+        ("Overview packages league-first hero and live progression surfaces",
+         'id="hero-league"' in html and 'id="hero-league-progress"' in html
+         and "scene-progression" in html and "league-racer" in html),
+        ("captured farm progression preserves league, level, capacity, and prestige",
+         progression.get("league") == "Platinum II" and progression.get("level") == 11
+         and progression.get("capacity_remaining") == 2
+         and progression.get("prestige_available") is True),
+        ("captured leaderboard preserves each racer's league and capacity",
+         len(league_rows) == 2 and league_rows[0].get("league") == "Platinum II"
+         and league_rows[1].get("league") == "Gold II"
+         and league_rows[1].get("capacity_used_pct") == 100.0
+         and league_rows[1].get("prestige_available") is True),
         ("adaptive activity is a first-class pipeline panel", 'id="adaptive-card"' in html and 'id="adaptive-events"' in html),
         ("adaptive panel styles disclose holding and resolved states", ".adaptive-card.watch" in html and ".adaptive-event.resolved" in html),
         ("operating mode is visible globally and on Overview",
