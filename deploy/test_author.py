@@ -624,6 +624,11 @@ check("inconclusive resolution does not advance the champion",
 efficacy_events = pathlib.Path(can, "efficacy_events.ndjson").read_text()
 check("the efficacy ledger distinguishes inconclusive from rejected",
       "candidate.inconclusive" in efficacy_events, efficacy_events)
+run_source = pathlib.Path(ROOT, "run.py").read_text(encoding="utf-8")
+check("the supervisor dispatches inconclusive canary verdicts",
+      "canary.HEALTHY, canary.REGRESSED, canary.INCONCLUSIVE" in run_source
+      and "champion unchanged" in run_source,
+      "inconclusive dispatcher missing")
 
 strategy_store = os.path.join(can, "stalled-strategy-canary.json")
 strategy_hist = os.path.join(can, "stalled-strategy-canary.ndjson")

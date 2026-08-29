@@ -499,7 +499,7 @@ def do_supervise(cadence: int = 300) -> int:
 
     try:
         verdict = canary.evaluate()
-        if verdict.get("status") in (canary.HEALTHY, canary.REGRESSED):
+        if verdict.get("status") in (canary.HEALTHY, canary.REGRESSED, canary.INCONCLUSIVE):
             outcome = canary.resolve(verdict)
             if verdict["status"] == canary.REGRESSED:
                 canary_note = "canary REVERTED %s -> %s: %s" % (
@@ -509,11 +509,15 @@ def do_supervise(cadence: int = 300) -> int:
                 )
                 if not outcome.get("reverted"):
                     canary_note += " (revert FAILED: %s)" % outcome.get("error")
-            else:
+            elif verdict["status"] == canary.HEALTHY:
                 canary_note = "canary cleared %s: %s" % (
                     outcome.get("revision"), verdict.get("reason", ""),
                 )
                 compaction_safe = accepted_compaction_reader()
+            else:
+                canary_note = "canary inconclusive %s (kept live, champion unchanged): %s" % (
+                    outcome.get("revision"), verdict.get("reason", ""),
+                )
             notes.append(canary_note)
         elif verdict.get("status") == canary.WATCHING:
             canary_note = "canary watching %s (%s)" % (
