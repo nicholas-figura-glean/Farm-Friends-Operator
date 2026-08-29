@@ -138,8 +138,12 @@ def _individual_fallback(
     lock = threading.Lock()
     stop = threading.Event()
     clients = [client] + [Client(client.endpoint) for _ in range(max(0, int(workers) - 1))]
+    worker_context = ledger.current()
 
     def worker(current: Client) -> None:
+        ledger.set_context(
+            **dict(worker_context, worker=threading.current_thread().name)
+        )
         while not stop.is_set() and time.time() < deadline:
             try:
                 work.get_nowait()

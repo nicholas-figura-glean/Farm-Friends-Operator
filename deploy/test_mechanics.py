@@ -20,7 +20,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(PROJECT / "experiments"))
 
-from farm import analysis, canary, contract, cycle, growth, mechanics, novelty, parse, rules, watch, workorders  # noqa: E402
+from farm import analysis, canary, contract, cycle, growth, ledger, mechanics, novelty, parse, rules, watch, workorders  # noqa: E402
 import expand  # noqa: E402
 import research_agent  # noqa: E402
 
@@ -351,15 +351,29 @@ def main() -> int:
         suite.check(expand.bulk_due(now + expand.BULK_REPROBE_SECONDS + 1, str(breaker)),
                     "bulk behavior is periodically re-probed so a server fix is learned")
         fallback_client = FakeClient()
-        fallback = expand._individual_fallback(
-            fallback_client, "chicken", 3, time.time() + 5, 1
-        )
+        saved_current, saved_set_context = ledger.current, ledger.set_context
+        worker_contexts: List[dict] = []
+        try:
+            ledger.current = lambda: {"actor": "expand", "sprint": "fixture"}
+            ledger.set_context = lambda **kwargs: worker_contexts.append(kwargs)
+            fallback = expand._individual_fallback(
+                fallback_client, "chicken", 3, time.time() + 5, 1
+            )
+        finally:
+            ledger.current, ledger.set_context = saved_current, saved_set_context
         suite.check(
             fallback["ok"] == 3
             and all(call[0] == "adopt_animal" and "qty" not in call[1]
                     for call in fallback_client.calls),
             "definitive bulk failure falls back to bounded no-qty calls",
             {"result": fallback, "calls": fallback_client.calls},
+        )
+        suite.check(
+            worker_contexts
+            and worker_contexts[0].get("actor") == "expand"
+            and worker_contexts[0].get("sprint") == "fixture",
+            "fallback workers retain actor and sprint telemetry attribution",
+            worker_contexts,
         )
 
     with tempfile.TemporaryDirectory() as tmp:
