@@ -315,7 +315,10 @@ def reliance(root: str = ".") -> Dict[str, Any]:
                 continue
             entry = used.setdefault(name, {"args": set(), "sites": set()})
             for keyword in node.keywords:
-                if keyword.arg:
+                # Leading-underscore keywords configure the local Client call
+                # boundary (timeout/retry) and are removed before the MCP payload.
+                # Treating them as server arguments corrupts drift severity.
+                if keyword.arg and not keyword.arg.startswith("_"):
                     entry["args"].add(keyword.arg)
             entry["sites"].add("%s:%d" % (rel, getattr(node, "lineno", 0)))
     # Literal-only adaptive capability policies are executed through a generic

@@ -359,6 +359,9 @@ section("reliance is read from our own source")
 rely = contract.reliance(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 check("feed_animals is detected as called", "feed_animals" in rely, str(sorted(rely)))
 check("its animal_id argument is detected", "animal_id" in (rely.get("feed_animals") or {}).get("args", []), str(rely.get("feed_animals")))
+check("local transport controls are not misreported as MCP arguments",
+      not any(arg.startswith("_") for item in rely.values() for arg in item.get("args", [])),
+      str({tool: item.get("args") for tool, item in rely.items()}))
 check("call sites are recorded with line numbers", any(":" in s for s in (rely.get("feed_animals") or {}).get("sites", [])))
 check("tools we never call are absent", "gift" not in rely and "visit_farm" not in rely, str(sorted(rely)))
 
