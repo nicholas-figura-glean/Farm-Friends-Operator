@@ -536,7 +536,7 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         })
 
     can = view.get("canary") or {}
-    if can.get("status") == "regressed":
+    if can.get("status") == "regressed" and not can.get("resolution"):
         out.append({"severity": "critical",
                     "what": "automatic rollback active for regressed release %s" % can.get("revision"),
                     "why": can.get("reason") or "canary owns rollback to the last verified release"})

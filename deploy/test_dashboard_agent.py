@@ -243,6 +243,10 @@ check("a resolved canary keeps its explanatory metrics in the dashboard projecti
       and resolved_canary_view.get("threshold") == 0.1237
       and resolved_canary_view.get("resolved_ts") == "2026-08-27T16:54:38Z",
       str(resolved_canary_view))
+check("a completed rollback does not permanently block its repair release",
+      not any("automatic rollback active" in item.get("what", "")
+              for item in autonomy.blockers({"canary": resolved_canary_view})),
+      str(autonomy.blockers({"canary": resolved_canary_view})))
 research_only = {
     "orders": {"summary": {"open": 4, "repair_open": 0, "research_open": 4,
                              "oldest_open_age_seconds": 99999}},
