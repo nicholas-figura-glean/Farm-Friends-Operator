@@ -143,8 +143,31 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
     )
     claims: List[Dict[str, Any]] = [
         _claim(
+            "objective.league_first",
+            "The leaderboard is ordered lexicographically by league level first and lifetime produce second; an available prestige is the mandatory progression action because it preserves lifetime produce and raises animal capacity.",
+            "objective",
+            "accepted",
+            {"server_regime": "league leaderboard", "ordering": ["league_level", "lifetime_produce"]},
+            "league level, then lifetime produce",
+            {"kind": "server_contract_plus_direct_state", "tool": "prestige"},
+            {"primary": "league_level", "secondary": "lifetime_produce", "prestige_preserves_lifetime": True, "prestige_raises_capacity": True},
+            [
+                "state/contract.json#tools.prestige.description_sha=16241be9cffd",
+                "state/raw/latest/leaderboard.txt#by-league-then-lifetime-produce",
+                "state/raw/latest/list_farm_state.txt#prestige-available",
+            ],
+            _confidence(0.99, "The MCP contract states the ordering and effects explicitly, and both current state surfaces independently expose them."),
+            current_run,
+            current_run,
+            100,
+            current_run,
+            "A captured leaderboard ranks a lower league above a higher league, or a verified prestige reduces lifetime produce or fails to raise capacity.",
+            ["policy.objective", "cycle.mechanics", "canary.progression", "evidence.progression"],
+            {"objective_order": ["league_level", "lifetime_produce"], "prestige_when_available": True},
+        ),
+        _claim(
             "objective.lifetime_produce",
-            "Leaderboard lifetime produce is the authoritative score; collection is an inventory-banking action, not the scoring event.",
+            "Within a league, lifetime produce is the authoritative secondary score; collection is an inventory-banking action, not the scoring event.",
             "objective",
             "accepted",
             {"all_runs": True, "excludes": []},
@@ -159,7 +182,8 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             current_run,
             "A controlled interval in which lifetime produce changes only at collection time and never while uncollected.",
             ["watch.production", "policy.objective", "evidence.collection", "endgame.forecast"],
-            {"score_metric": "lifetime_produce"},
+            {"score_metric": "lifetime_produce", "priority": "secondary_within_league"},
+            dependencies=["objective.league_first"],
         ),
         _claim(
             "mechanic.output_linear_with_herd",
@@ -230,7 +254,7 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             "Repeated controlled intervals where score remains flat until collection and then jumps by the collected quantity.",
             ["rules.should_collect", "watch.production", "evidence.collection"],
             {"collection_creates_score": False},
-            dependencies=["objective.lifetime_produce"],
+            dependencies=["objective.league_first", "objective.lifetime_produce"],
         ),
         _claim(
             "strategy.chicken_engine",
@@ -250,7 +274,7 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             "A bounded alternative-species probe clears its predeclared output-per-adoption gate without warm-up, feed, or transport regressions.",
             ["policy.primary_kind", "rules.adoptable", "evidence.species"],
             {"primary_kind": "chicken"},
-            dependencies=["objective.lifetime_produce"],
+            dependencies=["objective.league_first", "objective.lifetime_produce"],
         ),
         _claim(
             "mechanic.crop_timers_stalled",

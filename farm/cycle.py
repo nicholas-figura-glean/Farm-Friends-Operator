@@ -27,6 +27,7 @@ from . import (
     heal,
     ledger,
     mcp,
+    mechanics,
     novelty,
     parse,
     policy,
@@ -145,6 +146,17 @@ def _project(state: parse.Farm, actions: Dict[str, Any], coins: int) -> parse.Fa
         animal_counts=dict(state.animal_counts),
         summary_ready=dict(state.summary_ready),
         plot_total=state.plot_total,
+        league_badge=state.league_badge,
+        league=state.league,
+        league_name=state.league_name,
+        league_tier=state.league_tier,
+        league_level=state.league_level,
+        lifetime_produce=state.lifetime_produce,
+        capacity=state.capacity,
+        plot_capacity=state.plot_capacity,
+        next_level_produce=state.next_level_produce,
+        prestige_available=state.prestige_available,
+        crisis=state.crisis,
     )
     adopted = int(actions.get("adopted") or 0)
     if projected.animals_summarized:
@@ -260,6 +272,13 @@ class Cycle(object):
             "risk_event_counts": {},
             "risk_event_signatures": [],
             "risk_charges": 0,
+            "mechanic_actions": [],
+            "mechanic_failures": 0,
+            "prestige_count": 0,
+            "crises_resolved": 0,
+            "progression_pending": False,
+            "capability_policy_errors": [],
+            "concurrent_expansion": False,
         }
         self.notes: List[str] = []
         # Growth policy for this run, decided in the plan step.
@@ -514,6 +533,10 @@ class Cycle(object):
             {entry.name: entry.coins for entry in rivals}
             if board_available else dict((self.prev or {}).get("rival_coins") or {})
         )
+        policy_state = mechanics.load_policies()
+        observed_risk_kinds = set((self.actions.get("risk_event_counts") or {}).keys())
+        if farm.crisis:
+            observed_risk_kinds.add(farm.crisis.kind)
         snapshot = {
             "run": run_no,
             "tools": tools,
@@ -532,7 +555,7 @@ class Cycle(object):
             ],
             "rival_herds": rival_herds,
             "rival_coins": rival_coins,
-            "risk_kinds": sorted((self.actions.get("risk_event_counts") or {}).keys()),
+            "risk_kinds": sorted(observed_risk_kinds),
             "event_signatures": self.actions.get("risk_event_signatures") or [],
         }
         novelty_state = dict(self.meta.get("novelty") or {})
@@ -544,6 +567,8 @@ class Cycle(object):
             self.prev,
             state=novelty_state,
             question_rows=questions.load_all(),
+            handled_tools=mechanics.active_tools(policy_state),
+            handled_risks=mechanics.handled_risk_kinds(policy_state),
         )
         self.meta["novelty"] = assessed.pop("state")
         self.novelty = assessed
@@ -579,6 +604,179 @@ class Cycle(object):
                 % ",".join(self.novelty["blocked_domains"])
             )
         return self.novelty
+
+    def handle_mechanics(
+        self,
+        farm: parse.Farm,
+        tools: List[str],
+        run_no: int,
+    ) -> parse.Farm:
+        """Execute due contract-backed mechanics under one bounded lock.
+
+        Prestige and crisis calls are irreversible and may be transport-ambiguous,
+        so each call gets one network attempt followed by an authoritative state
+        read. Verification, not response prose, decides whether it happened. The
+        existing expansion lock prevents a herd-resetting prestige from racing the
+        independent adoption worker.
+        """
+        loaded = mechanics.load_policies()
+        policy_errors = list(loaded.get("errors") or [])
+        self.actions["capability_policy_errors"] = policy_errors
+        if policy_errors:
+            self.notes.append(
+                "capability policy invalid; adaptive actions held: %s"
+                % "; ".join(policy_errors[:3])
+            )
+            return farm
+
+        initial = mechanics.next_decision(
+            farm, tools, run=run_no, attempted={}, loaded=loaded
+        )
+        if not initial.get("decision"):
+            for held in initial.get("held") or []:
+                self.notes_soft.append(
+                    "mechanic %s held: %s"
+                    % (held.get("tool"), held.get("reason"))
+                )
+            self.actions["progression_pending"] = bool(farm.prestige_available)
+            return farm
+
+        attempted: Dict[str, int] = {}
+        with mechanics.exclusive_expansion_lock() as acquired:
+            if not acquired:
+                decision = initial["decision"]
+                self.actions["mechanic_actions"].append({
+                    "policy_id": decision.get("policy_id"),
+                    "tool": decision.get("tool"),
+                    "kind": decision.get("kind"),
+                    "status": "deferred",
+                    "reason": "independent expansion worker still holds its lock",
+                })
+                self.notes_soft.append(
+                    "mechanic %s deferred until the bounded expansion sprint exits"
+                    % decision.get("tool")
+                )
+                self.actions["progression_pending"] = bool(farm.prestige_available)
+                return farm
+
+            total_bound = sum(
+                int(row.get("max_calls_per_cycle") or 0)
+                for row in loaded.get("policies") or []
+            )
+            total_bound = max(1, min(total_bound, 10))
+            while sum(attempted.values()) < total_bound:
+                assessed = mechanics.next_decision(
+                    farm, tools, run=run_no, attempted=attempted, loaded=loaded
+                )
+                decision = assessed.get("decision")
+                if not decision:
+                    for held in assessed.get("held") or []:
+                        self.notes_soft.append(
+                            "mechanic %s held: %s"
+                            % (held.get("tool"), held.get("reason"))
+                        )
+                    break
+
+                policy_id = str(decision.get("policy_id") or "")
+                tool = str(decision.get("tool") or "")
+                attempted[policy_id] = attempted.get(policy_id, 0) + 1
+                before = farm
+                before_snapshot = mechanics.farm_snapshot(before)
+                _intent(
+                    "%s_start" % tool,
+                    policy_id=policy_id,
+                    kind=decision.get("kind"),
+                    before=before_snapshot,
+                    reason=decision.get("reason"),
+                )
+                response = ""
+                call_error: Optional[str] = None
+                try:
+                    response = mechanics.invoke(self.c, tool)
+                    _raw(tool, response)
+                except (McpError, ToolError, ValueError) as exc:
+                    # Never retry an irreversible action in the same cycle. It may
+                    # have committed server-side before the transport failed.
+                    call_error = str(exc)[:240]
+
+                try:
+                    after = self.read_state("post_%s" % tool)
+                    verification = mechanics.verify_action(decision, before, after)
+                except Exception as exc:  # noqa: BLE001 - outcome remains unverified
+                    after = before
+                    verification = {
+                        "ok": False,
+                        "checks": {"post_action_state_read": False},
+                        "before": before_snapshot,
+                        "after": mechanics.farm_snapshot(before),
+                        "read_error": str(exc)[:240],
+                    }
+
+                verified = bool(verification.get("ok"))
+                status = "verified" if verified and not call_error else (
+                    "reconciled" if verified else "failed"
+                )
+                action = {
+                    "policy_id": policy_id,
+                    "tool": tool,
+                    "kind": decision.get("kind"),
+                    "status": status,
+                    "reason": decision.get("reason"),
+                    "call_error": call_error,
+                    "verification": verification,
+                    "response_preview": response[:240],
+                }
+                self.actions["mechanic_actions"].append(action)
+                self.meta.setdefault("mechanic_attempts", {})[policy_id] = {
+                    "run": run_no,
+                    "status": status,
+                    "before": before_snapshot,
+                    "after": verification.get("after"),
+                }
+
+                if not verified:
+                    self.actions["mechanic_failures"] += 1
+                    self.notes.append(
+                        "mechanic %s was not verified%s"
+                        % (tool, ": %s" % call_error if call_error else "")
+                    )
+                    _intent(
+                        "%s_failed" % tool,
+                        policy_id=policy_id,
+                        error=call_error,
+                        checks=verification.get("checks"),
+                    )
+                    break
+
+                farm = after
+                _intent(
+                    "%s_done" % tool,
+                    policy_id=policy_id,
+                    status=status,
+                    before=verification.get("before"),
+                    after=verification.get("after"),
+                )
+                if decision.get("kind") == "progression":
+                    self.actions["prestige_count"] += 1
+                    growth.reset_after_progression(run_no, farm.league_level)
+                    self.notes_soft.append(
+                        "verified progression: %s -> %s, capacity %s -> %s"
+                        % (
+                            before.league,
+                            farm.league,
+                            before.capacity,
+                            farm.capacity,
+                        )
+                    )
+                elif decision.get("kind") == "crisis":
+                    self.actions["crises_resolved"] += 1
+                    self.notes_soft.append(
+                        "verified crisis resolution: %s via %s"
+                        % (decision.get("crisis_kind"), tool)
+                    )
+
+        self.actions["progression_pending"] = bool(farm.prestige_available)
+        return farm
 
     def handle_incoming_trades(self, farm: parse.Farm) -> None:
         blocked_coin_offers = 0
@@ -1041,7 +1239,22 @@ class Cycle(object):
                 state.feed,
                 state.committed_feed,
                 cap=decision["cap"],
+                animal_capacity=state.capacity,
             )
+            mechanic_preview = mechanics.next_decision(
+                state, tools, run=run_no, attempted={}
+            )
+            if mechanic_preview.get("decision"):
+                plan["mechanic"] = mechanic_preview["decision"]
+                plan["adopt_before_mechanic"] = plan.get("adopt", 0)
+                plan["adopt"] = 0
+                plan["buy_feed"] = max(
+                    0,
+                    rules.feed_reserve_target(state.animal_count, state.committed_feed)
+                    - state.feed,
+                )
+            if mechanic_preview.get("errors"):
+                plan["mechanic_errors"] = mechanic_preview["errors"]
             board = self._read_leaderboard("leaderboard_dry") or []
             if not board and plan.get("adopt", 0) > 0:
                 plan["adopt_before_leaderboard_hold"] = plan["adopt"]
@@ -1107,7 +1320,30 @@ class Cycle(object):
             step["signals"] = len(assessed.get("signals") or [])
             step["blocked"] = assessed.get("blocked_domains") or []
 
-        if state.incoming and self.domain_blocked("trades"):
+        with self._step("mechanics") as step:
+            before_actions = len(self.actions["mechanic_actions"])
+            state = self.handle_mechanics(state, tools, run_no)
+            new_actions = self.actions["mechanic_actions"][before_actions:]
+            step["actions"] = len(new_actions)
+            step["tools"] = [item.get("tool") for item in new_actions]
+            step["prestiges"] = self.actions["prestige_count"]
+            step["crises_resolved"] = self.actions["crises_resolved"]
+            step["progression_pending"] = self.actions["progression_pending"]
+
+        if self.actions["mechanic_actions"]:
+            # The pre-action board is useful evidence, but the row and canary must
+            # judge the league after the verified action.
+            self.board_attempted = False
+            self.board_snapshot = None
+            self.board_error = None
+            refreshed = self._read_leaderboard("leaderboard_post_mechanics")
+            if refreshed is not None:
+                board = refreshed
+
+        progression_pending = bool(self.actions["progression_pending"])
+        if progression_pending and state.incoming:
+            self._skip("trades", "additional prestige levels pending; preserving state")
+        elif state.incoming and self.domain_blocked("trades"):
             self._skip("trades", "strategic hold; leaving incoming offers untouched")
         elif state.incoming:
             with self._step("trades") as step:
@@ -1121,10 +1357,13 @@ class Cycle(object):
         else:
             self._skip("trades", "no incoming offers")
 
-        with self._step("sell") as step:
-            self.sell_all(state.saleable)
-            step["revenue"] = self.actions["revenue"]
-            step["items"] = len(self.actions["sold"])
+        if progression_pending:
+            self._skip("sell", "additional prestige levels pending; barn survives the next reset")
+        else:
+            with self._step("sell") as step:
+                self.sell_all(state.saleable)
+                step["revenue"] = self.actions["revenue"]
+                step["items"] = len(self.actions["sold"])
 
         with self._step("plan") as step:
             # Adoption is gated on measured evidence that a bigger herd still
@@ -1137,8 +1376,13 @@ class Cycle(object):
                 state.feed,
                 state.committed_feed,
                 cap=decision["cap"],
+                animal_capacity=state.capacity,
             )
-            if self.domain_blocked("adopt") and plan["adopt"] > 0:
+            if progression_pending and plan["adopt"] > 0:
+                plan["adopt_before_progression_hold"] = plan["adopt"]
+                plan["adopt"] = 0
+                plan["progression_hold"] = "another earned prestige level remains"
+            elif self.domain_blocked("adopt") and plan["adopt"] > 0:
                 plan["adopt_before_novelty_hold"] = plan["adopt"]
                 plan["adopt"] = 0
                 plan["novelty_hold"] = "adopt"
@@ -1147,30 +1391,49 @@ class Cycle(object):
             step["growth"] = "saturated" if decision["verdict"].get("saturated") else "growing"
             if decision["changed"]:
                 self.notes_soft.append("growth policy changed: %s" % decision["reason"])
-        # Adopt BEFORE topping up feed, then size the feed purchase to the number
-        # actually adopted. The reverse order pre-committed feed for a planned
-        # count that the wall-clock budget then cut short, so the reserve could
-        # land under target whenever adoption stopped early. Coins for feed are
-        # still reserved by expansion_plan, so buying after adopting is safe:
-        # remaining coins always cover the (smaller) real requirement.
+        # Adoption and its reserve purchase share the expansion lock. The bulk
+        # expansion worker can otherwise spend the same coin snapshot between
+        # these two steps, turning a successful prestige into a funds error in the
+        # main cycle. Whichever actor gets the lock grows; the other records a
+        # normal deferral and tries on its next cadence.
         if plan["adopt"] > 0:
-            with self._step("adopt") as step:
-                self.adopt_chickens(plan["adopt"], deadline)
-                step["adopted"] = self.actions["adopted"]
-                step["requested"] = self.actions["adopt_requested"]
-                step["stopped"] = self.actions["adopt_stopped"]
-                step["rate"] = self.meta.get("call_rate")
+            with mechanics.exclusive_expansion_lock() as owns_growth:
+                if owns_growth:
+                    with self._step("adopt") as step:
+                        self.adopt_chickens(plan["adopt"], deadline)
+                        step["adopted"] = self.actions["adopted"]
+                        step["requested"] = self.actions["adopt_requested"]
+                        step["stopped"] = self.actions["adopt_stopped"]
+                        step["rate"] = self.meta.get("call_rate")
+                    animals_now = state.animal_count + self.actions["adopted"]
+                    needed = rules.feed_reserve_target(animals_now, state.committed_feed) - state.feed
+                    want_feed = min(max(0, needed), self.coins)
+                    if want_feed > 0:
+                        with self._step("buy_feed") as step:
+                            self.buy_feed(want_feed)
+                            step["bought"] = self.actions["feed_bought"]
+                    else:
+                        self._skip("buy_feed", "reserve already met")
+                else:
+                    self.actions["concurrent_expansion"] = True
+                    self.actions["adopt_requested"] = plan["adopt"]
+                    self.actions["adopt_stopped"] = "expansion_lock"
+                    self.notes_soft.append(
+                        "cycle growth deferred: independent bulk expansion owns the mutation lock"
+                    )
+                    self._skip("adopt", "independent bulk expansion owns the mutation lock")
+                    self._skip("buy_feed", "bulk expansion preserves its own feed/cash reserve")
         else:
             self._skip("adopt", (self.growth.get("reason") or "nothing affordable")[:160])
-        animals_now = state.animal_count + self.actions["adopted"]
-        needed = rules.feed_reserve_target(animals_now, state.committed_feed) - state.feed
-        want_feed = min(max(0, needed), self.coins)
-        if want_feed > 0:
-            with self._step("buy_feed") as step:
-                self.buy_feed(want_feed)
-                step["bought"] = self.actions["feed_bought"]
-        else:
-            self._skip("buy_feed", "reserve already met")
+            animals_now = state.animal_count
+            needed = rules.feed_reserve_target(animals_now, state.committed_feed) - state.feed
+            want_feed = min(max(0, needed), self.coins)
+            if want_feed > 0:
+                with self._step("buy_feed") as step:
+                    self.buy_feed(want_feed)
+                    step["bought"] = self.actions["feed_bought"]
+            else:
+                self._skip("buy_feed", "reserve already met")
 
         offer_targets = rules.offer_targets(
             state.outgoing_recipients,
@@ -1180,7 +1443,9 @@ class Cycle(object):
                 if count >= rules.DECLINE_PAUSE_THRESHOLD
             ],
         )
-        if self.domain_blocked("offers"):
+        if progression_pending:
+            self._skip("offers", "additional prestige levels pending")
+        elif self.domain_blocked("offers"):
             self._skip("offers", "novel activity hold")
         elif offer_targets:
             with self._step("offers") as step:
@@ -1197,6 +1462,7 @@ class Cycle(object):
             # bulk-feed debit is always visible to list_farm. Verify every
             # top-up so a delayed debit cannot leave the reserve short.
             or self.actions["feed_bought"] > 0
+            or bool(self.actions["mechanic_actions"])
         )
         if must_verify:
             with self._step("verify") as step:
@@ -1337,6 +1603,20 @@ class Cycle(object):
             "risk_event_signatures": self.actions["risk_event_signatures"],
             "risk_charges": self.actions["risk_charges"],
             "risk_coin_reserve": rules.RISK_COIN_RESERVE,
+            "mechanic_actions": self.actions["mechanic_actions"],
+            "mechanic_failures": self.actions["mechanic_failures"],
+            "prestige_count": self.actions["prestige_count"],
+            "crises_resolved": self.actions["crises_resolved"],
+            "progression_pending": self.actions["progression_pending"],
+            "capability_policy_errors": self.actions["capability_policy_errors"],
+            "concurrent_expansion": self.actions["concurrent_expansion"],
+            "league": final.league or (me.league if me else None),
+            "league_level": final.league_level,
+            "animal_capacity": final.capacity or (me.capacity if me else None),
+            "plot_capacity": final.plot_capacity,
+            "prestige_available": final.prestige_available,
+            "next_level_produce": final.next_level_produce,
+            "active_crisis": mechanics.farm_snapshot(final).get("crisis_kind"),
             "harvested": self.actions["harvested"],
             "trades_out": len([t for t in final.trades if t.outgoing]),
             "trades_in": len([t for t in final.trades if not t.outgoing]),
@@ -1359,9 +1639,12 @@ class Cycle(object):
             # Herd separates them, and coins say whether they can sustain it.
             "rival_herds": {r.name: r.animals for r in rivals},
             "rival_coins": {r.name: r.coins for r in rivals},
-            "leader": (
-                max(board, key=lambda r: r.produce).name if board else None
-            ),
+            "rival_leagues": {r.name: r.league for r in rivals if r.league},
+            "rival_capacities": {r.name: r.capacity for r in rivals if r.capacity},
+            # The server orders by league first and lifetime produce second. Using
+            # max(produce) here silently reinstated the old objective after the
+            # leaderboard contract changed.
+            "leader": board[0].name if board else None,
             "plan": plan,
             "growth": {
                 "saturated": bool((self.growth.get("verdict") or {}).get("saturated")),

@@ -1,23 +1,10 @@
 #!/usr/bin/env python3
-"""Bounded expansion sprint: convert surplus coins into herd, fast.
+"""Bounded expansion sprint: convert surplus coins into herd capacity.
 
-Why this exists as a separate job rather than a bigger adoption step in the
-cycle: it provides a separately bounded adoption-only sprint without extending
-routine husbandry. Feed and collection are now constant-time bulk operations;
-this worker exists for explicit growth targets, not as a latency workaround.
-
-Guardrails, in order of importance:
-  1. Never spend the feed or daily-risk cash reserves. Coins are floored at the
-     reserve needed to keep the target herd fed plus automatic bill liquidity.
-  2. Never outrun the server. Rate is capped below the measured ceiling so the
-     concurrent cycle keeps its headroom.
-  3. Always stoppable. --max-adopt and --max-seconds both bound the run, and the
-     farm is re-read at the end so the report reflects reality.
-
-It deliberately does NOT take the cycle lock: it only adopts, and adoption is
-additive. It never feeds, sells, or collects.
-
-    python3 experiments/expand.py --target 30000 --max-seconds 900
+The server now accepts ``adopt_animal.qty`` as one bounded bulk operation. This
+worker therefore makes at most one adoption call per sprint, never loops per
+animal, never adopts past the parsed league capacity, and yields immediately when
+an earned prestige or eligible active crisis belongs to the main cycle.
 """
 
 from __future__ import annotations
@@ -26,42 +13,33 @@ import argparse
 import errno
 import fcntl
 import os
-import queue
 import signal
 import sys
-import threading
 import time
+from typing import Any, Dict
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT)
 
-from farm import growth, ledger, mcp, parse, policy, rules  # noqa: E402
+from farm import growth, ledger, mcp, mechanics, parse, policy, rules  # noqa: E402
 from farm.mcp import Client, McpError, ToolError  # noqa: E402
 
 LOCK = os.path.join(PROJECT, "state", ".expand.lock")
+MAX_BULK_ADOPT = 200_000
 
 
 def _lock():
-    """Exactly one sprint at a time.
-
-    Without this the agent was self-destructive. A sprint can stall on a slow
-    call (MCP timeout is 120s and retries 3 times), so it outlives its own
-    --max-seconds deadline, which is only checked between calls. launchd then
-    fires the next sprint on schedule, and the two overlap: 16 workers becomes
-    32, then 48. The server started returning 504 Gateway Timeout, the CYCLE
-    began failing and skipping, and herd growth collapsed to +25 animals in 13
-    minutes - worse than running nothing at all.
-    """
+    """Exactly one expansion sprint or progression action at a time."""
     os.makedirs(os.path.dirname(LOCK), exist_ok=True)
-    fh = open(LOCK, "w")
+    handle = open(LOCK, "w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError as exc:
         if exc.errno in (errno.EAGAIN, errno.EACCES):
-            print("EXPAND skipped: previous sprint still running")
+            print("EXPAND skipped: previous sprint or progression action still running")
             sys.exit(0)
         raise
-    return fh
+    return handle
 
 
 def _arm_watchdog(seconds: int) -> None:
@@ -80,25 +58,44 @@ def _arm_watchdog(seconds: int) -> None:
 
 
 def affordable(coins: int, herd: int, feed_on_hand: int = 0) -> int:
-    """How many animals we can adopt AND still keep fed.
-
-    Delegates to rules.affordable_adoptions so the floor is testable and lives
-    with the rest of the strategy. See that docstring: the version that lived
-    here charged coins for the reserve of the whole herd, ignoring the feed
-    already in the barn, and so reported 1,048 affordable animals at run 379
-    while 1.9M coins sat idle next to 538 minutes of feed.
-    """
+    """How many animals we can adopt and still preserve feed/cash reserves."""
     return rules.affordable_adoptions(coins, herd, feed_on_hand)
 
 
+def bounded_target(farm: parse.Farm, requested: int) -> int:
+    """Requested growth capped by the server-advertised league capacity."""
+    target = max(0, int(requested))
+    if isinstance(farm.capacity, int):
+        target = min(target, farm.capacity)
+    return target
+
+
+def _record_skip(reason: str, farm: parse.Farm, requested: int) -> int:
+    print("EXPAND skipped: %s" % reason)
+    ledger.record(
+        "expansion.completed",
+        {
+            "status": "skipped",
+            "adopted": 0,
+            "reason": reason,
+            "target_requested": requested,
+            "herd": farm.animal_count,
+            "capacity": farm.capacity,
+            "prestige_available": farm.prestige_available,
+            "active_crisis": farm.crisis.kind if farm.crisis else None,
+        },
+    )
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=30000, help="herd size to build toward")
-    ap.add_argument("--max-seconds", type=float, default=900.0)
-    ap.add_argument("--rate", type=float, default=3.0, help="calls/s, below the 5/s ceiling")
-    ap.add_argument("--workers", type=int, default=6)
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target", type=int, default=30_000, help="herd size to build toward")
+    parser.add_argument("--max-seconds", type=float, default=900.0)
+    parser.add_argument("--rate", type=float, default=3.0, help="upper call rate; one bulk call is used")
+    parser.add_argument("--workers", type=int, default=1, help="retained for launchd compatibility; bulk mode uses one")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
 
     runtime_policy = policy.runtime_context()
     sprint_id = ledger.new_id("sprint")
@@ -114,7 +111,8 @@ def main() -> int:
             "target_requested": args.target,
             "max_seconds": args.max_seconds,
             "rate": args.rate,
-            "workers": args.workers,
+            "workers_requested": args.workers,
+            "execution": "single_bulk_qty",
             "dry": args.dry_run,
             "policy_compatible": runtime_policy.get("compatible"),
             "policy_errors": runtime_policy.get("errors"),
@@ -122,50 +120,73 @@ def main() -> int:
     )
 
     handle = _lock()  # noqa: F841 - held for the process lifetime
-    # Hard ceiling well inside the 300s launchd interval, so a sprint can never
-    # still be alive when the next one is due.
     _arm_watchdog(int(args.max_seconds) + 20)
 
-    policy_parameters = runtime_policy.get("parameters") or {}
-    primary_kind = str(policy_parameters.get("primary_kind") or rules.PRIMARY_KIND)
-    call_ceiling = float(
-        policy_parameters.get("max_calls_per_second") or rules.MAX_CALLS_PER_SECOND
-    )
+    parameters = runtime_policy.get("parameters") or {}
+    primary_kind = str(parameters.get("primary_kind") or rules.PRIMARY_KIND)
+    call_ceiling = float(parameters.get("max_calls_per_second") or rules.MAX_CALLS_PER_SECOND)
     mcp.LIMITER.set_rate(min(args.rate, call_ceiling))
-    c = Client()
-    farm = parse.parse_farm(c.call("list_farm"))
+    client = Client()
+    farm = parse.parse_farm(client.call("list_farm"))
+
+    # Progression owns the herd reset. Continuing to adopt here caused 1,122
+    # guaranteed barn-full errors while prestige was visibly available.
+    if farm.prestige_available:
+        return _record_skip(
+            "earned prestige is pending in the main cycle; expansion must not buy a herd that will be retired",
+            farm,
+            args.target,
+        )
+
+    loaded = mechanics.load_policies()
+    mechanic = mechanics.next_decision(
+        farm,
+        mechanics.active_tools(loaded),
+        attempted={},
+        loaded=loaded,
+    ).get("decision")
+    if mechanic and mechanic.get("kind") == "crisis":
+        return _record_skip(
+            "eligible active crisis is pending in the main cycle via %s" % mechanic.get("tool"),
+            farm,
+            args.target,
+        )
+
     stalled, stalled_windows = growth.production_stall_active(model=growth.load())
     if stalled:
-        reason = (
-            "lifetime produce unchanged for %d healthy verified windows; "
-            "expansion paused until production resumes" % stalled_windows
+        return _record_skip(
+            "lifetime produce unchanged for %d healthy verified windows; expansion waits for production"
+            % stalled_windows,
+            farm,
+            args.target,
         )
-        print("EXPAND skipped: %s" % reason)
-        ledger.record(
-            "expansion.completed",
-            {"status": "skipped", "adopted": 0, "reason": reason},
-        )
-        return 0
-    can_afford = affordable(farm.coins, farm.animal_count, farm.feed)
 
-    # Whole-herd feeding is now constant-time, so the old gateway-derived herd
-    # ceiling is retired. Affordability still includes the full feed reserve.
-    target = args.target
+    target = bounded_target(farm, args.target)
     room = max(0, target - farm.animal_count)
-    want = min(room, can_afford)
+    can_afford = affordable(farm.coins, farm.animal_count, farm.feed)
+    want = min(room, can_afford, MAX_BULK_ADOPT)
 
-    print("herd=%d coins=%d feed=%d" % (farm.animal_count, farm.coins, farm.feed))
+    print("herd=%d/%s coins=%d feed=%d" % (
+        farm.animal_count,
+        farm.capacity if farm.capacity is not None else "?",
+        farm.coins,
+        farm.feed,
+    ))
     print(
-        "target=%d (room %d)  affordable %d (keeps %d feed/animal reserved)  -> adopt %d %ss"
-        % (target, room, can_afford, rules.FEED_PER_ANIMAL_RESERVE, want,
-           primary_kind)
+        "target=%d (requested %d, room %d) affordable=%d -> one bulk adopt qty=%d %s"
+        % (target, args.target, room, can_afford, want, primary_kind)
     )
-    print("policy=%s compatible=%s" % (runtime_policy.get("policy_id"), runtime_policy.get("compatible")))
+    print("policy=%s compatible=%s" % (
+        runtime_policy.get("policy_id"), runtime_policy.get("compatible")
+    ))
+
     intervention_id = ledger.intervention(
         "expand_adoption_batch",
         "planned",
         {
+            "execution": "single_bulk_qty",
             "herd_before": farm.animal_count,
+            "capacity": farm.capacity,
             "coins_before": farm.coins,
             "feed_before": farm.feed,
             "target_requested": args.target,
@@ -176,85 +197,65 @@ def main() -> int:
         },
     )
     if args.dry_run or want <= 0:
+        reason = "dry_run" if args.dry_run else "league capacity reached or nothing reserve-safe is affordable"
         ledger.intervention(
             "expand_adoption_batch",
             "skipped",
-            {"reason": "dry_run" if args.dry_run else "nothing_safe_or_affordable"},
+            {"reason": reason},
             intervention_id=intervention_id,
         )
-        ledger.record("expansion.completed", {"status": "skipped", "adopted": 0})
-        return 0
+        return _record_skip(reason, farm, args.target)
 
-    work = queue.Queue()
-    for _ in range(want):
-        work.put(1)
-    done = {"ok": 0, "fail": 0}
-    lock = threading.Lock()
-    stop = threading.Event()
-    deadline = time.time() + args.max_seconds
-
-    worker_context = ledger.current()
-
-    def worker(endpoint):
-        ledger.set_context(
-            **dict(worker_context, worker=threading.current_thread().name)
-        )
-        client = Client(endpoint)
-        while not stop.is_set() and time.time() < deadline:
-            try:
-                work.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                client.call("adopt_animal", kind=primary_kind)
-                with lock:
-                    done["ok"] += 1
-            except (ToolError, McpError) as exc:
-                with lock:
-                    done["fail"] += 1
-                    if done["fail"] <= 3:
-                        print("  adopt failed: %s" % str(exc)[:120])
-                    too_many = done["fail"] > 25
-                # Out of coins or sustained pushback: stop the sprint rather than
-                # hammering a server that is already refusing.
-                if "coin" in str(exc).lower() or too_many:
-                    stop.set()
-                    return
-
-    threads = [
-        threading.Thread(target=worker, args=(c.endpoint,), daemon=True)
-        for _ in range(max(1, args.workers))
-    ]
     started = time.time()
-    for t in threads:
-        t.start()
-    while any(t.is_alive() for t in threads):
-        time.sleep(5)
-        with lock:
-            ok, fail = done["ok"], done["fail"]
-        print("  adopted %d (fail %d) %.1f/s" % (ok, fail, ok / max(1e-6, time.time() - started)))
-    for t in threads:
-        t.join(timeout=5)
+    call_error = None
+    response = ""
+    try:
+        # A bulk mutation is not transport-retried: the first request may have
+        # committed before a gateway failure. The authoritative post-read below
+        # reconciles actual state without ever double-adopting.
+        response = client.call(
+            "adopt_animal",
+            kind=primary_kind,
+            qty=want,
+            _transport_retries=1,
+        )
+    except (ToolError, McpError) as exc:
+        call_error = str(exc)[:240]
 
-    final = parse.parse_farm(c.call("list_farm"))
-    print(
-        "DONE adopted=%d failed=%d in %.0fs | herd %d -> %d | coins %d -> %d | feed %d"
-        % (done["ok"], done["fail"], time.time() - started, farm.animal_count,
-           final.animal_count, farm.coins, final.coins, final.feed)
+    final = parse.parse_farm(client.call("list_farm"))
+    observed_delta = final.animal_count - farm.animal_count
+    adopted = max(0, observed_delta)
+    status = "ok" if call_error is None and adopted > 0 else (
+        "reconciled" if adopted > 0 else "failed"
     )
+    duration = time.time() - started
+    print(
+        "DONE status=%s requested=%d observed_delta=%d in %.1fs | herd %d -> %d | coins %d -> %d"
+        % (
+            status, want, observed_delta, duration, farm.animal_count,
+            final.animal_count, farm.coins, final.coins,
+        )
+    )
+    if call_error:
+        print("  bulk call outcome required reconciliation: %s" % call_error)
+
     buffer_min = rules.feed_buffer_minutes(final.feed, final.animal_count)
-    print("feed runway now %.0f min (floor %d)" % (buffer_min, rules.FEED_BUFFER_MIN_MINUTES))
-    if buffer_min < rules.FEED_BUFFER_MIN_MINUTES:
-        print("WARNING: runway below floor - the next cycle must top up feed")
+    print("feed runway now %.0f min (floor %d)" % (
+        buffer_min, rules.FEED_BUFFER_MIN_MINUTES
+    ))
     ledger.intervention(
         "expand_adoption_batch",
         "outcome",
         {
-            "adopted": done["ok"],
-            "failed": done["fail"],
+            "status": status,
+            "execution": "single_bulk_qty",
+            "requested": want,
+            "adopted_observed": adopted,
+            "call_error": call_error,
+            "response_preview": response[:240],
             "herd_before": farm.animal_count,
             "herd_after": final.animal_count,
-            "animal_residual": final.animal_count - farm.animal_count - done["ok"],
+            "capacity": final.capacity,
             "coins_before": farm.coins,
             "coins_after": final.coins,
             "feed_after": final.feed,
@@ -265,14 +266,20 @@ def main() -> int:
     ledger.record(
         "expansion.completed",
         {
-            "status": "ok" if done["fail"] == 0 else "partial",
-            "adopted": done["ok"],
-            "failed": done["fail"],
+            "status": status,
+            "adopted": adopted,
+            "requested": want,
+            "failed": 1 if status == "failed" else 0,
+            "call_error": call_error,
             "herd_before": farm.animal_count,
             "herd_after": final.animal_count,
-            "duration_s": round(time.time() - started, 2),
+            "capacity": final.capacity,
+            "duration_s": round(duration, 2),
         },
     )
+    # A failed/ambiguous bulk mutation is contained and retried only on the next
+    # normal cadence; a nonzero exit could make supervision repeat an irreversible
+    # request immediately.
     return 0
 
 

@@ -111,6 +111,13 @@ def regime_labels(row: Dict[str, Any], previous: Optional[Dict[str, Any]] = None
         labels.append("bulk_gateway_limited")
     if int(row.get("transport_errors_core") or 0) > 0:
         labels.append("core_transport_noise")
+    if int(row.get("prestige_count") or 0) > 0 or (
+        previous
+        and isinstance(row.get("league_level"), int)
+        and isinstance(previous.get("league_level"), int)
+        and row.get("league_level") != previous.get("league_level")
+    ):
+        labels.append("progression_transition")
     if (row.get("growth") or {}).get("saturated"):
         labels.append("growth_gated")
     if row.get("rank") == 1:
@@ -145,7 +152,9 @@ def rate_samples(
             continue
         labels = regime_labels(row, previous)
         if healthy_only and any(
-            label in labels for label in ("starved", "hunger_risk", "blind_gap", "zero_output")
+            label in labels for label in (
+                "starved", "hunger_risk", "blind_gap", "zero_output", "progression_transition"
+            )
         ):
             # Zero-output windows remain authoritative operational incidents, but
             # they are not samples of the healthy scaling curve. Mixing a live

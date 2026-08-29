@@ -151,10 +151,11 @@ def dry_run_plan(row: Dict[str, Any]) -> str:
                 row.get("max_hunger"),
                 row.get("ready_units"),
             ),
-            "would: feed=%s buy_feed=%s adopt=%s"            % (
+            "would: feed=%s buy_feed=%s adopt=%s mechanic=%s" % (
                 "yes" if (row.get("max_hunger") or 0) >= rules.FEED_AT_HUNGER else "no",
                 plan.get("buy_feed"),
                 plan.get("adopt"),
+                ((plan.get("mechanic") or {}).get("tool") or "none"),
             ),
         ]
     )

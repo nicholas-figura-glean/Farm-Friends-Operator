@@ -15,7 +15,7 @@ None of that reasoning belongs in routine execution. Actions are deterministic
 arithmetic in `farm/rules.py`; bounded investigation, claim revision, and policy
 promotion live off the mutation path.
 
-## Current bulk and risk architecture (2026-08-24)
+## Current bulk, progression, and risk architecture (2026-08-29)
 
 - `collect_produce` runs exactly once at the start of every cycle. It is a
   constant-time bulk operation; there is no cadence, retry loop, batching, or
@@ -25,11 +25,22 @@ promotion live off the mutation path.
 - `farm_events(limit=100)` runs every cycle. Wolves, sickness, storms, spoilage,
   and visible vet/repair charges are normalized, deduplicated, and written into
   the run ledger for the dashboard and anomaly evaluator.
+- League, animal capacity, prestige eligibility, and active-crisis cost/resolver
+  are protected parser fields, not dashboard-only prose. The objective is
+  lexicographic: league level first, lifetime produce second.
+- `farm/mechanics.py` reads a literal-only policy list without importing it,
+  validates each action against the captured contract and hard call/cost ceilings,
+  executes non-retried mutations under the expansion lock, and verifies state.
+  Earned prestige levels are chained before rebuilding; lifetime produce and
+  capacity must pass post-action checks.
+- `adopt_animal(qty=...)` is one bounded bulk expansion call. Expansion stops at
+  the current league capacity and yields whenever prestige or an eligible crisis
+  belongs to the main cycle; it no longer loops thousands of guaranteed failures.
 - Expansion preserves `RISK_COIN_RESERVE` in liquid coins for automatic bills;
   the existing feed runway remains separate and is still restored after growth.
-- Risk events are expected stochastic losses, not transport failures. A verified
-  animal shortfall accompanied by a wolf/sickness event is recorded as explained
-  telemetry rather than treated as unexplained state drift.
+- Risk events are expected stochastic losses, not transport failures. Active
+  crises are resolved only when the parsed target, capacity/runway exposure, and
+  declared 30–80% cost pass deterministic reserve guards.
 
 | | before | after |
 |---|---|---|
@@ -42,7 +53,8 @@ promotion live off the mutation path.
 
 ```
 run.py                 execution, supervision, questions, audits, sweep, policy CLI
-experiments/           declarative bounded probes; mutating probes require explicit use
+experiments/           bounded probes plus literal-only capability policy declarations
+experiments/capability_policies.py model-editable data; never imported or allowed to execute code
 farm/analysis.py       full-ledger cohorts, regimes, regression, immutable fingerprints
 farm/compaction.py     lossless checksummed NDJSON segments + transparent replay
 farm/claims.py         versioned claims, confidence, freshness, falsifiers, supersession
@@ -53,7 +65,8 @@ farm/research.py       replay audits, drift checks, counterfactuals, decision bu
 farm/ledger.py         normalized actor/run/policy/intervention observation stream
 farm/probes.py         lock- and budget-enforced probe scheduler
 farm/mcp.py            JSON-RPC, endpoint scrubbing, contextual boundary spans
-farm/parse.py          plain text -> dataclasses; risk events normalized by category
+farm/mechanics.py      protected policy validator, bounded action decision, and outcome verification
+farm/parse.py          plain text -> dataclasses; league, capacity, crises, and risk events
 farm/rules.py          pure executable arithmetic and replayable self-audit rules
 farm/growth.py         reversible recent-evidence growth brake
 farm/governance.py     20-run systems review: execution, healing, learning, safety
@@ -100,7 +113,8 @@ state/heal.ndjson      every operational remedy the supervisor applied
 state/progress.json    live pipeline position
 state/tool_calls.ndjson paired MCP spans with actor/run/policy attribution
 state/growth.json      recent reversible growth-brake verdict
-state/contract.json    the server contract the current code was written against
+state/contract.json    pinned contract the current code was written against
+state/contract_live.json freshest full descriptor snapshot used to validate adaptive policies
 state/contract.ndjson  one row per contract scan, with classified drift
 state/workorders.ndjson code-change work orders; one current row per order id
 state/canary.json      the release currently on probation, if any
@@ -132,6 +146,7 @@ python3 run.py --research-audit # semantic contracts + drift + question updates
 python3 run.py --sweep        # pure counterfactual replay; zero MCP calls
 python3 run.py --knowledge-refresh # rebuild versioned claims
 python3 run.py --policy-status # promoted/runtime compatibility
+python3 run.py --capabilities-status # executable mechanics, bounds, evidence, validation errors
 python3 run.py --safety-status # lineage, champion efficacy, and compaction summary
 python3 run.py --compaction-status # hot/archive bytes without modifying evidence
 python3 run.py --compact-state # explicitly run the same lossless supervisor maintenance
@@ -152,7 +167,8 @@ deploy/open_monitor.py          # reuse a running dashboard, else start one, the
 deploy/export_game.py           # write coop-rush.html, a standalone playable file
 deploy/test_game.sh             # run the game's headless test suites
 deploy/test_dashboard.py        # 151 checks: panels, release refresh, liveness, visuals, traces
-python3 deploy/test_evidence.py  # 25 checks: derived findings and cost history stay ledger-faithful
+python3 deploy/test_evidence.py  # derived findings and cost history stay ledger-faithful
+python3 deploy/test_mechanics.py # no-network progression/crisis/bridge/canary regression gate
 deploy/make_app.sh              # build double-clickable Coop Rush.app / Farm Monitor.app
 ```
 

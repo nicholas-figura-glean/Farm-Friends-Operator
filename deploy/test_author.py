@@ -56,6 +56,10 @@ section("the edit policy refuses what it must")
 
 check("farm modules are editable", author_agent.editable("farm/parse.py") is None)
 check("experiments are editable", author_agent.editable("experiments/expand.py") is None)
+check("literal capability policies are author-editable",
+      author_agent.editable("experiments/capability_policies.py") is None)
+check("the capability executor is protected",
+      author_agent.editable("farm/mechanics.py") is not None)
 check("run.py is protected orchestration", author_agent.editable("run.py") is not None)
 check("monitor.py remains repairable behind independent gates",
       author_agent.editable("monitor.py") is None)
@@ -70,6 +74,9 @@ check("the canary cannot be edited", author_agent.editable("farm/canary.py") is 
 check("its own source cannot be edited", author_agent.editable("experiments/author_agent.py") is not None)
 check("the release script cannot be edited", author_agent.editable("deploy/release.sh") is not None)
 check("rules.py (all budgets) cannot be edited", author_agent.editable("farm/rules.py") is not None)
+check("mechanics regression gate is mandatory for autonomous patches",
+      any(name == "mechanics" and command[-1] == "deploy/test_mechanics.py"
+          for name, command in author_agent.GATES))
 check("path traversal is refused", author_agent.editable("../../etc/passwd") is not None)
 check("absolute paths are refused", author_agent.editable("/etc/hosts") is not None)
 check("non-Python files are refused", author_agent.editable("farm/notes.md") is not None)

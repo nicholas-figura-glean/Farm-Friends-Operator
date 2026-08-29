@@ -198,7 +198,7 @@ def record_cycle(
             "feed": inputs.get("feed"),
         },
         "decision": row.get("decision_trace") or {
-            "objective": "maximize lifetime produce subject to hunger, feed, and transport safety",
+            "objective": "maximize league level first, then lifetime produce, subject to hunger, feed, and transport safety",
             "selected": plan,
             "growth": row.get("growth"),
         },

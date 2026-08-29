@@ -52,7 +52,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from farm import (  # noqa: E402
-    analysis, canary, claims, contract, journal, ledger, llm, policy, provenance,
+    analysis, canary, claims, contract, journal, ledger, llm, mechanics, policy, provenance,
     questions, research, rules, workorders,
 )
 
@@ -113,13 +113,15 @@ def unused_capabilities() -> List[Dict[str, Any]]:
     tools = baseline.get("tools") or {}
     rely = baseline.get("reliance") or {}
     out = []
+    already_active = mechanics.active_tools()
     for name in sorted(set(tools) - set(rely)):
-        if name in IGNORED_CAPABILITIES:
+        if name in IGNORED_CAPABILITIES or name in already_active:
             continue
         spec = tools[name] or {}
         out.append({
             "capability": name,
             "description": str(spec.get("description") or "")[:300],
+            "description_sha": str(spec.get("description_sha") or ""),
             "required": spec.get("required") or [],
             "args": sorted((spec.get("args") or {}).keys()),
         })
@@ -132,8 +134,56 @@ def _probe_path(value: str) -> str:
 
 
 def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """A work order proposing a bounded probe for one unused capability."""
+    """Route direct mechanics to implementation; uncertain tools to a probe."""
     name = entry["capability"]
+    classification = mechanics.classify_capability(
+        name, entry.get("description", ""), entry.get("required") or []
+    )
+    detail = dict(entry, capability_classification=classification)
+    if classification.get("direct"):
+        change = {
+            "id": "capability-policy-%s" % name,
+            "severity": "degraded",
+            "kind": "capability_policy",
+            "tool": name,
+            "summary": "%s is a directly documented %s mechanic: %s"
+                       % (name, classification.get("kind"), entry["description"][:140]),
+            "we_use_it": False,
+            "sites": [],
+            "detail": detail,
+        }
+        intent = (
+            "Implement `%s` in the literal capability-policy surface at %s. The server "
+            "contract directly states its trigger, objective effect, and bounded cost; "
+            "this is direct-mechanism evidence, not a request for a speculative lifetime-"
+            "produce probe. Add one enabled entry with the captured description hash, "
+            "hard call/cost bounds, and required post-action verification. The protected "
+            "executor calls it; do not edit farm/cycle.py or farm/mechanics.py."
+            % (name, mechanics.POLICY_RELATIVE)
+        )
+        acceptance = [
+            "%s has an enabled literal capability policy" % name,
+            "the policy pins the captured contract fingerprint and direct evidence",
+            "the protected validator accepts every call, cost, and outcome bound",
+            "farm/cycle.py and farm/mechanics.py are unchanged by this order",
+        ]
+        return {
+            "change": change,
+            "intent": intent,
+            "acceptance": acceptance,
+            "files": [mechanics.POLICY_RELATIVE],
+            "evidence_spec": {
+                "hypothesis": "Contract-bounded use of %s performs its documented %s objective."
+                              % (name, classification.get("kind")),
+                "null_hypothesis": "%s fails its documented objective or crosses its declared bound."
+                                   % name,
+                "falsifier": classification.get("falsifier"),
+                "primary_metric": classification.get("primary_metric"),
+                "expected_improvement": 0.01,
+            },
+            "change_class": "strategy",
+        }
+
     change = {
         "id": "research-capability-%s" % name,
         "severity": "opportunity",
@@ -143,26 +193,35 @@ def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
                    % (name, entry["description"][:120]),
         "we_use_it": False,
         "sites": [],
-        "detail": entry,
+        "detail": detail,
     }
     intent = (
-        "The server exposes `%s` (%s) and our code has never called it, so we have no "
-        "evidence about whether it helps. Add a bounded probe under experiments/ that "
-        "measures its effect on lifetime produce, and register it in "
-        "experiments/registry.py so the probe scheduler can run it. Do NOT wire it into "
-        "farm/cycle.py: an unmeasured capability on the live path is exactly the kind of "
-        "plausible change POSTMORTEM-run377 documents losing ground. If the probe must "
-        "mutate state, give it a hard budget and mark it non-autonomous so it only runs "
-        "when explicitly invoked." % (name, entry["description"][:160])
+        "The server exposes `%s` (%s), but its objective effect is not directly "
+        "established. Add a bounded probe under experiments/, register it, and record "
+        "a causal result. Do not claim that queueing or defining the probe implements "
+        "the mechanic; a supported result must create a separate capability-policy order."
+        % (name, entry["description"][:160])
     )
     acceptance = [
         "a probe for %s exists under experiments/ and is registered" % name,
         "the probe declares a budget and its read_only/autonomous flags",
         "farm/cycle.py is unchanged by this order",
-        "the probe records its outcome so a later pass can read the result",
+        "the probe records a durable supported/falsified result",
     ]
-    return {"change": change, "intent": intent, "acceptance": acceptance,
-            "files": [_probe_path(name), "experiments/registry.py"]}
+    return {
+        "change": change,
+        "intent": intent,
+        "acceptance": acceptance,
+        "files": [_probe_path(name), "experiments/registry.py"],
+        "evidence_spec": {
+            "hypothesis": "A bounded use of %s improves the league-first objective." % name,
+            "null_hypothesis": "%s produces no measurable objective benefit." % name,
+            "falsifier": classification.get("falsifier"),
+            "primary_metric": classification.get("primary_metric"),
+            "expected_improvement": 0.01,
+        },
+        "change_class": "research_probe",
+    }
 
 
 # -- 2 & 3. parameter sensitivity and outcome correlation --------------------
@@ -248,6 +307,7 @@ def rate_context() -> Dict[str, Any]:
         best_rival = max(numeric) if numeric else 0
     return {
         "runs": len(recent),
+        "run": latest.get("run"),
         "rank": latest.get("rank"),
         "produce_per_min": latest.get("produce_per_min"),
         "animals": latest.get("animals"),
@@ -261,9 +321,9 @@ def rate_context() -> Dict[str, Any]:
 # -- 4. model hypotheses -----------------------------------------------------
 
 HYPOTHESIS_SYSTEM = """\
-You are a research analyst for an automated farming game agent that is currently
-in first place and must stay there. You do not write production code. You propose
-falsifiable experiments.
+You are a research analyst for an automated farming game agent that must maximize
+the server's lexicographic leaderboard: league level first, lifetime produce second.
+You do not write production code. You propose falsifiable experiments.
 
 Rules:
 
@@ -282,6 +342,8 @@ Rules:
 * Do not propose changes to feeding cadence or the growth gate unless the evidence
   given to you specifically contradicts the current claim; both have prior
   incidents.
+* Treat a directly documented mandatory progression rule differently from a speculative
+  optimization: it belongs in the bounded capability-policy implementation path.
 * If the evidence suggests no change is warranted, reply with an empty array [].
 """
 
@@ -350,6 +412,130 @@ def hypothesis_proposal(item: Dict[str, Any]) -> Dict[str, Any]:
             "files": [_probe_path(key), "experiments/registry.py"]}
 
 
+def file_supported_implementations(queue: str) -> List[Dict[str, Any]]:
+    """Turn supported capability probes into executable policy work orders.
+
+    This is the handoff the original architecture omitted: durable evidence used
+    to stop at ``hypothesis.result`` with no consumer. The implementation remains
+    isolated, gated, canaried, and bounded by the protected policy executor.
+    """
+    active = mechanics.active_tools()
+    filed: List[Dict[str, Any]] = []
+    for order in workorders.current(queue).values():
+        if order.get("source") != "research_agent" or order.get("kind") != "unused_capability":
+            continue
+        if order.get("status") != workorders.PUBLISHED:
+            continue
+        tool = str(order.get("tool") or "")
+        if not tool or tool in active:
+            continue
+        lineage = dict(order.get("provenance") or {})
+        identity = str(lineage.get("hypothesis_id") or "")
+        result = provenance.latest_result(identity) if identity else None
+        if not result or result.get("status") not in {"supported", "accepted", "passed"}:
+            continue
+        change = {
+            "id": "capability-policy-%s" % tool,
+            "severity": "degraded",
+            "kind": "capability_policy",
+            "tool": tool,
+            "summary": "Supported probe for %s is awaiting executable capability policy" % tool,
+            "we_use_it": False,
+            "sites": [],
+            "detail": {
+                "source_probe_order": order.get("id"),
+                "hypothesis_id": identity,
+                "result_node": result.get("node"),
+                "effect": result.get("effect") or {},
+                "capability_classification": (order.get("detail") or {}).get("capability_classification") or {},
+            },
+        }
+        promotion = dict(
+            lineage,
+            change_class="strategy",
+            evidence_class=result.get("evidence_class"),
+            validation_evidence=result.get("validation_evidence") or [],
+            result_node=result.get("node"),
+        )
+        submitted = workorders.submit(
+            change,
+            source="research_agent",
+            intent=(
+                "Implement the supported `%s` result as one literal entry in %s. "
+                "Do not edit the protected executor or cycle; preserve the result's "
+                "call/cost bounds and required outcome verification."
+                % (tool, mechanics.POLICY_RELATIVE)
+            ),
+            acceptance=[
+                "the supported result node %s remains linked" % result.get("node"),
+                "%s has one enabled literal capability policy" % tool,
+                "the protected capability-policy validator passes",
+                "the complete release matrix and strategy canary judge the implementation",
+            ],
+            files=[mechanics.POLICY_RELATIVE],
+            path=queue,
+            provenance=promotion,
+        )
+        if submitted:
+            filed.append(submitted)
+    return filed
+
+
+def settle_active_capability_questions() -> List[str]:
+    """Close only novelty questions whose named mechanic is now executable."""
+    active = mechanics.active_tools()
+    settled: List[str] = []
+    for question in questions.open_questions():
+        if question.get("class") not in {"activity_novelty_tools", "activity_novelty_risk"}:
+            continue
+        text = "%s %s %s" % (
+            question.get("alert") or "",
+            question.get("question") or "",
+            question.get("subject") or "",
+        )
+        matched = sorted(tool for tool in active if tool in text)
+        # The state alert says "prestige is available" even when it does not
+        # include the exact policy id; that exact token is still unambiguous.
+        if "prestige" in text and "prestige" in active and "prestige" not in matched:
+            matched.append("prestige")
+        if not matched:
+            continue
+        identity = str(question.get("id") or "")
+        questions.set_status(
+            identity,
+            "answered",
+            answer="Validated executable capability policy is active for %s."
+                   % ", ".join(matched),
+            evidence_refs=["capability-policy:%s" % tool for tool in matched],
+            run=canary.latest_run(),
+            probe_id="capability-policy",
+            result_status="implemented",
+        )
+        settled.append(identity)
+    return settled
+
+
+def reconcile_active_capability_orders(queue: str) -> List[Dict[str, Any]]:
+    """Retire probe-only orders only after an executable policy is active."""
+    active = mechanics.active_tools()
+    resolved: List[Dict[str, Any]] = []
+    for order in workorders.current(queue).values():
+        if order.get("status") != workorders.OPEN:
+            continue
+        tool = str(order.get("tool") or "")
+        if tool not in active or order.get("kind") not in {"unused_capability", "capability_policy"}:
+            continue
+        row = workorders.resolve(
+            str(order.get("id")),
+            workorders.SUPERSEDED,
+            note="superseded only after validated executable capability policy became active",
+            path=queue,
+        )
+        if row:
+            resolved.append(row)
+    return resolved
+
+
 # -- main --------------------------------------------------------------------
 
 
@@ -365,6 +551,9 @@ def main() -> int:
     stored = read_json(STORE)
     proposed = set(stored.get("proposed") or [])
     queue = str(PROJECT / workorders.QUEUE)
+    reconciled_capabilities = reconcile_active_capability_orders(queue)
+    settled_capability_questions = settle_active_capability_questions()
+    implementation_orders = file_supported_implementations(queue)
 
     runtime = policy.runtime_context()
     ledger.set_context(actor="research_agent", run=canary.latest_run(),
@@ -404,7 +593,9 @@ def main() -> int:
 
     proposals: List[Dict[str, Any]] = []
 
-    # Cheapest source first: capabilities we have never tried.
+    # Cheapest source first: capabilities we have never tried. Directly documented
+    # progression/crisis mechanics route to the literal implementation surface;
+    # uncertain tools still earn a probe first.
     for entry in capabilities:
         key = "capability:%s" % entry["capability"]
         if key in proposed:
@@ -454,7 +645,7 @@ def main() -> int:
         else:
             print("  model dormant: %s" % availability.get("reason"))
 
-    filed = []
+    filed = list(implementation_orders)
     discovery_refs = [
         "history.ndjson#run=%s" % context.get("run"),
         "policy.json#%s" % runtime.get("policy_id"),
@@ -463,7 +654,9 @@ def main() -> int:
     for proposal, key in proposals:
         change = proposal["change"]
         detail = change.get("detail") or {}
-        if change.get("kind") == "strategy_hypothesis":
+        if proposal.get("evidence_spec"):
+            spec = dict(proposal["evidence_spec"])
+        elif change.get("kind") == "strategy_hypothesis":
             spec = {
                 "hypothesis": detail.get("hypothesis"),
                 "null_hypothesis": "The probe produces no measurable improvement in %s."
@@ -475,12 +668,12 @@ def main() -> int:
         else:
             capability = str(change.get("tool") or change.get("summary") or "capability")
             spec = {
-                "hypothesis": "A bounded use of %s improves lifetime-produce efficiency."
+                "hypothesis": "A bounded use of %s improves the league-first objective."
                               % capability,
-                "null_hypothesis": "%s produces no measurable lifetime-produce benefit."
+                "null_hypothesis": "%s produces no measurable objective benefit."
                                    % capability,
                 "falsifier": "The bounded probe shows no gain or violates a declared safety budget.",
-                "primary_metric": "lifetime produce gained per bounded call or coin",
+                "primary_metric": "league level, then lifetime produce, per bounded cost",
                 "expected_improvement": 0.01,
             }
         registered = provenance.register_hypothesis(
@@ -493,9 +686,13 @@ def main() -> int:
         if not registered.get("accepted"):
             print("  skipped %s: %s" % (registered.get("id"), registered.get("reason")))
             continue
-        lineage = dict(spec, hypothesis_id=registered["id"],
-                       discovery_evidence=discovery_refs,
-                       change_class="research_probe")
+        lineage = dict(
+            spec,
+            hypothesis_id=registered["id"],
+            discovery_evidence=discovery_refs,
+            change_class=str(proposal.get("change_class") or "research_probe"),
+            evidence_class="direct_mechanism" if change.get("kind") == "capability_policy" else None,
+        )
         acceptance = list(proposal["acceptance"]) + [
             "the registry entry carries hypothesis_id %s and a causal evidence_class"
             % registered["id"],
@@ -514,6 +711,13 @@ def main() -> int:
                            passes=int(stored.get("passes") or 0) + 1,
                            proposed=sorted(proposed)))
 
+    if reconciled_capabilities:
+        print("  active capability policies retired: %s" % ", ".join(
+            str(row.get("id")) for row in reconciled_capabilities
+        ))
+    if settled_capability_questions:
+        print("  implemented capability questions settled: %s"
+              % ", ".join(settled_capability_questions))
     if not filed:
         if context.get("lead_secure"):
             print("  no proposal: lead is secure and no untested capability remains")

@@ -318,6 +318,20 @@ def reliance(root: str = ".") -> Dict[str, Any]:
                 if keyword.arg:
                     entry["args"].add(keyword.arg)
             entry["sites"].add("%s:%d" % (rel, getattr(node, "lineno", 0)))
+    # Literal-only adaptive capability policies are executed through a generic
+    # protected boundary, so ordinary AST call scanning cannot see their tool
+    # names. Merge their independently validated declarations; otherwise an
+    # implemented mechanic remains reported as "unused" forever and the research
+    # agent keeps filing probes for behavior already live.
+    try:
+        from . import mechanics
+
+        for tool, declared in mechanics.policy_reliance(root).items():
+            entry = used.setdefault(tool, {"args": set(), "sites": set()})
+            entry["args"].update(declared.get("args") or [])
+            entry["sites"].update(declared.get("sites") or [])
+    except Exception:  # noqa: BLE001 - contract capture must survive policy diagnostics
+        pass
     return {
         tool: {"args": sorted(v["args"]), "sites": sorted(v["sites"])}
         for tool, v in sorted(used.items())
@@ -430,7 +444,7 @@ def capture(client: Any, raw_dir: str = RAW_DIR, root: str = ".") -> Dict[str, A
 
 # Severity ranking, worst first. `breaking` means the farm will fail or already
 # is failing; `opportunity` means new capability we are not using.
-SEVERITIES = ("breaking", "shape", "opportunity", "additive", "cosmetic")
+SEVERITIES = ("breaking", "degraded", "shape", "opportunity", "additive", "cosmetic")
 
 
 def diff(old: Optional[Dict[str, Any]], new: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -539,9 +553,23 @@ def diff(old: Optional[Dict[str, Any]], new: Dict[str, Any]) -> List[Dict[str, A
                 ))
 
         if before.get("description_sha") != after.get("description_sha"):
+            policy_driven = any(
+                str(site).startswith("experiments/capability_policies.py:")
+                for site in (rely.get(name) or {}).get("sites") or []
+            )
             changes.append(_change(
-                "description_changed", "cosmetic", name,
-                "%s description was reworded" % name, used=used,
+                "description_changed", "degraded" if policy_driven else "cosmetic", name,
+                "%s capability semantics changed" % name if policy_driven
+                else "%s description was reworded" % name,
+                used=used,
+                sites=(rely.get(name) or {}).get("sites") or [],
+                detail={
+                    "before_description_sha": before.get("description_sha"),
+                    "description_sha": after.get("description_sha"),
+                    "description": after.get("description"),
+                    "required": after.get("required") or [],
+                    "policy_driven": policy_driven,
+                },
             ))
 
     changes.extend(_shape_diff(old.get("shapes") or {}, new.get("shapes") or {}, rely))

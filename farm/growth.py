@@ -59,8 +59,13 @@ def save(model: Dict[str, Any]) -> None:
         pass
 
 
-def _tail_rows() -> List[Dict[str, Any]]:
-    """Last N history rows, read from the end so file size stays irrelevant."""
+def _tail_rows(epoch_started_run: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Last N history rows, optionally scoped to the current progression epoch.
+
+    Prestige intentionally replaces the whole herd. Pre-prestige flat/full-barn
+    evidence describes a different capacity regime and must not keep the new farm
+    latched at a zero or maintenance adoption cap.
+    """
     try:
         size = os.path.getsize(HISTORY)
         with open(HISTORY, "rb") as fh:
@@ -81,6 +86,8 @@ def _tail_rows() -> List[Dict[str, Any]]:
             continue
         if isinstance(row, dict) and not row.get("dry"):
             rows.append(row)
+    if isinstance(epoch_started_run, int):
+        rows = [row for row in rows if int(row.get("run") or -1) >= epoch_started_run]
     return rows
 
 
@@ -125,11 +132,11 @@ def production_stall_active(
     model: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, int]:
     """Latch a confirmed halt until lifetime produce advances again."""
-    history = rows if rows is not None else _tail_rows()
+    previous = model or {}
+    history = rows if rows is not None else _tail_rows(previous.get("epoch_started_run"))
     streak = production_stall_windows(history)
     if streak >= 2:
         return True, streak
-    previous = model or {}
     if not previous.get("production_stalled"):
         return False, streak
     latest_gain = None
@@ -170,6 +177,31 @@ def samples(rows: Optional[List[Dict[str, Any]]] = None) -> List[Tuple[int, floa
     return rules.clean_samples(raw)
 
 
+def reset_after_progression(run: Optional[int], league_level: Optional[int]) -> Dict[str, Any]:
+    """Start a fresh growth-evidence epoch after a verified herd reset."""
+    record = {
+        "saturated": False,
+        "production_stalled": False,
+        "production_stall_windows": 0,
+        "plateau": None,
+        "recent_samples": 0,
+        "smaller_samples": 0,
+        "recent_units_per_min": None,
+        "smaller_units_per_min": None,
+        "herd": 0,
+        "cap": rules.MAX_ADOPTIONS_PER_RUN,
+        "reason": "verified prestige opened a new league/capacity regime",
+        "epoch_started_run": run,
+        "league_level": league_level,
+        "updated_ts": _utcnow(),
+        "changed_ts": _utcnow(),
+        "changed_run": run,
+        "run": run,
+    }
+    save(record)
+    return record
+
+
 def decide(
     current_animals: int,
     knobs: Dict[str, Any],
@@ -178,7 +210,7 @@ def decide(
 ) -> Dict[str, Any]:
     """Verdict + adoption cap for this run, persisting any change of mind."""
     model = load()
-    rows = _tail_rows()
+    rows = _tail_rows(model.get("epoch_started_run"))
     stalled, stalled_windows = production_stall_active(rows, model)
     verdict = rules.growth_verdict(samples(rows), current_animals, model)
     if stalled:
@@ -199,6 +231,8 @@ def decide(
     record["updated_ts"] = _utcnow()
     record["run"] = run
     record["cap"] = cap
+    record["epoch_started_run"] = model.get("epoch_started_run")
+    record["league_level"] = model.get("league_level")
     if changed or not model:
         record["changed_ts"] = _utcnow()
         record["changed_run"] = run

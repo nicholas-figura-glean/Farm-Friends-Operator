@@ -564,16 +564,20 @@ def expansion_plan(
     feed: int,
     committed_feed: int,
     cap: int = None,
+    animal_capacity: Optional[int] = None,
 ) -> Dict[str, int]:
     """Jointly solve feed top-up and chicken count.
 
     Each new chicken consumes animal cost plus its feed reserve. Expansion also
     preserves RISK_COIN_RESERVE for automatic vet and repair bills.
-    `cap` lets the supervisor throttle growth without editing strategy.
+    `cap` lets the supervisor throttle growth without editing strategy;
+    `animal_capacity` is the authoritative current league ceiling.
     """
     cost = ANIMAL_COST[PRIMARY_KIND]
     spendable = max(0, int(coins) - RISK_COIN_RESERVE)
     limit = MAX_ADOPTIONS_PER_RUN if cap is None else max(0, min(int(cap), MAX_ADOPTIONS_PER_RUN))
+    if isinstance(animal_capacity, int):
+        limit = min(limit, max(0, animal_capacity - int(animal_count)))
     best = {"adopt": 0, "buy_feed": 0, "cash_reserve": RISK_COIN_RESERVE}
     for n in range(min(limit, spendable // cost), -1, -1):
         target = feed_reserve_target(animal_count + n, committed_feed)

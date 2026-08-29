@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import claims, provenance, rules
+from . import claims, mechanics, provenance, rules
 
 SCHEMA_VERSION = 1
 
@@ -28,7 +28,7 @@ INVARIANTS: Dict[str, str] = {
     "strict_parsing": "Unknown server wording fails closed before dependent mutation.",
     "objective_guard": "A remedy that slows the scoring action must re-check the objective-denominated safety signal.",
     "question_not_remedy": "Strategy uncertainty opens a question and is never auto-healed by throttling growth.",
-    "explicit_promotion": "Evidence changes cannot change behavior until a compatible policy is explicitly promoted.",
+    "explicit_promotion": "Evidence changes cannot change behavior until a compatible policy or validated strategy release is promoted.",
 }
 
 # Every parameter has a claim and/or invariant owner. This is itself validated.
@@ -56,9 +56,11 @@ OWNERS: Dict[str, Dict[str, List[str]]] = {
     "threat_share": {"claims": ["objective.lifetime_produce"], "invariants": ["question_not_remedy"]},
     "audit_window_runs": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["question_not_remedy"]},
     "rival_wake_min_rate": {"claims": ["objective.lifetime_produce"], "invariants": ["question_not_remedy"]},
+    "capability_policy_schema": {"claims": ["objective.league_first"], "invariants": ["bounded_mutation", "strict_parsing", "explicit_promotion"]},
 }
 
 REQUIRED_CLAIMS = {
+    "objective.league_first",
     "objective.lifetime_produce",
     "mechanic.output_linear_with_herd",
     "mechanic.collection_not_score",
@@ -109,6 +111,7 @@ def parameters() -> Dict[str, Any]:
         "threat_share": rules.THREAT_SHARE,
         "audit_window_runs": getattr(rules, "AUDIT_WINDOW_RUNS", 30),
         "rival_wake_min_rate": getattr(rules, "RIVAL_WAKE_MIN_RATE", 0.5),
+        "capability_policy_schema": mechanics.POLICY_SCHEMA_VERSION,
     }
 
 
@@ -168,7 +171,8 @@ def compile_snapshot(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         "created_ts": _utcnow(),
         "promoted_ts": None,
         "objective": {
-            "metric": "leaderboard lifetime produce",
+            "metric": "league level, then leaderboard lifetime produce",
+            "ordering": "lexicographic",
             "direction": "maximize",
             "constraints": ["hunger", "feed runway", "transport budget", "bounded mutation"],
         },
@@ -337,12 +341,13 @@ def decision_trace(
     return {
         "policy_id": runtime.get("policy_id"),
         "policy_compatible": runtime.get("compatible"),
-        "objective": "maximize leaderboard lifetime produce subject to feed, hunger, transport, and mutation bounds",
+        "objective": "maximize league level first, then lifetime produce, subject to feed, hunger, transport, and mutation bounds",
         "inputs": dict(inputs),
         "selected": dict(selected),
         "alternatives": alternatives,
         "growth_evidence": growth or {},
         "claim_ids": [
+            "objective.league_first",
             "objective.lifetime_produce",
             "mechanic.output_linear_with_herd",
             "mechanic.collection_not_score",

@@ -441,6 +441,11 @@ _FARM_PROGRESS_RE = re.compile(
     r"(?P<animals>\d+)/(?P<capacity>\d+)"
     r"(?:\s+·\s+plots (?P<plots>\d+)/(?P<plot_capacity>\d+))?",
 )
+_FARM_CRISIS_RE = re.compile(
+    r"(?P<label>[A-Z][A-Z ]+?) IN PROGRESS \(since (?P<since>\d{2}:\d{2}) UTC\)\s+"
+    r"[—-]\s+(?P<resolver>resolve_crisis|call_fbi) costs (?P<percent>\d+)% of your gold",
+    re.IGNORECASE,
+)
 _LEAGUE_STANDING_RE = re.compile(
     r"^\s*(?P<rank>\d+)\.\s+(?P<badge>\S+)\s+"
     r"(?P<league>[A-Za-z]+)\s+(?P<tier>[IVXLCDM]+)\s{2,}"
@@ -478,9 +483,20 @@ def _parse_farm_progression(text: str) -> Dict[str, Any]:
     produce = int(progress.group("produce"))
     capacity = int(progress.group("capacity"))
     animals = int(progress.group("animals"))
-    body = "\n".join(lines[:3])
+    body = "\n".join(lines[:8])
     next_level = re.search(r"next level at (\d+) produce", body, re.IGNORECASE)
     prestige = "prestige available" in body.lower()
+    crisis_match = next((_FARM_CRISIS_RE.search(line) for line in lines[:8]
+                         if _FARM_CRISIS_RE.search(line)), None)
+    crisis = None
+    if crisis_match:
+        crisis = {
+            "label": crisis_match.group("label").strip(),
+            "kind": re.sub(r"[^a-z0-9]+", "_", crisis_match.group("label").lower()).strip("_"),
+            "since": crisis_match.group("since"),
+            "resolver": crisis_match.group("resolver").lower(),
+            "cost_fraction": int(crisis_match.group("percent")) / 100.0,
+        }
     next_produce = int(next_level.group(1)) if next_level else None
     threshold_pct = (
         min(100.0, produce / next_produce * 100.0)
@@ -505,6 +521,7 @@ def _parse_farm_progression(text: str) -> Dict[str, Any]:
         "threshold_pct": round(threshold_pct, 2) if threshold_pct is not None else None,
         "prestige_available": prestige,
         "full": bool(capacity and animals >= capacity),
+        "active_crisis": crisis,
     }
 
 
@@ -562,6 +579,14 @@ def _parse_league_standings(text: str) -> List[Dict[str, Any]]:
             "flowers": int(match.group("flowers")) if match.group("flowers") else 0,
             "full": "FULL" in status.upper() or bool(capacity and animals >= capacity),
             "prestige_available": "prestige" in status.lower(),
+            "crisis": next((name for name, marker in (
+                ("alien_invasion", "alien invasion"),
+                ("rustlers", "rustlers"),
+                ("crop_blight", "crop blight"),
+                ("locust_swarm", "locust swarm"),
+                ("barn_fire", "barn fire"),
+                ("wolf_pack", "wolf pack"),
+            ) if marker in status.lower()), None),
         })
     return rows
 
@@ -1860,7 +1885,7 @@ function renderHero(data) {
   $("hero-league-badge").textContent=p.badge || "◇";
   $("hero-league").textContent=p.league || "Unclassified";
   $("hero-level").textContent=p.level == null ? "level unavailable"
-    : `Level ${num(p.level)} · ${p.prestige_available?"prestige available":p.next_level_produce?num(p.produce_to_next)+" produce to next level":"threshold unavailable"}`;
+    : `Level ${num(p.level)} · ${p.prestige_available?"prestige available · autonomous action due":p.next_level_produce?num(p.produce_to_next)+" produce to next level":"threshold unavailable"}`;
   const leagueProgress=$("hero-league-progress");
   if (leagueProgress && leagueProgress.style) leagueProgress.style.width=`${Math.max(0,Math.min(100,Number(p.threshold_pct)||0))}%`;
   $("hero-produce").textContent=live == null ? "—" : num(Math.floor(live));
@@ -1876,7 +1901,7 @@ function renderHero(data) {
   $("hero-animals").textContent=capacity == null ? num(animals) : `${num(animals)} / ${num(capacity)}`;
   $("hero-herd-sub").textContent=capacity == null
     ? (data.growth && data.growth.saturated ? `maintenance mode · ${num(data.growth.cap)} adoptions/run` : `growing · up to ${num((data.growth||{}).cap)} adoptions/run`)
-    : p.capacity_remaining===0 ? "barn full · prestige pressure active" : `${num(p.capacity_remaining)} slot${Number(p.capacity_remaining)===1?"":"s"} open · ${fixed(p.capacity_used_pct,1)}% used`;
+    : p.capacity_remaining===0 ? (p.prestige_available?"barn full · autonomous prestige queued":"barn full · waiting for next threshold") : `${num(p.capacity_remaining)} slot${Number(p.capacity_remaining)===1?"":"s"} open · ${fixed(p.capacity_used_pct,1)}% used`;
   const hunger=s.hunger != null ? s.hunger : r.max_hunger;
   $("hero-hunger").textContent=hunger == null ? "—" : `${hunger} / ${s.hunger_stop || 70}`;
   $("hero-hunger-sub").textContent=hunger == null ? "production stops at 70" : hunger >= (s.hunger_stop || 70) ? "production stopped" : `${(s.hunger_stop || 70)-hunger} points of headroom`;
@@ -1901,7 +1926,7 @@ function renderScene(s, rows) {
   const readyMax=Math.max(1,...(rows||[]).map(x=>Number(x.ready_units)||0)), readyPct=Math.min(100,Math.round((Number(s.ready_units)||0)/readyMax*100));
   const levelPct=Math.max(0,Math.min(100,Number(p.threshold_pct)||0));
   const capacityPct=Math.max(0,Math.min(100,Number(p.capacity_used_pct)||0));
-  const progression=p.league?`<div class="scene-progression${p.prestige_available?" prestige":""}"><div class="league-identity"><span class="league-badge">${esc(p.badge||"◇")}</span><div><small>Current league</small><b>${esc(p.league)}</b><span>Level ${num(p.level)} · overall rank ${s.rank==null?"—":"#"+num(s.rank)}</span></div></div><div class="league-threshold"><label>${p.prestige_available?"Prestige unlocked":"Next level"} <b>${p.prestige_available?"Ready":fixed(levelPct,1)+"%"}</b></label><div class="league-track"><i style="width:${levelPct}%"></i></div><small>${p.prestige_available?"Barn cap reached; strategy remains evidence-gated":p.next_level_produce?num(p.produce_to_next)+" produce remaining":"Waiting for next threshold"}</small></div><div class="league-capacity"><label>Barn capacity <b>${num(p.animals)} / ${num(p.capacity)}</b></label><div class="league-track capacity"><i style="width:${capacityPct}%"></i></div><small>${num(p.capacity_remaining)} open slot${Number(p.capacity_remaining)===1?"":"s"}${p.plots!=null?` · ${num(p.plots)} / ${num(p.plot_capacity)} plots`:""}</small></div></div>`:"";
+  const progression=p.league?`<div class="scene-progression${p.prestige_available?" prestige":""}"><div class="league-identity"><span class="league-badge">${esc(p.badge||"◇")}</span><div><small>Current league</small><b>${esc(p.league)}</b><span>Level ${num(p.level)} · overall rank ${s.rank==null?"—":"#"+num(s.rank)}</span></div></div><div class="league-threshold"><label>${p.prestige_available?"Prestige unlocked":"Next level"} <b>${p.prestige_available?"Queued":fixed(levelPct,1)+"%"}</b></label><div class="league-track"><i style="width:${levelPct}%"></i></div><small>${p.prestige_available?"Protected executor will advance and verify the next cycle":p.next_level_produce?num(p.produce_to_next)+" produce remaining":"Waiting for next threshold"}</small></div><div class="league-capacity"><label>Barn capacity <b>${num(p.animals)} / ${num(p.capacity)}</b></label><div class="league-track capacity"><i style="width:${capacityPct}%"></i></div><small>${num(p.capacity_remaining)} open slot${Number(p.capacity_remaining)===1?"":"s"}${p.plots!=null?` · ${num(p.plots)} / ${num(p.plot_capacity)} plots`:""}</small></div></div>`:"";
   $("farm-scene").innerHTML=`${progression}<div class="scene-sky"><span class="scene-sun">${Number(s.hunger||0)>50?"🌥️":"☀️"}</span><div class="scene-rank"><b>${s.rank==null?"—":`#${s.rank}${s.rank===1?" 👑":""}`}</b><span>${num(s.produce)} lifetime produce</span></div></div><div class="pens">${pens}</div><div class="scene-ground"><div class="gauge"><label>Feed silo <b>${num(s.feed)} / ${num(s.reserve_target)}</b></label><div class="gtrack"><i style="width:${feedPct}%"></i></div><small>${fixed(s.feed_runway_min,0)}m runway · ${num(s.feed_runway_floor_min)}m floor</small></div><div class="gauge"><label>Hunger pressure <b>${num(s.hunger)} / ${num(s.hunger_stop)}</b></label><div class="gtrack hunger"><i style="width:${hungerPct}%"></i><u style="left:100%"></u></div><small>${Math.max(0,(s.hunger_stop||70)-(s.hunger||0))} points before production stops</small></div><div class="gauge"><label>Barn backlog <b>${num(s.ready_units)}</b></label><div class="gtrack"><i style="width:${readyPct}%"></i></div><small>${s.produce_delta==null?"waiting for a score delta":`${num(s.produce_delta)} produced since last run`}</small></div></div>`;
 }
 function renderOverview(data) {
@@ -1937,7 +1962,9 @@ function renderOverview(data) {
     ["leaderboard", r.rank == null ? "—" : `#${r.rank}`],
     ["lifetime produce", num(r.produce)],
     ["animals / capacity", progression.capacity == null ? num(r.animals) : `${num(r.animals)} / ${num(progression.capacity)}`],
-    ["prestige", progression.prestige_available ? "available · strategy-gated" : "not available"],
+    ["prestige", progression.prestige_available ? "available · autonomous progression queued" : (r.prestige_count ? `${num(r.prestige_count)} verified this run` : "not available")],
+    ["active crisis", progression.active_crisis ? `${esc(progression.active_crisis.label)} · ${esc(progression.active_crisis.resolver)} (${fixed(Number(progression.active_crisis.cost_fraction)*100,0)}%)` : (r.crises_resolved ? `${num(r.crises_resolved)} resolved this run` : "none")],
+    ["mechanic verification", (r.mechanic_actions||[]).map(x=>`${esc(x.tool)}: ${esc(x.status)}`).join(" · ") || "no action due"],
     ["by kind", Object.entries(r.by_kind || {}).map(([k,v]) => `${esc(k)} ${num(v)}`).join(" · ") || "—"],
     ["coins", num(r.coins)],
     ["feed / reserve", `${num(r.feed)} / ${num(r.reserve_target)}`],

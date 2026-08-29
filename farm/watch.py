@@ -42,6 +42,26 @@ def evaluate(
     # is not news; being behind with no path to the front is.
     competitive: List[str] = []
 
+    if row.get("capability_policy_errors"):
+        out.append(
+            "CAPABILITY POLICY INVALID: %s"
+            % "; ".join(str(value) for value in row.get("capability_policy_errors")[:3])
+        )
+    if int(row.get("mechanic_failures") or 0) > 0:
+        out.append("ADAPTIVE MECHANIC FAILED VERIFICATION")
+    if row.get("prestige_available"):
+        acted = any(
+            item.get("kind") == "progression" and item.get("status") in {"verified", "reconciled"}
+            for item in row.get("mechanic_actions") or []
+            if isinstance(item, dict)
+        )
+        if not acted and (prev or {}).get("prestige_available"):
+            out.append(
+                "PROGRESSION BLOCKED: prestige remained available for two completed cycles"
+            )
+        elif not acted:
+            soft.append("prestige is available; bounded progression action is due")
+
     if row.get("rank") != 1:
         competitive.append("RANK LOST: now #%s" % row.get("rank"))
 
@@ -306,6 +326,8 @@ def evaluate(
         prior_ours = prev.get("our_produce_gain")
         prior_rival_gains = prev.get("rival_gains") or {}
         rival_gains = {}
+        rival_leagues = row.get("rival_leagues") or {}
+        own_league = row.get("league")
         for name, produce in (row.get("rivals") or {}).items():
             before = prev_rivals.get(name)
             if before is not None and ours and ours > 0:
@@ -326,8 +348,9 @@ def evaluate(
                         "THREAT: %s gained %d vs our %d (>= %d%%)"
                         % (name, gained, ours, int(rules.THREAT_SHARE * 100))
                     )
-            if produce >= (row.get("produce") or 0):
-                competitive.append("%s has passed us on lifetime produce" % name)
+            same_league = not own_league or not rival_leagues.get(name) or rival_leagues.get(name) == own_league
+            if same_league and produce >= (row.get("produce") or 0):
+                competitive.append("%s has passed us on lifetime produce within %s" % (name, own_league or "the current league"))
         if ours is not None:
             row["our_produce_gain"] = ours
         if rival_gains:
@@ -349,14 +372,43 @@ def evaluate(
 
         herds = row.get("rival_herds") or {}
         prev_herds = prev.get("rival_herds") or {}
-        leader = None
-        for name, produce in (row.get("rivals") or {}).items():
-            if produce > (row.get("produce") or 0) and (
-                leader is None or produce > row["rivals"][leader]
-            ):
-                leader = name
+        leader = str(row.get("leader") or "") if row.get("rank") not in (None, 1) else ""
+        if not leader or leader.strip().lower() == "nick":
+            leader = None
+            for name, produce in (row.get("rivals") or {}).items():
+                if produce > (row.get("produce") or 0) and (
+                    leader is None or produce > row["rivals"][leader]
+                ):
+                    leader = name
 
-        if leader and interval > 0 and rival_gains.get(leader) is not None:
+        leader_league = rival_leagues.get(leader) if leader else None
+        league_blocked = bool(leader and own_league and leader_league and leader_league != own_league)
+        if league_blocked:
+            row["projection"] = {
+                "kind": "league_progression",
+                "leader": leader,
+                "leader_league": leader_league,
+                "our_league": own_league,
+                "prestige_available": bool(row.get("prestige_available")),
+                "next_level_produce": row.get("next_level_produce"),
+            }
+            if row.get("prestige_available"):
+                soft.append(
+                    "%s leads from %s; verified prestige is the required next action"
+                    % (leader, leader_league)
+                )
+            elif row.get("next_level_produce"):
+                soft.append(
+                    "%s leads from %s; producing toward the next prestige threshold"
+                    % (leader, leader_league)
+                )
+            else:
+                out.append(
+                    "NO LEAGUE PATH: %s leads from %s and no prestige threshold is observable"
+                    % (leader, leader_league)
+                )
+
+        if leader and not league_blocked and interval > 0 and rival_gains.get(leader) is not None:
             r_herd = herds.get(leader) or 0
             r_growth = 0.0
             if prev_herds.get(leader) is not None and r_herd:
@@ -479,18 +531,22 @@ def evaluate(
     if competitive:
         proj = row.get("projection") or {}
         eta = proj.get("eta_min")
-        on_track = (
+        league_path = proj.get("kind") == "league_progression" and (
+            proj.get("prestige_available") or proj.get("next_level_produce")
+        )
+        on_track = bool(league_path) or (
             bool(proj)
             and eta is not None
             and eta <= rules.WIN_ETA_ALARM_HOURS * 60
         )
         if on_track:
+            path_text = (
+                "advance from %s toward %s" % (proj.get("our_league"), proj.get("leader_league"))
+                if league_path else "pass %s in %.1f h" % (proj.get("leader"), eta / 60.0)
+            )
             soft.append(
                 "standings unchanged and on track (%s); not escalating: %s"
-                % (
-                    "pass %s in %.1f h" % (proj.get("leader"), eta / 60.0),
-                    "; ".join(competitive),
-                )
+                % (path_text, "; ".join(competitive))
             )
         else:
             # No projection, or it says we do not get there: this is the case

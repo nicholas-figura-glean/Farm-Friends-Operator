@@ -148,6 +148,14 @@ def main() -> int:
             # Claim lifecycle and semantic consistency.
             registry = claims.refresh(rows)
             suite.check(not claims.validate(registry), "fresh claim registry validates")
+            league_claim = claims.get("objective.league_first", registry) or {}
+            suite.check(
+                league_claim.get("status") == "accepted"
+                and (league_claim.get("decision") or {}).get("objective_order")
+                    == ["league_level", "lifetime_produce"],
+                "league-first objective is explicit and primary",
+                league_claim,
+            )
             suite.check((claims.get("mechanic.output_linear_with_herd", registry) or {}).get("status") == "accepted",
                         "linear claim is accepted")
             suite.check((claims.get("mechanic.per_farm_output_plateau", registry) or {}).get("status") == "superseded",
@@ -175,6 +183,12 @@ def main() -> int:
             # Policy compilation, promotion, and tamper detection.
             candidate = policy.compile_snapshot(registry)
             suite.check(candidate["audit"]["ok"], "compatible candidate policy compiles", candidate["audit"])
+            suite.check(
+                (candidate.get("objective") or {}).get("ordering") == "lexicographic"
+                and "league" in str((candidate.get("objective") or {}).get("metric")),
+                "compiled policy optimizes league before lifetime produce",
+                candidate.get("objective"),
+            )
             suite.check(set(candidate["parameters"]) == set(policy.OWNERS),
                         "every compiled parameter has an ownership declaration")
             promoted = policy.promote(candidate, registry)

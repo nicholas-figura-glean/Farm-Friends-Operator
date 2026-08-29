@@ -285,6 +285,35 @@ def research_state(limit: int = 6) -> Dict[str, Any]:
     }
 
 
+def capabilities_state() -> Dict[str, Any]:
+    """Validated adaptive policies and their most recent executed outcomes."""
+    from farm import compaction, mechanics
+
+    view = mechanics.status()
+    history = compaction.read_rows(PROJECT / "state" / "history.ndjson", limit=80)
+    actions: List[Dict[str, Any]] = []
+    for row in reversed(history):
+        for action in reversed(row.get("mechanic_actions") or []):
+            if not isinstance(action, dict):
+                continue
+            actions.append({
+                "run": row.get("run"),
+                "ts": row.get("ts"),
+                "tool": action.get("tool"),
+                "kind": action.get("kind"),
+                "status": action.get("status"),
+                "reason": action.get("reason"),
+                "verification": action.get("verification"),
+            })
+            if len(actions) >= 8:
+                break
+        if len(actions) >= 8:
+            break
+    view["recent_actions"] = actions
+    view["last_action"] = actions[0] if actions else None
+    return view
+
+
 def governance_state() -> Dict[str, Any]:
     """Latest broad run-based review of execution, healing, learning, and safety."""
     from farm import governance
@@ -454,6 +483,7 @@ def report() -> Dict[str, Any]:
         "contract": _guard(contract_state),
         "vcs": _guard(vcs_state),
         "research": _guard(research_state),
+        "capabilities": _guard(capabilities_state),
         "governance": _guard(governance_state),
         "llm": _guard(llm_state),
         "activity": _guard(activity_state),
@@ -546,6 +576,14 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
                     "what": "no endpoint scan for %d minutes" % (age // 60),
                     "why": "schema drift would go undetected"})
 
+    capability_view = view.get("capabilities") or {}
+    if capability_view.get("errors"):
+        out.append({
+            "severity": "critical",
+            "what": "adaptive capability policy failed validation",
+            "why": "; ".join(str(value) for value in capability_view.get("errors")[:3]),
+        })
+
     governance_view = view.get("governance") or {}
     governance_last = governance_view.get("last") or {}
     for check in governance_last.get("checks") or []:
@@ -571,7 +609,7 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
                     "what": "author pass budget is exhausted with %d repair(s) queued" % repair_count,
                     "why": "%d/%d real author passes used in the last 24 hours" % (passes, maximum)})
 
-    for section in ("agents", "canary", "orders", "contract", "vcs", "research", "governance", "llm"):
+    for section in ("agents", "canary", "orders", "contract", "vcs", "research", "capabilities", "governance", "llm"):
         err = (view.get(section) or {}).get("error")
         if err:
             out.append({"severity": "warn",

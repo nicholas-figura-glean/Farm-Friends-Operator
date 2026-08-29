@@ -16,7 +16,7 @@ every pass:
 Why produce_per_min and not a test result
 ----------------------------------------
 The gate matrix already proves the code is *correct*. It cannot prove the code is
-*good for the score*, and the score is the only thing that decides the game. A
+good for the lexicographic objective (league first, lifetime produce second). A
 change can pass every suite and still halve output -- POSTMORTEM-run377 documents
 exactly that: three throttles aimed at the wrong variable, all individually
 reasonable, which together nearly lost first place. The canary therefore combines
@@ -216,6 +216,44 @@ def _baseline_stall_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ):
         return recent
     return []
+
+
+def _verified_progression(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A post-release prestige that proved the league-first objective directly."""
+    for index, row in enumerate(rows):
+        for action in row.get("mechanic_actions") or []:
+            if action.get("kind") != "progression" or action.get("status") not in {"verified", "reconciled"}:
+                continue
+            verification = action.get("verification") or {}
+            checks = verification.get("checks") or {}
+            before = verification.get("before") or {}
+            after = verification.get("after") or {}
+            if not verification.get("ok") or not all(
+                checks.get(name) for name in (
+                    "league_level_increases",
+                    "lifetime_produce_preserved",
+                    "capacity_increases",
+                )
+            ):
+                continue
+            try:
+                if int(after.get("league_level")) <= int(before.get("league_level")):
+                    continue
+                if int(after.get("capacity")) <= int(before.get("capacity")):
+                    continue
+                if int(after.get("lifetime_produce")) < int(before.get("lifetime_produce")):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            return {
+                "row_index": index,
+                "run": row.get("run"),
+                "before": before,
+                "after": after,
+                "tool": action.get("tool"),
+                "policy_id": action.get("policy_id"),
+            }
+    return None
 
 
 def baseline_rate(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
@@ -431,6 +469,62 @@ def evaluate(
         verdict["reason"] = "%d/%d runs observed" % (len(after), rules.CANARY_MIN_RUNS)
         return verdict
 
+    # League is the primary leaderboard key. A prestige that independently proves
+    # level and capacity increased while lifetime produce was preserved is direct
+    # objective evidence; comparing its intentionally reset herd with the old herd's
+    # raw production distribution would optimize the secondary metric and undo the
+    # winning move. Still require production to resume and ordinary breakage checks
+    # to stay clean before accepting the release.
+    progression = _verified_progression(after)
+    if progression:
+        transition_rows = after[int(progression["row_index"]) + 1:]
+        # The action row's score delta was mostly earned by the retiring herd.
+        # Require a later completed interval to prove the replacement herd runs.
+        resumed = any((_rate(row) or 0.0) > 0 for row in transition_rows)
+        verdict["progression"] = progression
+        if not resumed:
+            if len(after) >= rules.CANARY_MAX_RUNS:
+                verdict["status"] = REGRESSED
+                verdict["reason"] = (
+                    "league progression verified but production did not resume in %d post-release runs"
+                    % len(after)
+                )
+            else:
+                verdict["reason"] = (
+                    "league progression verified; waiting for post-reset production (%d/%d runs)"
+                    % (len(transition_rows), rules.CANARY_MAX_RUNS)
+                )
+            return verdict
+        before = progression["before"]
+        after_state = progression["after"]
+        verdict["status"] = HEALTHY
+        verdict["last_run"] = int(after[-1].get("run") or 0)
+        verdict["efficacy"] = {
+            "status": evaluation.IMPROVED,
+            "accepted": True,
+            "change_class": record.get("change_class") or "strategy",
+            "metric": "league_level_then_lifetime_produce",
+            "baseline": before.get("league_level"),
+            "candidate": after_state.get("league_level"),
+            "effect": int(after_state.get("league_level")) - int(before.get("league_level")),
+            "capacity_before": before.get("capacity"),
+            "capacity_after": after_state.get("capacity"),
+            "lifetime_before": before.get("lifetime_produce"),
+            "lifetime_after": after_state.get("lifetime_produce"),
+            "reason": "verified lexicographic leaderboard progression",
+        }
+        verdict["reason"] = (
+            "verified league progression level %s -> %s, capacity %s -> %s, "
+            "lifetime produce preserved, and post-reset production resumed"
+            % (
+                before.get("league_level"),
+                after_state.get("league_level"),
+                before.get("capacity"),
+                after_state.get("capacity"),
+            )
+        )
+        return verdict
+
     # A candidate cannot cause a condition observed before it existed. Reliability
     # and compatibility releases armed during a proven score stall keep running after
     # a minimum clean post-arm window, but they do not become the champion: there was
@@ -539,6 +633,14 @@ def _quantity(value: Any) -> float:
 def _breakage(row: Dict[str, Any], zero_streak: Optional[int] = None) -> str:
     """Classify decisive breakage; collection-only streaks defer to score rate."""
     del zero_streak  # retained for callers that replay the historical signature
+    if int(row.get("mechanic_failures") or 0) > 0:
+        return "adaptive_mechanic_verification_failure"
+    if any(
+        action.get("status") == "failed"
+        for action in row.get("mechanic_actions") or []
+        if isinstance(action, dict)
+    ):
+        return "adaptive_mechanic_verification_failure"
     if _quantity(row.get("transport_errors_core")) > 0 and _quantity(row.get("collected")) == 0:
         return "core_transport_or_parse_failure"
     return ""

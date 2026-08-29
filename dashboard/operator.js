@@ -176,8 +176,10 @@ function operatorOverview(data, autonomy, overall) {
     '<span class="delta good">Herd <b>' + esc(opSigned(herdGain)) + '</b></span>',
     '<span class="delta ' + (progression.capacity_remaining === 0 ? "watch" : "good") + '">Barn <b>'
       + (progression.capacity_remaining == null ? "—" : esc(num(progression.capacity_remaining)) + " slots open") + '</b></span>',
-    '<span class="delta ' + (progression.prestige_available ? "watch" : "") + '">Prestige <b>'
-      + (progression.prestige_available ? "available · evidence-gated" : "not available") + '</b></span>',
+    '<span class="delta ' + (progression.prestige_available ? "watch" : "good") + '">Prestige <b>'
+      + (progression.prestige_available ? "available · autonomous action queued" : (latest.prestige_count ? num(latest.prestige_count) + " verified" : "not available")) + '</b></span>',
+    '<span class="delta ' + (progression.active_crisis ? "watch" : "good") + '">Crisis <b>'
+      + (progression.active_crisis ? esc(progression.active_crisis.label || progression.active_crisis.kind) : (latest.crises_resolved ? num(latest.crises_resolved) + " resolved" : "none")) + '</b></span>',
     '<span class="delta">Adopted <b>' + esc(num(latest.adopted)) + '</b></span>',
     '<span class="delta">Feed restored <b>' + esc(num(latest.feed_bought)) + '</b></span>',
     '<span class="delta ' + (adaptiveDomains.length ? "watch" : "good") + '">Adaptive guard <b>' + esc(adaptiveLabel) + '</b></span>',

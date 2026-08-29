@@ -131,6 +131,7 @@ if [[ "$COMPATIBILITY_RELEASE" -eq 0 ]]; then
 fi
 /usr/bin/python3 deploy/test_governance.py
 /usr/bin/python3 deploy/test_safety.py
+/usr/bin/python3 deploy/test_mechanics.py
 if [[ "$COMPATIBILITY_RELEASE" -eq 0 ]]; then
   /usr/bin/python3 deploy/test_evidence.py
 else

@@ -60,6 +60,8 @@ def event_signature(text: str) -> str:
         (r"\b(?:laid|produced|made honey|filled a comb|found a truffle|gave milk|grew wool)\b", "production"),
         (r"\bsays?\b", "animal_chatter"),
         (r"\btrade\b|\boffers?\b", "trade_event"),
+        (r"\bprestige (?:is )?available\b|\bcall prestige\b", "progression_available"),
+        (r"\b(?:rustlers|crop blight|locust swarm|barn fire|wolf pack|alien invasion)\b.*\bin progress\b", "active_crisis"),
     )
     for pattern, label in routine:
         if re.search(pattern, value):
@@ -125,6 +127,24 @@ def _reclassified_routine(block: Dict[str, Any]) -> bool:
     return bool(reclassified) and all(not value.startswith("unknown:") for value in reclassified)
 
 
+def _handled_tool_change(block: Dict[str, Any], handled_tools: Set[str]) -> bool:
+    if block.get("class") != "activity_novelty_tools":
+        return False
+    evidence = block.get("evidence") or {}
+    before = set(str(value) for value in evidence.get("before") or [])
+    after = set(str(value) for value in evidence.get("after") or [])
+    added, removed = after - before, before - after
+    return bool(added) and not removed and added.issubset(handled_tools)
+
+
+def _handled_risk(block: Dict[str, Any], handled_risks: Set[str]) -> bool:
+    if block.get("class") != "activity_novelty_risk":
+        return False
+    evidence = block.get("evidence") or {}
+    kinds = set(str(value) for value in evidence.get("new") or [])
+    return bool(kinds) and kinds.issubset(handled_risks)
+
+
 def _settled(block: Dict[str, Any], questions: Iterable[Dict[str, Any]]) -> bool:
     first_run = block.get("first_run")
     for question in questions:
@@ -164,6 +184,8 @@ def assess(
     previous: Optional[Dict[str, Any]],
     state: Optional[Dict[str, Any]] = None,
     question_rows: Optional[List[Dict[str, Any]]] = None,
+    handled_tools: Optional[Iterable[str]] = None,
+    handled_risks: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Detect rising-edge activity and return persistent domain holds.
 
@@ -176,6 +198,8 @@ def assess(
     current["schema_version"] = SCHEMA_VERSION
     current.setdefault("blocks", {})
     questions = list(question_rows or [])
+    tools_with_policy = set(str(value) for value in (handled_tools or []))
+    risks_with_policy = set(str(value) for value in (handled_risks or []))
     run = int(snapshot.get("run") or 0)
 
     # Evidence-linked question closure is the ordinary unblock path. A promoted
@@ -187,6 +211,10 @@ def assess(
         block = dict(value)
         if _settled(block, questions):
             resolved_blocks.append({"class": key, "reason": "evidence-linked question settled"})
+        elif _handled_tool_change(block, tools_with_policy):
+            resolved_blocks.append({"class": key, "reason": "added tools now have validated capability policies"})
+        elif _handled_risk(block, risks_with_policy):
+            resolved_blocks.append({"class": key, "reason": "risk kind now has a validated bounded policy"})
         elif _reclassified_routine(block):
             resolved_blocks.append({"class": key, "reason": "captured event reclassified as routine"})
         else:
@@ -197,13 +225,19 @@ def assess(
     tools = sorted(set(str(value) for value in (snapshot.get("tools") or [])))
     prior_tools = sorted(set(str(value) for value in (current.get("tools") or [])))
     if prior_tools and tools != prior_tools:
-        signals.append(_signal(
-            "activity_novelty_tools",
-            "server capability surface",
-            "tool names changed added=%s removed=%s"
-            % (sorted(set(tools) - set(prior_tools)), sorted(set(prior_tools) - set(tools))),
-            {"before": prior_tools, "after": tools},
-        ))
+        added_tools = set(tools) - set(prior_tools)
+        removed_tools = set(prior_tools) - set(tools)
+        # A validated policy is the completed handling path, not unresolved
+        # novelty. Removals still fail closed because losing a capability cannot
+        # be repaired by the policy that used it.
+        if removed_tools or not added_tools.issubset(tools_with_policy):
+            signals.append(_signal(
+                "activity_novelty_tools",
+                "server capability surface",
+                "tool names changed added=%s removed=%s"
+                % (sorted(added_tools), sorted(removed_tools)),
+                {"before": prior_tools, "after": tools},
+            ))
     current["tools"] = tools
 
     trades = [dict(value) for value in (snapshot.get("trades") or [])]
@@ -301,7 +335,7 @@ def assess(
 
     risk_kinds = set(str(value) for value in (snapshot.get("risk_kinds") or []))
     known_risk = set(str(value) for value in (current.get("risk_kinds") or []))
-    new_risk = sorted(risk_kinds - known_risk)
+    new_risk = sorted((risk_kinds - known_risk) - risks_with_policy)
     if new_risk:
         signals.append(_signal(
             "activity_novelty_risk",

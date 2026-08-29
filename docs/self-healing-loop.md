@@ -6,14 +6,24 @@ They are deliberately separated by capability: one can only *look*, one can only
 the complete process set.
 
 ```
-  contract_watch (15m)  ---- work orders ---->  author_agent (10m)  ---->  release + canary
-   sees the server                                edits the code              supervisor (60s)
-   never edits                                    never decides strategy      reverts on regression
-
-  research_agent (1h)  ------ work orders ---->  (same path)
-   measures strategy
-   never edits
+  contract_watch (15m) ---- direct mechanic ----> capability-policy order --┐
+       |                                                                    |
+       `---- uncertain capability ----> bounded probe ---- supported result |
+                                                |                           |
+  research_agent (1h) --------------------------+---- implementation order --+
+                                                                            v
+                         author_agent (10m) -> gates -> release -> canary -> runtime
+                                                                            |
+                         farm/mechanics.py <--- literal policy declaration --'
+                         validates contract, calls/cost, lock, and outcome
 ```
+
+A work order or probe definition is not implementation. Directly documented
+progression/crisis tools target the literal policy surface immediately. Uncertain
+tools require a causal result, and the research agent consumes that result to file
+a separate implementation order. The protected cycle/executor never executes code
+from the editable policy file: it parses one literal assignment with `ast`, validates
+it against the current contract, and owns the actual one-shot call and verification.
 
 ## Periodic whole-system review
 
@@ -33,6 +43,32 @@ check on its own judgement: a noisy detector becomes a code change, and a bad
 code change hides the evidence that it was bad. Splitting detection from mutation
 means every edit has a durable, reviewable reason attached (`state/workorders.ndjson`)
 and can be traced back to the observation that caused it.
+
+## capability policies — the formerly missing action handoff
+
+The original split was safe but incomplete: every new tool became an opportunity
+probe, mutating probes were non-autonomous, and no component converted a supported
+result into executable behavior. The system could therefore detect a mandatory
+mechanic forever while truthfully changing nothing.
+
+`experiments/capability_policies.py` is the narrow editable seam. It contains only
+literal records for direct progression and active-crisis mechanics. `farm/mechanics.py`
+rejects executable syntax, stale description fingerprints, tools with required
+arguments, routine/social tools, missing evidence, excessive call counts, excessive
+coin fractions, and incomplete outcome checks. The cycle coordinates these actions
+against the expansion lock and treats a failed post-state invariant as decisive
+canary breakage.
+
+The same classifier now drives both contract and research routing:
+
+- direct server mechanism -> implementation policy order;
+- uncertain objective effect -> bounded probe;
+- supported probe result -> implementation policy order;
+- active validated policy -> old probe-only order is retired.
+
+Prestige efficacy is judged on the server's actual lexicographic objective. A
+verified league/capacity increase with lifetime produce preserved dominates the
+intentional herd reset; canary still requires post-reset production to resume.
 
 ## contract_watch — what the server looks like
 
@@ -114,10 +150,11 @@ budget -> claim -> stage -> patch -> gate -> publish -> canary
 
 ## canary — autonomy is safe because it is reversible
 
-The gate matrix proves a change is *correct*. It cannot prove it is *good for the
-score*, and the score is the only thing that decides the game. POSTMORTEM-run377
-is exactly that failure: three individually reasonable throttles that together
-nearly lost first place, with every suite green.
+The gate matrix proves a change is *correct*. It cannot prove it is good for the
+lexicographic objective: league level first, lifetime produce second.
+POSTMORTEM-run377 is exactly that failure for the secondary score: three
+individually reasonable throttles together nearly lost first place with every
+suite green.
 
 So a flip is provisional. The supervisor adjudicates on every 60s pass with two
 separate gates:
@@ -127,9 +164,10 @@ separate gates:
    streak or a feed transport failure without mistaking one accelerated pre-tick
    cycle, wolves, sickness, or abduction for broken code.
 2. **Efficacy.** After ten clean runs, reliability repairs must remain inside a
-   5% operational equivalence band; strategy candidates must clear their pre-declared gain
-   with a 90% lower confidence bound. Merely surviving the emergency band is not a
-   promotion.
+   5% operational equivalence band; ordinary strategy candidates must clear their
+   pre-declared gain with a 90% lower confidence bound. A prestige is different:
+   verified level/capacity growth with lifetime produce preserved is direct primary-
+   objective evidence, but it is accepted only after post-reset production resumes.
 
 Accepted releases advance a durable champion ledger. Each candidate projects its
 measured ratio through the prior releases; crossing a cumulative 5% regression
@@ -142,9 +180,9 @@ never let evaluator bookkeeping delay the runtime pointer flip.
 Hypothesis sources, cheapest first:
 
 1. **Unused capability.** Tools the server exposes that our code has never called.
-   Free to detect, and the most concrete unexplored strategy space. At the time of
-   writing: `gift` and `visit_farm` (`name_animal` is ignored as cosmetic — it
-   cannot move lifetime produce).
+   Free to detect, and the most concrete unexplored strategy space. Directly
+   documented progression/crisis mechanics route to implementation; uncertain
+   tools such as `gift` retain the probe-first path (`name_animal` is cosmetic).
 2. **Parameter sensitivity.** `research.counterfactual_sweep` replays history
    against alternative constants. Zero MCP calls.
 3. **Outcome correlation.** For sensitive parameters, compare realised produce rate

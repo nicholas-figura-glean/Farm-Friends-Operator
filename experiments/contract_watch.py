@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import compatibility, contract, journal, ledger, parse, policy, workorders  # noqa: E402
+from farm import compatibility, contract, journal, ledger, mechanics, parse, policy, workorders  # noqa: E402
 from farm.mcp import Client, McpError  # noqa: E402
 
 STATE = PROJECT / "state"
@@ -218,12 +218,30 @@ def order_for(change: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str
             files,
         )
 
+    if kind == "capability_policy":
+        classification = (change.get("detail") or {}).get("capability_classification") or {}
+        return (
+            "The server directly documents `%s` as a %s mechanic: %s. Add or update one "
+            "literal policy entry in %s. The protected executor owns tool calls, hard "
+            "cost/call ceilings, locking, and post-action verification; do not edit the "
+            "cycle or executor. This is an implementation order, not a request to stop "
+            "at a probe."
+            % (tool, classification.get("kind"), change.get("summary", ""), mechanics.POLICY_RELATIVE),
+            [
+                "%s has one enabled literal capability policy" % tool,
+                "the entry pins the observed contract description fingerprint and direct evidence",
+                "the protected policy validator and complete release matrix pass",
+                "farm/cycle.py and farm/mechanics.py are unchanged by this order",
+            ],
+            [mechanics.POLICY_RELATIVE],
+        )
+
     if kind == "tool_added":
         return (
-            "The server exposes a new tool `%s`: %s. Do not wire it into the cycle yet. "
-            "Add a bounded, read-only probe under experiments/ that measures whether it "
-            "helps lifetime produce, and register it so the research agent can schedule "
-            "it. Strategy changes are earned with evidence, never assumed."
+            "The server exposes a new tool `%s`: %s. Its objective effect is not yet "
+            "directly established. Add a bounded probe under experiments/ and register "
+            "it so the research agent can schedule it. Do not claim implementation merely "
+            "because this work order or probe definition exists."
             % (tool, change.get("summary", "")),
             [
                 "a new probe exists for %s" % tool,
@@ -320,10 +338,11 @@ def reconcile_orders(observed: List[Dict[str, Any]], actionable: List[Dict[str, 
             continue
         order_id = str(order.get("id") or "")
         family = (str(order.get("tool") or ""), str(order.get("kind") or ""))
-        # Opportunities are durable research tasks, not repairs tied to a pinned
-        # incompatibility. Absorbing a safe additive contract change must not erase
-        # the experiment that still needs to evaluate it.
-        if order.get("severity") == "opportunity":
+        # Opportunities and capability-policy implementations are durable tasks,
+        # not repairs tied to a transient response sample. Absorbing a safe
+        # contract change must not erase the experiment or executable handoff that
+        # still needs to ship.
+        if order.get("severity") == "opportunity" or order.get("kind") == "capability_policy":
             continue
         if order_id in settled_ids or family in settled_families:
             resolved = workorders.resolve(
@@ -382,6 +401,11 @@ def main() -> int:
         snapshot = contract.capture(
             Client(), raw_dir=str(PROJECT / contract.RAW_DIR), root=str(PROJECT)
         )
+        # The pinned baseline answers "what deployed code was written against".
+        # Adaptive policy validation needs the freshest observed descriptors so a
+        # semantic reword disables action immediately rather than waiting for the
+        # baseline to advance after repair.
+        write_json(STATE / "contract_live.json", snapshot)
     except (McpError, OSError) as exc:
         # A scan failure is not a farm failure. Say so and exit non-zero for the
         # supervisor, but never touch the baseline on a bad read.
@@ -413,6 +437,15 @@ def main() -> int:
         return 0
 
     changes = contract.diff(baseline, snapshot)
+    # Reliance is code-derived context, not server drift and therefore is not part
+    # of the contract fingerprint. Refresh it independently so a newly activated
+    # declarative capability stops appearing "unused" even on a clean server scan,
+    # without advancing the pinned tool/response baseline past unresolved drift.
+    reliance_refreshed = (baseline.get("reliance") or {}) != (snapshot.get("reliance") or {})
+    if reliance_refreshed:
+        baseline = dict(baseline)
+        baseline["reliance"] = snapshot.get("reliance") or {}
+        contract.save_baseline(baseline, baseline_path)
     prior_streaks = stored.get("streaks") if isinstance(stored.get("streaks"), dict) else {}
     confirmed, streaks = contract.confirm(changes, prior_streaks)
 
@@ -471,17 +504,25 @@ def main() -> int:
         and str(change.get("id") or "") not in confirmed_ids
         and str(change.get("id") or "") not in failed_shape_ids
     ]
-    blocking = [c for c in confirmed if c.get("severity") == "breaking"] + failed_shapes
+    blocking = [
+        c for c in confirmed if c.get("severity") in {"breaking", "degraded"}
+    ] + failed_shapes
     opportunities = [c for c in confirmed if c.get("severity") == "opportunity"]
     actionable = blocking + opportunities
     absorbable = [c for c in changes if c.get("severity") in {"additive", "cosmetic"}]
     absorbable.extend(accepted_shapes)
 
     current_orders = workorders.current(queue_path)
-    published_repairs = [
-        change for change in blocking
-        if (current_orders.get(str(change.get("id") or "")) or {}).get("status") == workorders.PUBLISHED
-    ]
+    published_repairs = []
+    for change in blocking:
+        identities = [str(change.get("id") or "")]
+        if (change.get("detail") or {}).get("policy_driven"):
+            identities.append("capability-policy-%s" % change.get("tool"))
+        if any(
+            (current_orders.get(identity) or {}).get("status") == workorders.PUBLISHED
+            for identity in identities
+        ):
+            published_repairs.append(change)
     accepted_after_publish = 0
     if blocking and len(published_repairs) == len(blocking):
         accepted_after_publish = len(blocking)
@@ -494,14 +535,51 @@ def main() -> int:
     # tasks but do not pin the compatibility baseline; only breakage or a parser that
     # rejects the exact current sample does.
     filed: List[Dict[str, Any]] = []
-    for change in actionable:
+    for original_change in actionable:
+        change = dict(original_change)
+        direct_candidate = change.get("kind") == "tool_added" or (
+            change.get("kind") == "description_changed"
+            and (change.get("detail") or {}).get("policy_driven")
+        )
+        if direct_candidate:
+            summary = str(change.get("summary") or "")
+            description = str((change.get("detail") or {}).get("description") or "")
+            if not description:
+                description = summary.split(": ", 1)[1] if ": " in summary else summary
+            classification = mechanics.classify_capability(
+                str(change.get("tool") or ""),
+                description,
+                (change.get("detail") or {}).get("required") or [],
+            )
+            # A semantic reword that no longer directly establishes the old kind
+            # still requires the policy to be reviewed/disabled, so it remains a
+            # capability-policy order rather than being absorbed as cosmetics.
+            prior_kind = next((
+                row.get("kind")
+                for row in mechanics.load_policies().get("declared_policies") or []
+                if row.get("tool") == change.get("tool")
+            ), None)
+            if classification.get("direct") or prior_kind:
+                change["id"] = "capability-policy-%s" % change.get("tool")
+                change["kind"] = "capability_policy"
+                change["severity"] = "degraded"
+                change["detail"] = dict(
+                    change.get("detail") or {},
+                    description=description,
+                    capability_classification=classification,
+                    prior_kind=prior_kind,
+                    originating_change_id=original_change.get("id"),
+                )
         built = order_for(change)
         if not built:
             continue
         intent, acceptance, files = built
         provenance = (
             {"change_class": "compatibility", "tool": change.get("tool")}
-            if str(change.get("kind") or "").startswith("response_") else None
+            if str(change.get("kind") or "").startswith("response_")
+            else {"change_class": "strategy", "tool": change.get("tool"),
+                  "evidence_class": "direct_mechanism"}
+            if change.get("kind") == "capability_policy" else None
         )
         order = workorders.submit(
             change, source="contract_watch", intent=intent,
@@ -530,6 +608,7 @@ def main() -> int:
         "parser_failed": len(failed_shapes),
         "parser_unknown": len(unknown_shapes) + len(pending_shapes),
         "baseline_advanced": baseline_advanced,
+        "reliance_refreshed": reliance_refreshed,
         "absorbed": len(absorbable) if baseline_advanced else 0,
         "tools": len(snapshot["tools"]),
         "detail": [

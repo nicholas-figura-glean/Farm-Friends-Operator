@@ -415,6 +415,34 @@ check("absorbing a safe capability does not erase its durable research order",
       and workorders.open_orders(queue_path)[0]["severity"] == "opportunity",
       str(workorders.open_orders(queue_path)))
 
+# A directly documented mandatory mechanic is implementation work, not an inert
+# generic probe. It still cannot edit the protected cycle or executor.
+root = fresh_env()
+StubClient.payload = BASE_TOOLS
+contract_watch.main()
+prestige_tool = {
+    "name": "prestige",
+    "description": (
+        "Retire your herd to bank the league. The board ranks by league FIRST, "
+        "so prestiging is the only way to outrank a higher league. Lifetime produce is kept."
+    ),
+    "inputSchema": {"type": "object", "properties": {}, "required": []},
+}
+StubClient.payload = BASE_TOOLS + [prestige_tool]
+contract_watch.main()
+queue_path = os.path.join(root, "state", "workorders.ndjson")
+orders = workorders.open_orders(queue_path)
+check("direct progression drift creates one implementation order",
+      len(orders) == 1 and orders[0]["kind"] == "capability_policy", str(orders))
+if orders:
+    check("direct progression jumps speculative probe work",
+          orders[0]["severity"] == "degraded", str(orders[0]))
+    check("direct progression targets only the literal policy surface",
+          orders[0]["files"] == ["experiments/capability_policies.py"], str(orders[0]["files"]))
+    check("direct progression is not described as a probe",
+          any("enabled literal capability policy" in item for item in orders[0]["acceptance"]),
+          str(orders[0]["acceptance"]))
+
 shutil.rmtree(tmp, ignore_errors=True)
 
 section("the suite does not touch live operations")

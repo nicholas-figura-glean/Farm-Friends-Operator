@@ -682,6 +682,7 @@ GATES = (
     ("knowledge", ["/usr/bin/python3", "deploy/test_knowledge.py"]),
     ("governance", ["/usr/bin/python3", "deploy/test_governance.py"]),
     ("safety", ["/usr/bin/python3", "deploy/test_safety.py"]),
+    ("mechanics", ["/usr/bin/python3", "deploy/test_mechanics.py"]),
     ("evidence", ["/usr/bin/python3", "deploy/test_evidence.py"]),
     ("tool-trace", ["/usr/bin/python3", "deploy/test_tool_trace.py"]),
     ("topology", ["/usr/bin/python3", "deploy/test_topology.py"]),

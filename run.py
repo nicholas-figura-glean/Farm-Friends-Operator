@@ -43,6 +43,7 @@ from farm import (  # noqa: E402
     journal,
     ledger,
     llm,
+    mechanics,
     policy,
     probes,
     progress,
@@ -404,6 +405,13 @@ def do_canary_status() -> int:
         if verdict.get("excluded_runs"):
             print("  excluded %s (%s): outside loss, not the release's doing"
                   % (verdict["excluded_runs"], verdict.get("excluded_reason")))
+        progression = verdict.get("progression") or {}
+        if progression:
+            before, after = progression.get("before") or {}, progression.get("after") or {}
+            print("  progression: level %s -> %s, capacity %s -> %s, lifetime %s -> %s  <- decides"
+                  % (before.get("league_level"), after.get("league_level"),
+                     before.get("capacity"), after.get("capacity"),
+                     before.get("lifetime_produce"), after.get("lifetime_produce")))
         print("  verdict: %s (%s)" % (verdict.get("status"), verdict.get("reason")))
     if info.get("resolution"):
         print("  resolved %s: %s" % (info.get("resolved_ts"), info["resolution"]))
@@ -845,6 +853,14 @@ def do_knowledge_refresh(promote_policy: bool = False, contract_path: Optional[s
         print("PROMOTED %s" % promoted.get("policy_id"))
     else:
         print("candidate only; use --promote-policy for the explicit behavior contract")
+    return 0
+
+
+def do_capabilities_status() -> int:
+    """Show executable adaptive mechanics and their validation evidence."""
+    import json
+
+    print(json.dumps(mechanics.status(), indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 
@@ -2280,6 +2296,7 @@ def main() -> int:
     ap.add_argument("--promotion-contract", metavar="JSON",
                     help="pre-registered holdout/intervention evidence for a changed policy")
     ap.add_argument("--policy-status", action="store_true", help="show promoted/runtime policy compatibility")
+    ap.add_argument("--capabilities-status", action="store_true", help="show validated executable game-mechanic policies")
     ap.add_argument("--compaction-status", action="store_true",
                     help="show hot and checksummed archived ledger sizes")
     ap.add_argument("--compact-state", action="store_true",
@@ -2309,6 +2326,8 @@ def main() -> int:
         )
     if args.policy_status:
         return do_policy_status()
+    if args.capabilities_status:
+        return do_capabilities_status()
     if args.compaction_status or args.compact_state:
         return do_compaction(run=args.compact_state)
     if args.safety_status:
