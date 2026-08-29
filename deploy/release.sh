@@ -90,13 +90,6 @@ fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"
 
-# Every gate imports code from SOURCE_PROJECT but must resolve operational side
-# effects (rollback, release pointer, launchd, shared state ownership) against the
-# canonical deployment checkout. Without this, a clean detached release worktree
-# made canary.PROJECT point at itself and the rollback-root safety check correctly
-# refused publication.
-export FARM_PROJECT_ROOT="$DEPLOY_PROJECT"
-
 # Compatibility overlays are not a shortcut around strategy evidence. They are
 # admitted only when every packaged byte matches the current immutable release
 # except the narrow response normalizer. Any strategy, parser-invariant, policy,
