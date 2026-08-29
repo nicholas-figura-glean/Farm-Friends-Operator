@@ -399,6 +399,31 @@ def main() -> int:
                 "a seconds-long duplicate zero cannot fail reliability equivalence",
                 weighted_reliable,
             )
+            noisy_candidate = runs(33, 10, 0.0)
+            for index, row in enumerate(noisy_candidate):
+                row["produce_per_min"] = 44.0 if index % 2 else 0.0
+                row["interval_min"] = 5.0
+            noisy_record = dict(
+                base_record,
+                change_class="reliability",
+                baseline_per_animal=0.235,
+                efficacy_baseline_samples=[0.0, 0.4] * 6,
+            )
+            noisy = evaluation.judge(noisy_record, noisy_candidate, store)
+            suite.check(
+                not noisy["accepted"] and noisy["status"] == evaluation.INCONCLUSIVE,
+                "borderline burst-phase reliability miss stays live without champion promotion",
+                noisy,
+            )
+            clear_loss = evaluation.judge(
+                dict(base_record, change_class="reliability", baseline_per_animal=1.0),
+                runs(43, 10, 0.70), store,
+            )
+            suite.check(
+                clear_loss["status"] == evaluation.REJECTED,
+                "a statistically clear reliability loss still rejects",
+                clear_loss,
+            )
 
             bootstrap = evaluation.ensure_champion(store, "rev-a", policy_id="pol-a", run=12)
             repeated = evaluation.ensure_champion(store, "rev-other", policy_id="pol-b", run=13)

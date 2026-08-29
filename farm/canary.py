@@ -544,7 +544,11 @@ def _efficacy_verdict(
     verdict["efficacy"] = result
     verdict["last_run"] = int(usable[-1].get("run") or 0) if usable else None
     verdict["reason"] = result.get("reason") or "efficacy evaluation produced no reason"
-    verdict["status"] = HEALTHY if result.get("accepted") else REGRESSED
+    verdict["status"] = (
+        HEALTHY if result.get("accepted")
+        else INCONCLUSIVE if result.get("status") == evaluation.INCONCLUSIVE
+        else REGRESSED
+    )
     return verdict
 
 
