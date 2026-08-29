@@ -27,7 +27,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "experiments"))
 
-from farm import canary, compatibility, control, llm, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, compatibility, control, evaluation, llm, rules, tokens, vcs, workorders  # noqa: E402
 
 import author_agent  # noqa: E402
 import research_agent  # noqa: E402
@@ -579,6 +579,66 @@ check("bursty score growth outweighs collection-only and duplicate-row proxies",
       verdict["status"] == canary.WATCHING
       and 1300.0 < verdict.get("observed_rate", 0) < 1400.0,
       str(verdict))
+
+# A reliability release may be necessary while the game itself is already stalled.
+# Continuing that pre-existing condition is not candidate evidence in either direction:
+# clear probation after a minimum clean window, keep the pointer, and do not promote it.
+stalled_store = os.path.join(can, "stalled-canary.json")
+stalled_hist = os.path.join(can, "stalled-canary.ndjson")
+stalled_base = [
+    {"run": n, "animals": 100, "interval_min": 5.0,
+     "produce_per_min": 0.0, "collected": 0, "transport_errors_core": 0}
+    for n in range(1, 4)
+]
+write_runs(stalled_base)
+stalled_arm = canary.arm(
+    "revStalled", "revA", reason="repair during existing stall",
+    order_id="stalled-order", change_class="reliability",
+    store=stalled_store, history=stalled_hist, run_history=runs,
+)
+check("arming records a pre-existing authoritative score stall",
+      stalled_arm.get("baseline_stalled") is True
+      and stalled_arm.get("baseline_stall_runs") == [1, 2, 3],
+      str(stalled_arm))
+stalled_candidate = [
+    {"run": n, "animals": 100, "interval_min": 5.0,
+     "produce_per_min": 0.0, "collected": 0, "transport_errors_core": 0}
+    for n in range(4, 7)
+]
+write_runs(stalled_base + stalled_candidate)
+stalled_verdict = canary.evaluate(stalled_store, runs)
+check("an inherited reliability stall resolves inconclusive rather than reverting",
+      stalled_verdict["status"] == canary.INCONCLUSIVE,
+      str(stalled_verdict))
+stalled_outcome = canary.resolve(
+    stalled_verdict, project=can, store=stalled_store, history=stalled_hist,
+)
+check("inconclusive resolution keeps the pointer path untouched and clears probation",
+      stalled_outcome.get("acted") is True
+      and stalled_outcome.get("reverted") is False
+      and canary.active(stalled_store) is None,
+      str(stalled_outcome))
+check("inconclusive resolution does not advance the champion",
+      evaluation.champion(stalled_store).get("revision") == "revA",
+      str(evaluation.champion(stalled_store)))
+efficacy_events = pathlib.Path(can, "efficacy_events.ndjson").read_text()
+check("the efficacy ledger distinguishes inconclusive from rejected",
+      "candidate.inconclusive" in efficacy_events, efficacy_events)
+
+strategy_store = os.path.join(can, "stalled-strategy-canary.json")
+strategy_hist = os.path.join(can, "stalled-strategy-canary.ndjson")
+write_runs(stalled_base)
+canary.arm(
+    "revStrategy", "revA", reason="strategy during existing stall",
+    order_id="stalled-strategy", change_class="strategy",
+    store=strategy_store, history=strategy_hist, run_history=runs,
+)
+write_runs(stalled_base + stalled_candidate)
+stalled_strategy = canary.evaluate(strategy_store, runs)
+check("an unmeasurable strategy candidate remains fail-closed",
+      stalled_strategy["status"] == canary.REGRESSED
+      and "cannot prove" in stalled_strategy.get("reason", ""),
+      str(stalled_strategy))
 
 # A release can be armed in the middle of an existing zero-collection streak. The
 # first candidate row still carries the cycle's global streak, but attribution must

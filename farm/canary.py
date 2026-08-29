@@ -62,6 +62,7 @@ RUN_HISTORY = os.path.join("state", "history.ndjson")
 WATCHING = "watching"
 HEALTHY = "healthy"
 REGRESSED = "regressed"
+INCONCLUSIVE = "inconclusive"
 INACTIVE = "inactive"
 
 
@@ -203,6 +204,20 @@ def _weighted_mean(
     return sum(value * weight for value, weight in samples) / total_weight
 
 
+def _baseline_stall_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The consecutive pre-arm rows proving score production was already stalled."""
+    eligible = [row for row in rows if not _exogenous_loss(row) and _rate(row) is not None]
+    recent = eligible[-rules.CANARY_MIN_RUNS :]
+    if len(recent) < rules.CANARY_MIN_RUNS:
+        return []
+    if all(
+        float(_rate(row) or 0.0) < rules.produce_floor(int(row.get("animals") or 0))
+        for row in recent
+    ):
+        return recent
+    return []
+
+
 def baseline_rate(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
     """Time-weighted produce rate over the runs immediately before now."""
     rows = runs if runs is not None else _runs()
@@ -290,6 +305,7 @@ def arm(
     runs = _runs(run_history)
     evaluation.ensure_champion(store, previous, run=latest_run(runs))
     efficacy_baseline = evaluation.baseline_samples(runs)
+    baseline_stall_rows = _baseline_stall_rows(runs)
     record = {
         "schema_version": 1,
         "status": WATCHING,
@@ -311,6 +327,8 @@ def arm(
         "baseline_rate": baseline_rate(runs),
         "baseline_per_animal": baseline_per_animal(runs),
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
+        "baseline_stalled": bool(baseline_stall_rows),
+        "baseline_stall_runs": [int(row.get("run") or 0) for row in baseline_stall_rows],
         "efficacy_metric": efficacy_baseline["metric"],
         "efficacy_baseline_samples": efficacy_baseline["samples"],
         "efficacy_baseline_runs": rules.EFFICACY_BASELINE_RUNS,
@@ -412,6 +430,35 @@ def evaluate(
     if len(after) < rules.CANARY_MIN_RUNS:
         verdict["reason"] = "%d/%d runs observed" % (len(after), rules.CANARY_MIN_RUNS)
         return verdict
+
+    # A candidate cannot cause a condition observed before it existed. Reliability
+    # and compatibility releases armed during a proven score stall keep running after
+    # a minimum clean post-arm window, but they do not become the champion: there was
+    # no healthy baseline against which efficacy could be measured. Strategy remains
+    # fail-closed because an unmeasurable gain is not evidence of improvement.
+    if record.get("baseline_stalled"):
+        verdict["baseline_stalled"] = True
+        verdict["baseline_stall_runs"] = list(record.get("baseline_stall_runs") or [])
+        if len(usable) < rules.CANARY_MIN_RUNS:
+            verdict["reason"] = "pre-existing score stall; %d/%d clean attribution runs" % (
+                len(usable), rules.CANARY_MIN_RUNS,
+            )
+            return verdict
+        if record.get("change_class") == "strategy":
+            verdict["status"] = REGRESSED
+            verdict["reason"] = (
+                "strategy candidate cannot prove improvement because score production "
+                "was already stalled before release"
+            )
+        else:
+            verdict["status"] = INCONCLUSIVE
+            verdict["reason"] = (
+                "pre-existing score stall continued through %d clean candidate runs; "
+                "keeping the reliability release without champion promotion"
+                % len(usable)
+            )
+        return verdict
+
     if len(after) >= rules.EFFICACY_MIN_RUNS * 2 and len(usable) < rules.EFFICACY_MIN_RUNS:
         verdict["status"] = REGRESSED
         verdict["reason"] = "insufficient clean efficacy evidence after %d observed runs" % len(after)
@@ -568,10 +615,10 @@ def resolve(
     store: str = STORE,
     history: str = HISTORY,
 ) -> Dict[str, Any]:
-    """Act on a verdict: clear a healthy canary, revert a regressed one."""
+    """Act on a verdict: accept, revert, or clear un-attributable probation."""
     project = project or PROJECT
     status = verdict.get("status")
-    if status not in (HEALTHY, REGRESSED):
+    if status not in (HEALTHY, REGRESSED, INCONCLUSIVE):
         return {"acted": False, "status": status, "reason": verdict.get("reason", "")}
 
     record = _read_json(store)

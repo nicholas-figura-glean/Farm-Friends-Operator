@@ -341,9 +341,15 @@ def record_resolution(
         accepted = verdict.get("status") == "healthy" and (
             not efficacy or bool(efficacy.get("accepted"))
         )
+        resolution_status = str(verdict.get("status") or "")
+        event_name = (
+            "candidate.accepted" if accepted
+            else "candidate.inconclusive" if resolution_status == "inconclusive"
+            else "candidate.rejected"
+        )
         event = {
             "schema_version": SCHEMA_VERSION,
-            "event": "candidate.accepted" if accepted else "candidate.rejected",
+            "event": event_name,
             "ts": _utcnow(),
             "revision": record.get("revision"),
             "previous": record.get("previous"),
