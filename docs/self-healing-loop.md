@@ -67,8 +67,9 @@ The same classifier now drives both contract and research routing:
 - active validated policy -> old probe-only order is retired.
 
 Prestige efficacy is judged on the server's actual lexicographic objective. A
-verified league/capacity increase with lifetime produce preserved dominates the
-intentional herd reset; canary still requires post-reset production to resume.
+verified league increase with lifetime produce preserved and capacity nondecreasing
+dominates the intentional herd reset; canary still requires post-reset production
+to resume. Tier changes may retain the current major-league cap.
 
 ## contract_watch — what the server looks like
 
@@ -166,7 +167,7 @@ separate gates:
 2. **Efficacy.** After ten clean runs, reliability repairs must remain inside a
    5% operational equivalence band; ordinary strategy candidates must clear their
    pre-declared gain with a 90% lower confidence bound. A prestige is different:
-   verified level/capacity growth with lifetime produce preserved is direct primary-
+   verified level growth with lifetime produce preserved and capacity nondecreasing is direct primary-
    objective evidence, but it is accepted only after post-reset production resumes.
 
 Accepted releases advance a durable champion ledger. Each candidate projects its

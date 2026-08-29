@@ -232,14 +232,14 @@ def _verified_progression(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]
                 checks.get(name) for name in (
                     "league_level_increases",
                     "lifetime_produce_preserved",
-                    "capacity_increases",
+                    "capacity_does_not_decrease",
                 )
             ):
                 continue
             try:
                 if int(after.get("league_level")) <= int(before.get("league_level")):
                     continue
-                if int(after.get("capacity")) <= int(before.get("capacity")):
+                if int(after.get("capacity")) < int(before.get("capacity")):
                     continue
                 if int(after.get("lifetime_produce")) < int(before.get("lifetime_produce")):
                     continue
@@ -470,7 +470,7 @@ def evaluate(
         return verdict
 
     # League is the primary leaderboard key. A prestige that independently proves
-    # level and capacity increased while lifetime produce was preserved is direct
+    # level increased, capacity did not fall, and lifetime produce was preserved is direct
     # objective evidence; comparing its intentionally reset herd with the old herd's
     # raw production distribution would optimize the secondary metric and undo the
     # winning move. Still require production to resume and ordinary breakage checks
@@ -514,7 +514,7 @@ def evaluate(
             "reason": "verified lexicographic leaderboard progression",
         }
         verdict["reason"] = (
-            "verified league progression level %s -> %s, capacity %s -> %s, "
+            "verified league progression level %s -> %s, capacity %s -> %s (nondecreasing), "
             "lifetime produce preserved, and post-reset production resumed"
             % (
                 before.get("league_level"),

@@ -232,12 +232,12 @@ def main() -> int:
     section("post-action verification")
     after_prestige = farm(
         league="Gold I", league_tier="I", league_level=8,
-        lifetime_produce=2_000_000, capacity=11_250,
+        lifetime_produce=2_000_000, capacity=10_000,
         animal_total=1, animal_counts={"chicken": 1}, prestige_available=False,
     )
     verified = mechanics.verify_action(prestige, prestige_farm, after_prestige)
     suite.check(verified["ok"] and all(verified["checks"].values()),
-                "prestige requires level/cap growth and lifetime preservation", verified)
+                "prestige requires level growth, lifetime preservation, and nondecreasing capacity", verified)
     bad = mechanics.verify_action(
         prestige,
         prestige_farm,
@@ -480,7 +480,7 @@ def main() -> int:
                 "checks": {
                     "league_level_increases": True,
                     "lifetime_produce_preserved": True,
-                    "capacity_increases": True,
+                    "capacity_does_not_decrease": True,
                 },
                 "before": {"league_level": 7, "capacity": 10_000, "lifetime_produce": 2_000_000},
                 "after": {"league_level": 8, "capacity": 11_250, "lifetime_produce": 2_000_000},

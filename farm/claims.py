@@ -144,13 +144,13 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
     claims: List[Dict[str, Any]] = [
         _claim(
             "objective.league_first",
-            "The leaderboard is ordered lexicographically by league level first and lifetime produce second; an available prestige is the mandatory progression action because it preserves lifetime produce and raises animal capacity.",
+            "The leaderboard is ordered lexicographically by league level first and lifetime produce second; an available prestige is the mandatory progression action because it preserves lifetime produce, never lowers capacity, and may raise capacity at major league boundaries.",
             "objective",
             "accepted",
             {"server_regime": "league leaderboard", "ordering": ["league_level", "lifetime_produce"]},
             "league level, then lifetime produce",
             {"kind": "server_contract_plus_direct_state", "tool": "prestige"},
-            {"primary": "league_level", "secondary": "lifetime_produce", "prestige_preserves_lifetime": True, "prestige_raises_capacity": True},
+            {"primary": "league_level", "secondary": "lifetime_produce", "prestige_preserves_lifetime": True, "prestige_capacity_non_decreasing": True},
             [
                 "state/contract.json#tools.prestige.description_sha=16241be9cffd",
                 "state/raw/latest/leaderboard.txt#by-league-then-lifetime-produce",
@@ -161,7 +161,7 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             current_run,
             100,
             current_run,
-            "A captured leaderboard ranks a lower league above a higher league, or a verified prestige reduces lifetime produce or fails to raise capacity.",
+            "A captured leaderboard ranks a lower league above a higher league, or a verified prestige reduces lifetime produce or lowers capacity.",
             ["policy.objective", "cycle.mechanics", "canary.progression", "evidence.progression"],
             {"objective_order": ["league_level", "lifetime_produce"], "prestige_when_available": True},
         ),

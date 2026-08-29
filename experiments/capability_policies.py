@@ -28,9 +28,9 @@ CAPABILITY_POLICIES = [
         "verify": [
             "league_level_increases",
             "lifetime_produce_preserved",
-            "capacity_increases",
+            "capacity_does_not_decrease",
         ],
-        "reason": "The server says league is ranked before lifetime produce and prestige is the only way to advance it.",
+        "reason": "The server says league is ranked before lifetime produce and prestige is the only way to advance it; tier changes may retain the current major-league cap.",
     },
     {
         "id": "bounded_crisis_resolution",

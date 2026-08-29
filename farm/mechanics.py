@@ -45,7 +45,7 @@ DISALLOWED_TOOLS = {
 HARD_MAX_CALLS = {"progression": 8, "crisis": 1}
 HARD_MAX_COST = {"prestige": 0.0, "resolve_crisis": 0.45, "call_fbi": 0.80}
 PROGRESSION_VERIFY = {
-    "league_level_increases", "lifetime_produce_preserved", "capacity_increases",
+    "league_level_increases", "lifetime_produce_preserved", "capacity_does_not_decrease",
 }
 CRISIS_VERIFY = {"crisis_cleared", "cost_within_declared_fraction"}
 ANIMAL_CRISES = {"wolf_pack", "wolves", "rustlers"}
@@ -265,8 +265,8 @@ def classify_capability(name: str, description: str, required: Optional[Iterable
             "class": "direct_progression",
             "kind": "progression",
             "direct": True,
-            "primary_metric": "verified league level and animal capacity increase with lifetime produce preserved",
-            "falsifier": "The action fails to increase league level/capacity or reduces lifetime produce.",
+            "primary_metric": "verified league-level increase with lifetime produce preserved and capacity nondecreasing",
+            "falsifier": "The action fails to increase league level, reduces lifetime produce, or lowers capacity.",
         }
     if no_args and (
         tool in {"resolve_crisis", "call_fbi"}
@@ -444,10 +444,10 @@ def verify_action(decision: Dict[str, Any], before: parse.Farm, after: parse.Far
                 and isinstance(after.lifetime_produce, int)
                 and after.lifetime_produce >= before.lifetime_produce
             ),
-            "capacity_increases": (
+            "capacity_does_not_decrease": (
                 isinstance(before.capacity, int)
                 and isinstance(after.capacity, int)
-                and after.capacity > before.capacity
+                and after.capacity >= before.capacity
             ),
         }
     elif kind == "crisis":
