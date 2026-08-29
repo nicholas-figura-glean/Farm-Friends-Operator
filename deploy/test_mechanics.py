@@ -313,6 +313,8 @@ def main() -> int:
         "canary excludes the reset row and first lagging leaderboard interval",
         canary._progression_transition_runs(transition_rows),
     )
+    suite.check(canary._latest_progression_run(transition_rows) == 2,
+                "canary retains the progression epoch that explains later recovery")
 
     section("growth and expansion cannot re-enter the old deadlock")
     suite.check(expand.bounded_target(prestige_farm, 250_000) == 10_000,
@@ -548,6 +550,49 @@ def main() -> int:
         failed_row = dict(candidate[0], mechanic_failures=1)
         suite.check(canary._breakage(failed_row) == "adaptive_mechanic_verification_failure",
                     "failed mechanic verification is decisive canary breakage")
+
+        recovery_history = Path(tmp) / "recovery-history.ndjson"
+        recovery_store = Path(tmp) / "recovery-canary.json"
+        recovery_audit = Path(tmp) / "recovery-canary.ndjson"
+        before_recovery = baseline[:10] + [
+            {"run": 11, "animals": 1, "produce_per_min": 0.0, "interval_min": 5.0,
+             "collected": 0, "mechanic_actions": [action], "mechanic_failures": 0},
+            {"run": 12, "animals": 1, "produce_per_min": 2_000.0, "interval_min": 5.0,
+             "collected": 1, "mechanic_actions": [], "mechanic_failures": 0},
+        ]
+        recovery_history.write_text(
+            "".join(json.dumps(row) + "\n" for row in before_recovery), encoding="utf-8"
+        )
+        recovery_arm = canary.arm(
+            "rev-repair", "rev-old", change_class="reliability",
+            store=str(recovery_store), history=str(recovery_audit),
+            run_history=str(recovery_history),
+        )
+        recovery_candidate = [
+            {"run": 13, "animals": 400, "produce_per_min": 0.0, "interval_min": 5.0,
+             "collected": 0, "mechanic_actions": [], "mechanic_failures": 0},
+            {"run": 14, "animals": 800, "produce_per_min": 80.0, "interval_min": 5.0,
+             "collected": 10, "mechanic_actions": [], "mechanic_failures": 0},
+            {"run": 15, "animals": 1_200, "produce_per_min": 120.0, "interval_min": 5.0,
+             "collected": 10, "mechanic_actions": [], "mechanic_failures": 0},
+        ]
+        recovery_history.write_text(
+            "".join(json.dumps(row) + "\n" for row in before_recovery + recovery_candidate),
+            encoding="utf-8",
+        )
+        recovery_verdict = canary.evaluate(str(recovery_store), str(recovery_history))
+        suite.check(
+            recovery_arm.get("preexisting_progression_recovery") is True
+            and recovery_arm.get("baseline_transition_excluded_runs") == [11, 12],
+            "arming recognizes and removes a pre-existing prestige recovery cohort",
+            recovery_arm,
+        )
+        suite.check(
+            recovery_verdict["status"] == canary.INCONCLUSIVE
+            and "without champion promotion" in recovery_verdict.get("reason", ""),
+            "a clean reliability release during recovery stays live without fake efficacy",
+            recovery_verdict,
+        )
 
     print()
     if suite.failures:

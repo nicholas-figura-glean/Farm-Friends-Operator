@@ -362,6 +362,9 @@ CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert
 CANARY_BASELINE_RUNS = 6               # pre-flip safety window used for fast rollback
 # A release that prevents completed runs cannot wait forever for run-count evidence.
 CANARY_STALL_SECONDS = 30 * 60
+# A release armed immediately after prestige is observing an intentional herd
+# rebuild, not a comparable champion cohort. Keep the window explicit and bounded.
+CANARY_PROGRESSION_RECOVERY_RUNS = 6
 
 # Safety and efficacy are deliberately different decisions. Reliability repairs
 # need equivalence; strategy candidates must prove a pre-declared gain. The

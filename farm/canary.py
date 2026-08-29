@@ -266,6 +266,27 @@ def _progression_transition_runs(rows: List[Dict[str, Any]]) -> set[int]:
     return excluded
 
 
+def _latest_progression_run(rows: List[Dict[str, Any]]) -> Optional[int]:
+    latest: Optional[int] = None
+    for row in rows:
+        transition = int(row.get("prestige_count") or 0) > 0
+        for action in row.get("mechanic_actions") or []:
+            if not isinstance(action, dict) or action.get("kind") != "progression":
+                continue
+            verification = action.get("verification") or {}
+            before, after = verification.get("before") or {}, verification.get("after") or {}
+            try:
+                transition = transition or (
+                    int(after.get("league_level")) > int(before.get("league_level"))
+                    and int(after.get("lifetime_produce")) >= int(before.get("lifetime_produce"))
+                )
+            except (TypeError, ValueError):
+                pass
+        if transition and isinstance(row.get("run"), int):
+            latest = int(row["run"])
+    return latest
+
+
 def _verified_progression(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """A post-release prestige that proved the league-first objective directly."""
     for index, row in enumerate(rows):
@@ -392,6 +413,13 @@ def arm(
     runs = _runs(run_history)
     evaluation.ensure_champion(store, previous, run=latest_run(runs))
     transition_exclusions = _progression_transition_runs(runs)
+    latest_progression_run = _latest_progression_run(runs)
+    current_run = latest_run(runs)
+    progression_recovery = bool(
+        isinstance(latest_progression_run, int)
+        and isinstance(current_run, int)
+        and current_run - latest_progression_run <= rules.CANARY_PROGRESSION_RECOVERY_RUNS
+    )
     comparable_runs = [
         row for row in runs if int(row.get("run") or -1) not in transition_exclusions
     ]
@@ -421,6 +449,8 @@ def arm(
         "baseline_rate": baseline_rate(comparable_runs),
         "baseline_per_animal": baseline_per_animal(comparable_runs),
         "baseline_transition_excluded_runs": sorted(transition_exclusions),
+        "preexisting_progression_recovery": progression_recovery,
+        "preexisting_progression_run": latest_progression_run,
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
         "baseline_stalled": bool(baseline_stall_rows),
         "baseline_stall_runs": [int(row.get("run") or 0) for row in baseline_stall_rows],
@@ -583,6 +613,36 @@ def evaluate(
                 before.get("capacity"),
                 after_state.get("capacity"),
             )
+        )
+        return verdict
+
+    # A reliability correction armed during an intentional post-prestige rebuild
+    # cannot be compared with the retired herd. Once one clean post-arm interval
+    # proves production resumed, keep it live without promoting it as an efficacy
+    # champion. A bounded no-production window still fails closed.
+    if record.get("preexisting_progression_recovery") and record.get("change_class") != "strategy":
+        resumed = any((_rate(row) or 0.0) > 0 for row in usable)
+        verdict["preexisting_progression_recovery"] = True
+        verdict["preexisting_progression_run"] = record.get("preexisting_progression_run")
+        if resumed and len(after) >= rules.CANARY_MIN_RUNS:
+            verdict["status"] = INCONCLUSIVE
+            verdict["last_run"] = int(after[-1].get("run") or 0)
+            verdict["reason"] = (
+                "release armed during verified post-prestige recovery; production resumed "
+                "through %d clean run(s), keeping reliability changes without champion promotion"
+                % len(usable)
+            )
+            return verdict
+        if len(after) >= rules.CANARY_MAX_RUNS:
+            verdict["status"] = REGRESSED
+            verdict["reason"] = (
+                "post-prestige production did not resume in %d post-release runs"
+                % len(after)
+            )
+            return verdict
+        verdict["reason"] = (
+            "pre-existing post-prestige recovery; waiting for production (%d/%d runs)"
+            % (len(after), rules.CANARY_MAX_RUNS)
         )
         return verdict
 

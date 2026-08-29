@@ -174,7 +174,10 @@ Accepted releases advance a durable champion ledger. Each candidate projects its
 measured ratio through the prior releases; crossing a cumulative 5% regression
 budget reverts even when every individual loss was smaller. Prestige transitions
 exclude both the reset row and first lagging leaderboard interval from rate
-baselines—the retiring herd must never be divided by the replacement herd.
+baselines—the retiring herd must never be divided by the replacement herd. A
+reliability release armed during the next six recovery runs resolves inconclusive
+once production resumes, keeping the fix without pretending the rebuilding herd is
+an efficacy comparison.
 
 Safety properties: never revert to a pruned tree, never revert twice, never
 overlap candidates, and never let evaluator bookkeeping delay the runtime pointer
