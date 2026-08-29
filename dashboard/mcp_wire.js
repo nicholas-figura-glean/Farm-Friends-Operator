@@ -30,18 +30,15 @@
   // API, not a guess about a name: mutations are the calls whose failure or
   // duplication costs coins or animals, so they are worth marking in red-orange.
   var WRITES = {
-    collect_produce: 1, harvest: 1, plant: 1, feed_animals: 1, adopt_animal: 1,
-    buy_feed: 1, sell: 1, propose_trade: 1, respond_to_trade: 1,
-    prestige: 1, resolve_crisis: 1, call_fbi: 1, gift: 1, name_animal: 1
+    collect_produce: 1, harvest: 1, feed_animals: 1, adopt_animal: 1,
+    buy_feed: 1, sell: 1, propose_trade: 1, respond_to_trade: 1
   };
 
   var ICONS = {
     collect_produce: "\uD83E\uDD5A", harvest: "\uD83C\uDF3E", feed_animals: "\uD83C\uDF7D",
     adopt_animal: "\uD83D\uDC23", buy_feed: "\uD83D\uDED2", sell: "\uD83D\uDCB0",
     propose_trade: "\uD83E\uDD1D", respond_to_trade: "\uD83D\uDCEC",
-    plant: "\uD83C\uDF31", prestige: "\uD83D\uDCA0", resolve_crisis: "\uD83D\uDEA8",
-    call_fbi: "\uD83D\uDEF8", gift: "\uD83C\uDF81", name_animal: "\uD83C\uDFF7\uFE0F",
-    list_farm: "\uD83D\uDCDC", visit_farm: "\uD83D\uDC4B", leaderboard: "\uD83C\uDFC6", farm_events: "\uD83D\uDCF0",
+    list_farm: "\uD83D\uDCDC", leaderboard: "\uD83C\uDFC6", farm_events: "\uD83D\uDCF0",
     "tools/list": "\uD83D\uDD0C"
   };
 

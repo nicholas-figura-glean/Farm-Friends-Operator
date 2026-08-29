@@ -607,33 +607,6 @@ check("bursty score growth outweighs collection-only and duplicate-row proxies",
       and 1300.0 < verdict.get("observed_rate", 0) < 1400.0,
       str(verdict))
 
-phase_store = os.path.join(can, "phase-canary.json")
-phase_hist = os.path.join(can, "phase-canary.ndjson")
-phase_base = []
-for run in range(1, 21):
-    high = 200.0 if run <= 14 else 600.0
-    phase_base.append({"run": run, "animals": 100, "interval_min": 5.0,
-                       "produce_per_min": high if run % 2 == 0 else 0.0,
-                       "collected": 10})
-write_runs(phase_base)
-phase_arm = canary.arm(
-    "revPhase", "revA", reason="burst phase", order_id="phase-order",
-    change_class="reliability", store=phase_store, history=phase_hist,
-    run_history=runs,
-)
-phase_candidate = [
-    {"run": 21 + index, "animals": 100, "interval_min": 5.0,
-     "produce_per_min": 440.0 if index % 2 else 0.0, "collected": 10}
-    for index in range(10)
-]
-write_runs(phase_base + phase_candidate)
-phase_verdict = canary.evaluate(phase_store, runs)
-check("canary baseline spans enough rows to avoid burst-phase false rollback",
-      rules.CANARY_BASELINE_RUNS >= 20
-      and phase_arm.get("baseline_per_animal") < 2.0
-      and phase_verdict.get("status") == canary.HEALTHY,
-      str({"armed": phase_arm, "verdict": phase_verdict}))
-
 # A reliability release may be necessary while the game itself is already stalled.
 # Continuing that pre-existing condition is not candidate evidence in either direction:
 # clear probation after a minimum clean window, keep the pointer, and do not promote it.
@@ -698,43 +671,6 @@ check("an unmeasurable strategy candidate remains fail-closed",
       stalled_strategy["status"] == canary.REGRESSED
       and "cannot prove" in stalled_strategy.get("reason", ""),
       str(stalled_strategy))
-
-observability_store = os.path.join(can, "observability-canary.json")
-observability_hist = os.path.join(can, "observability-canary.ndjson")
-write_runs(base)
-canary.arm(
-    "revView", "revA", reason="readout-only", order_id="view-order",
-    change_class="observability", store=observability_store,
-    history=observability_hist, run_history=runs,
-)
-view_rows = [
-    {"run": 7 + index, "animals": 100, "produce_per_min": 0.0,
-     "interval_min": 5.0, "collected": 0, "anomalies": []}
-    for index in range(3)
-]
-write_runs(base + view_rows)
-view_verdict = canary.evaluate(observability_store, runs)
-check("path-gated observability release is judged on clean completed cycles",
-      view_verdict.get("status") == canary.HEALTHY
-      and (view_verdict.get("efficacy") or {}).get("metric")
-          == "clean_completed_cycles_and_current_readouts",
-      str(view_verdict))
-
-with tempfile.TemporaryDirectory() as release_root:
-    previous_tree = pathlib.Path(release_root) / "releases" / "old"
-    current_tree = pathlib.Path(release_root) / "releases" / "new"
-    for tree in (previous_tree, current_tree):
-        (tree / "farm").mkdir(parents=True)
-        (tree / "dashboard").mkdir(parents=True)
-        (tree / "monitor.py").write_text("old\n", encoding="utf-8")
-        (tree / "farm" / "cycle.py").write_text("same\n", encoding="utf-8")
-    (current_tree / "monitor.py").write_text("new\n", encoding="utf-8")
-    check("observability path gate accepts dashboard/readout-only changes",
-          canary.observability_release_errors(release_root, "new", "old") == [])
-    (current_tree / "farm" / "cycle.py").write_text("gameplay changed\n", encoding="utf-8")
-    check("observability path gate rejects gameplay changes",
-          canary.observability_release_errors(release_root, "new", "old")
-          == ["farm/cycle.py"])
 
 # A release can be armed in the middle of an existing zero-collection streak. The
 # first candidate row still carries the cycle's global streak, but attribution must

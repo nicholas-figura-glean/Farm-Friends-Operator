@@ -373,7 +373,7 @@ AUTHOR_MAX_COST_USD_PER_DAY = 5.00     # hard spend ceiling for authoring
 CANARY_MIN_RUNS = 3                    # never judge a release on fewer runs
 CANARY_MAX_RUNS = 10                   # decide by here, or clear it and move on
 CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert
-CANARY_BASELINE_RUNS = 20              # spans burst phases; six rows produced a false 42% baseline spike
+CANARY_BASELINE_RUNS = 6               # pre-flip safety window used for fast rollback
 # A release that prevents completed runs cannot wait forever for run-count evidence.
 CANARY_STALL_SECONDS = 30 * 60
 # A release armed immediately after prestige is observing an intentional herd

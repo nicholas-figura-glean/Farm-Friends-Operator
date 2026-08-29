@@ -101,10 +101,8 @@ ok(model.hall.slowest.id === "c1" && model.hall.fastest.id === "c2",
    "superlatives pick real calls, and never an unfinished one");
 ok(model.hall.chattiest.name === "collect" || model.hall.chattiest.name === "feed",
    "chattiest step is measured", model.hall.chattiest && model.hall.chattiest.name);
-ok(W.kind("adopt_animal") === "write" && W.kind("prestige") === "write" &&
-   W.kind("resolve_crisis") === "write" && W.kind("plant") === "write" &&
-   W.kind("visit_farm") === "read" && W.kind("list_farm") === "read",
-   "current mutating and read-only tools are classified");
+ok(W.kind("adopt_animal") === "write" && W.kind("list_farm") === "read",
+   "mutating and read-only tools are classified");
 ok(model.steps[0].count === 2 && model.steps[2].count === 0,
    "calls are attributed to the step that issued them");
 
