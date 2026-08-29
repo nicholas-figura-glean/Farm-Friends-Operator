@@ -44,7 +44,7 @@ STEPS: List[Dict[str, str]] = [
     {"name": "trades", "label": "Incoming trades", "detail": "adversarial value, reserve, and novelty gates"},
     {"name": "sell", "label": "Sell produce", "detail": "never sells feed"},
     {"name": "plan", "label": "Plan expansion", "detail": "joint feed + adoption solve"},
-    {"name": "adopt", "label": "Adopt chickens", "detail": "versioned growth policy and safety bounds"},
+    {"name": "adopt", "label": "Adopt selected animals", "detail": "chicken growth below cap; evidence-linked replacement kind near cap"},
     {"name": "buy_feed", "label": "Top up feed", "detail": "restore the reserve"},
     {"name": "offers", "label": "Maintain offers", "detail": "outgoing trade offers"},
     {"name": "verify", "label": "Verify", "detail": "full re-read on cadence"},

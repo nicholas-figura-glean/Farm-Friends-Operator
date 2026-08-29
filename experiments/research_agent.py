@@ -551,6 +551,47 @@ def file_supported_implementations(queue: str) -> List[Dict[str, Any]]:
     return filed
 
 
+def settle_superseded_questions() -> List[str]:
+    """Remove resolved historical questions from the current Findings queue."""
+    registry = claims.load() or claims.build()
+    claim_by_id = claims.claim_map(registry)
+    contract_state = read_json(STATE / "contract_watch.json")
+    contract_rows = contract.history(limit=1, path=str(STATE / "contract.ndjson"))
+    latest_contract = contract_rows[-1] if contract_rows else {}
+    latest_run = canary.latest_run()
+    settled: List[str] = []
+    for question in questions.open_questions():
+        identity = str(question.get("id") or "")
+        qclass = str(question.get("class") or "")
+        last_seen = question.get("last_seen_run")
+        age = latest_run - int(last_seen) if isinstance(last_seen, int) else None
+        answer = None
+        refs: List[str] = []
+        if qclass == "hunger_wall" and (
+            claim_by_id.get("safety.bulk_husbandry") or {}
+        ).get("status") == "accepted":
+            answer = "Superseded by measured constant-time whole-herd feeding and direct hunger/runway guards."
+            refs = ["claims.json#safety.bulk_husbandry", "farm/cycle.py#feed_if_needed"]
+        elif qclass == "tools_changed" and age is not None and age > 30:
+            actionable = latest_contract.get("actionable")
+            if actionable == 0 and not latest_contract.get("error") and not contract_state.get("last_error"):
+                answer = "Superseded by repeated clean contract scans and the current captured capability policy."
+                refs = ["state/contract_watch.json#latest-clean-scan", "state/contract.json"]
+        if not answer:
+            continue
+        questions.set_status(
+            identity,
+            "answered",
+            answer=answer,
+            evidence_refs=refs,
+            run=latest_run,
+            probe_id="research-reconciliation",
+            result_status="supported",
+        )
+        settled.append(identity)
+    return settled
+
+
 def settle_active_capability_questions() -> List[str]:
     """Close only novelty questions whose named mechanic is now executable."""
     active = mechanics.active_tools()
@@ -622,6 +663,7 @@ def main() -> int:
     proposed = set(stored.get("proposed") or [])
     queue = str(PROJECT / workorders.QUEUE)
     reconciled_capabilities = reconcile_active_capability_orders(queue)
+    settled_superseded_questions = settle_superseded_questions()
     settled_capability_questions = settle_active_capability_questions()
     implementation_orders = file_supported_implementations(queue)
 
@@ -795,6 +837,9 @@ def main() -> int:
         print("  active capability policies retired: %s" % ", ".join(
             str(row.get("id")) for row in reconciled_capabilities
         ))
+    if settled_superseded_questions:
+        print("  superseded questions settled: %s"
+              % ", ".join(settled_superseded_questions))
     if settled_capability_questions:
         print("  implemented capability questions settled: %s"
               % ", ".join(settled_capability_questions))

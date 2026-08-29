@@ -55,6 +55,22 @@ DASHBOARD_URL = os.environ.get("FARM_DASHBOARD_URL", "http://127.0.0.1:8765").rs
 # `critical` marks readouts whose silence would hide something dangerous. A stale
 # Findings tab is embarrassing; a stale canary readout means a bad release could be
 # live with nobody able to see it.
+TAB_SOURCES: Dict[str, List[str]] = {
+    "overview": ["monitor.snapshot", "autonomy.report"],
+    "pipeline": ["monitor.snapshot"],
+    "healing": ["monitor.snapshot", "autonomy.report"],
+    "history": ["monitor.snapshot", "evidence.report"],
+    "findings": ["evidence.report"],
+    "game": ["monitor.snapshot"],
+    "wire": ["monitor.snapshot", "topology.cached_graph"],
+    "architecture": ["architecture.report", "autonomy.report"],
+}
+REQUIRED_GENERATIONS = {
+    "state", "release", "autonomy", "evidence", "strategy", "architecture",
+    "overview", "pipeline", "healing", "history", "findings", "game", "wire",
+    "architecture_tab",
+}
+
 CHECKS: List[Dict[str, Any]] = [
     {"tab": "overview / pipeline / cost", "source": "monitor.snapshot",
      "max_age": 900, "critical": True},
@@ -186,12 +202,20 @@ def _probe_once(source: str) -> Dict[str, Any]:
             import monitor
 
             payload = monitor.snapshot()
+            generations = payload.get("generations") or {}
+            missing = sorted(REQUIRED_GENERATIONS - set(generations))
             age = payload.get("latest", {}).get("age_seconds")
             if age is None:
                 # Fall back to the run timestamp when the snapshot does not carry an age.
                 age = None
-            return {"ok": True, "bytes": len(json.dumps(payload)), "age": age,
-                    "ms": int((time.time() - started) * 1000)}
+            return {
+                "ok": not missing,
+                "bytes": len(json.dumps(payload)),
+                "age": age,
+                "ms": int((time.time() - started) * 1000),
+                "detail": "all GUI generations present" if not missing else None,
+                "error": "missing GUI generations: %s" % ", ".join(missing) if missing else None,
+            }
         if source == "evidence.report":
             from farm import evidence
 
@@ -241,23 +265,32 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
     started = time.time()
     try:
         payloads: Dict[str, Any] = {}
-        for path in ("/", "/api/state", "/api/autonomy", "/api/architecture"):
+        for path in (
+            "/", "/api/state", "/api/autonomy", "/api/evidence",
+            "/api/topology", "/api/architecture",
+        ):
             with urlopen(base_url + path, timeout=20) as response:
                 body = response.read()
                 if response.status != 200:
                     raise RuntimeError("%s returned HTTP %s" % (path, response.status))
                 payloads[path] = body
         html = payloads["/"].decode("utf-8", errors="replace")
-        missing = [marker for marker in (
-            'data-tab="architecture"',
-            'id="tab-architecture"',
+        tab_names = ("overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture")
+        markers = [marker for name in tab_names for marker in (
+            'data-tab="%s"' % name, 'id="tab-%s"' % name,
+        )]
+        markers += [
             'data-arch-loading',  # static non-blank fallback before JavaScript paints
             'async function loadArchitecture',
             'window.loadArchitecture',  # activation checks the global, not block scope
+            'function refreshBackingModels',
             '/api/architecture',
-        ) if marker not in html]
+        ]
+        missing = [marker for marker in markers if marker not in html]
         state = json.loads(payloads["/api/state"].decode("utf-8"))
         autonomy_payload = json.loads(payloads["/api/autonomy"].decode("utf-8"))
+        evidence_payload = json.loads(payloads["/api/evidence"].decode("utf-8"))
+        topology_payload = json.loads(payloads["/api/topology"].decode("utf-8"))
         architecture_payload = json.loads(payloads["/api/architecture"].decode("utf-8"))
         release = state.get("release") or {}
         errors: List[str] = []
@@ -269,8 +302,26 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
             errors.append("server runs %s while pointer is %s"
                           % (release.get("serving_revision"),
                              release.get("pointer_revision")))
+        generations = state.get("generations") or {}
+        missing_generations = sorted(REQUIRED_GENERATIONS - set(generations))
+        if missing_generations:
+            errors.append("state missing GUI generations %s" % ", ".join(missing_generations))
+        strategy_fingerprint = str((state.get("strategy") or {}).get("fingerprint") or "")
+        if (state.get("strategy") or {}).get("errors"):
+            errors.append("state strategy policy is invalid")
+        if strategy_fingerprint and generations.get("strategy") != strategy_fingerprint:
+            errors.append("strategy generation does not match rendered strategy")
+        claim_version = str(((evidence_payload.get("claims") or {}).get("registry_version") or 0))
+        if generations.get("evidence") and not str(generations.get("evidence")).startswith(claim_version + ":"):
+            errors.append("evidence generation does not match claims registry")
+        if generations.get("release") != str(release.get("pointer_revision") or release.get("revision") or ""):
+            errors.append("release generation does not match pointer")
         if not autonomy_payload.get("agents"):
             errors.append("autonomy payload has no agents section")
+        if not (evidence_payload.get("claims") or {}).get("claims"):
+            errors.append("evidence payload has no claims")
+        if not topology_payload.get("nodes"):
+            errors.append("topology payload has no nodes")
         current = architecture_payload.get("current") or {}
         if not current.get("nodes"):
             errors.append("architecture payload has no components")
@@ -278,7 +329,7 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
             "ok": not errors,
             "bytes": sum(len(v) for v in payloads.values()),
             "ms": int((time.time() - started) * 1000),
-            "detail": "8 tabs; serving %s" % release.get("serving_revision"),
+            "detail": "8 tabs, 6 endpoints, all generations; serving %s" % release.get("serving_revision"),
             "error": "; ".join(errors) if errors else None,
             "release": release,
         }
@@ -383,6 +434,30 @@ def main() -> int:
                        % (ms, int(baseline),
                           " (scheduled pass)" if throttled else ""),
                 "source": check["source"],
+            })
+
+    # Project producer health onto each visible GUI tab. A shared producer can
+    # support several tabs, but every tab gets its own explicit ledger row so adding
+    # a tab without a freshness owner fails visibly.
+    by_source = {str(row.get("source")): row for row in results}
+    for tab, sources in TAB_SOURCES.items():
+        failed = [source for source in sources if not (by_source.get(source) or {}).get("ok")]
+        tab_row = {
+            "tab": "GUI %s" % tab,
+            "source": "tab.%s" % tab,
+            "critical": tab in {"overview", "pipeline", "healing"},
+            "ok": not failed,
+            "ms": 0,
+            "detail": "fresh via %s" % ", ".join(sources) if not failed else None,
+            "error": "failed backing sources: %s" % ", ".join(failed) if failed else None,
+        }
+        results.append(tab_row)
+        if failed:
+            problems.append({
+                "severity": "breaking" if tab_row["critical"] else "degraded",
+                "what": "GUI tab '%s' has no fresh backing model" % tab,
+                "why": tab_row["error"],
+                "source": tab_row["source"],
             })
 
     # Only a launchd pass requires the live server. Release gates and hand-run tests
