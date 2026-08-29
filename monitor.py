@@ -624,10 +624,14 @@ def _dashboard_generations(
         release.get("pointer_revision") or release.get("revision") or "unpublished"
     )
     state_token = "%s:%s" % (latest.get("run") or 0, latest.get("ts") or "")
-    evidence_token = "%s:%s:%s" % (
+    evidence_token = "%s:%s:%s:%s" % (
         claims_state.get("registry_version") or 0,
         claims_state.get("semantic_fingerprint") or "",
         policy_state.get("policy_id") or "",
+        _mtime_generation([
+            HISTORY, STATE / "questions.ndjson", STATE / "provenance.ndjson",
+            STATE / "experiments.ndjson", STATE / "research_findings.ndjson",
+        ]),
     )
     autonomy_token = _mtime_generation([
         STATE / "canary.json", STATE / "workorders.ndjson", STATE / "author.json",

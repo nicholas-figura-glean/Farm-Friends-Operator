@@ -311,7 +311,8 @@ def _served_dashboard(base_url: str = DASHBOARD_URL) -> Dict[str, Any]:
             errors.append("state strategy policy is invalid")
         if strategy_fingerprint and generations.get("strategy") != strategy_fingerprint:
             errors.append("strategy generation does not match rendered strategy")
-        claim_version = str(((evidence_payload.get("claims") or {}).get("registry_version") or 0))
+        persisted_claims = evidence_payload.get("persisted_claims") or evidence_payload.get("claims") or {}
+        claim_version = str(persisted_claims.get("registry_version") or 0)
         if generations.get("evidence") and not str(generations.get("evidence")).startswith(claim_version + ":"):
             errors.append("evidence generation does not match claims registry")
         if generations.get("release") != str(release.get("pointer_revision") or release.get("revision") or ""):
