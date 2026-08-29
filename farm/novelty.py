@@ -60,6 +60,7 @@ def event_signature(text: str) -> str:
         (r"\b(?:laid|produced|made honey|filled a comb|found a truffle|gave milk|grew wool)\b", "production"),
         (r"\bsays?\b", "animal_chatter"),
         (r"\btrade\b|\boffers?\b", "trade_event"),
+        (r"\bprestige\b.*\brose from\b.*\banimals retired\b|\brose from\b.*\bcoins reset\b", "progression_completed"),
         (r"\bprestige (?:is )?available\b|\bcall prestige\b", "progression_available"),
         (r"\b(?:rustlers|crop blight|locust swarm|barn fire|wolf pack|alien invasion)\b.*\bin progress\b", "active_crisis"),
     )

@@ -12,10 +12,14 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import json
 import os
+import queue
 import signal
 import sys
+import threading
 import time
+from pathlib import Path
 from typing import Any, Dict
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +29,10 @@ from farm import growth, ledger, mcp, mechanics, parse, policy, rules  # noqa: E
 from farm.mcp import Client, McpError, ToolError  # noqa: E402
 
 LOCK = os.path.join(PROJECT, "state", ".expand.lock")
+BULK_STATE = os.path.join(PROJECT, "state", "bulk_adopt.json")
 MAX_BULK_ADOPT = 200_000
+BULK_REPROBE_SECONDS = 60 * 60
+BULK_IMPLEMENTATION_ERROR = "cap is not a function"
 
 
 def _lock():
@@ -60,6 +67,112 @@ def _arm_watchdog(seconds: int) -> None:
 def affordable(coins: int, herd: int, feed_on_hand: int = 0) -> int:
     """How many animals we can adopt and still preserve feed/cash reserves."""
     return rules.affordable_adoptions(coins, herd, feed_on_hand)
+
+
+def _read_json(path: str) -> Dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_json(path: str, value: Dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path("%s.tmp.%d" % (target, os.getpid()))
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(target))
+
+
+def _adopt_contract_sha() -> str:
+    snapshot = _read_json(os.path.join(PROJECT, "state", "contract_live.json"))
+    if not snapshot:
+        snapshot = _read_json(os.path.join(PROJECT, "state", "contract.json"))
+    return str((((snapshot.get("tools") or {}).get("adopt_animal") or {}).get("description_sha") or ""))
+
+
+def bulk_due(now: float = None, state_path: str = None) -> bool:
+    """Whether the advertised qty path should be attempted or re-probed."""
+    stored = _read_json(state_path or BULK_STATE)
+    if not stored.get("disabled"):
+        return True
+    if stored.get("description_sha") != _adopt_contract_sha():
+        return True
+    failed_at = float(stored.get("failed_at_epoch") or 0.0)
+    return (time.time() if now is None else now) - failed_at >= BULK_REPROBE_SECONDS
+
+
+def _mark_bulk_broken(error: str) -> None:
+    _write_json(BULK_STATE, {
+        "schema_version": 1,
+        "disabled": True,
+        "failed_at_epoch": time.time(),
+        "description_sha": _adopt_contract_sha(),
+        "error": str(error)[:240],
+        "reprobe_after_seconds": BULK_REPROBE_SECONDS,
+    })
+
+
+def _mark_bulk_healthy() -> None:
+    _write_json(BULK_STATE, {
+        "schema_version": 1,
+        "disabled": False,
+        "validated_at_epoch": time.time(),
+        "description_sha": _adopt_contract_sha(),
+    })
+
+
+def _individual_fallback(
+    client: Client,
+    kind: str,
+    count: int,
+    deadline: float,
+    workers: int,
+) -> Dict[str, Any]:
+    """Bounded legacy path used only after definitive bulk implementation failure."""
+    work: queue.Queue = queue.Queue()
+    for _ in range(max(0, int(count))):
+        work.put(1)
+    result: Dict[str, Any] = {"ok": 0, "failed": 0, "last_error": None}
+    lock = threading.Lock()
+    stop = threading.Event()
+    clients = [client] + [Client(client.endpoint) for _ in range(max(0, int(workers) - 1))]
+
+    def worker(current: Client) -> None:
+        while not stop.is_set() and time.time() < deadline:
+            try:
+                work.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                timeout = max(1, min(30, int(deadline - time.time())))
+                current.call(
+                    "adopt_animal",
+                    kind=kind,
+                    _transport_retries=1,
+                    _transport_timeout=timeout,
+                )
+                with lock:
+                    result["ok"] += 1
+            except (ToolError, McpError) as exc:
+                message = str(exc)[:240]
+                with lock:
+                    result["failed"] += 1
+                    result["last_error"] = message
+                    failures = result["failed"]
+                if "coin" in message.lower() or "barn is full" in message.lower() or failures > 25:
+                    stop.set()
+                    return
+
+    threads = [threading.Thread(target=worker, args=(current,), daemon=True) for current in clients]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        remaining = max(0.0, deadline - time.time())
+        thread.join(timeout=remaining)
+    stop.set()
+    return result
 
 
 def bounded_target(farm: parse.Farm, requested: int) -> int:
@@ -112,7 +225,7 @@ def main() -> int:
             "max_seconds": args.max_seconds,
             "rate": args.rate,
             "workers_requested": args.workers,
-            "execution": "single_bulk_qty",
+            "execution": "bulk_qty_with_circuit_breaker",
             "dry": args.dry_run,
             "policy_compatible": runtime_policy.get("compatible"),
             "policy_errors": runtime_policy.get("errors"),
@@ -172,9 +285,11 @@ def main() -> int:
         farm.coins,
         farm.feed,
     ))
+    try_bulk = bulk_due()
+    execution = "bulk_qty" if try_bulk else "bounded_individual_fallback"
     print(
-        "target=%d (requested %d, room %d) affordable=%d -> one bulk adopt qty=%d %s"
-        % (target, args.target, room, can_afford, want, primary_kind)
+        "target=%d (requested %d, room %d) affordable=%d -> %s qty=%d %s"
+        % (target, args.target, room, can_afford, execution, want, primary_kind)
     )
     print("policy=%s compatible=%s" % (
         runtime_policy.get("policy_id"), runtime_policy.get("compatible")
@@ -184,7 +299,7 @@ def main() -> int:
         "expand_adoption_batch",
         "planned",
         {
-            "execution": "single_bulk_qty",
+            "execution": execution,
             "herd_before": farm.animal_count,
             "capacity": farm.capacity,
             "coins_before": farm.coins,
@@ -207,27 +322,47 @@ def main() -> int:
         return _record_skip(reason, farm, args.target)
 
     started = time.time()
+    deadline = started + max(1.0, float(args.max_seconds))
     call_error = None
     response = ""
-    try:
-        # A bulk mutation is not transport-retried: the first request may have
-        # committed before a gateway failure. The authoritative post-read below
-        # reconciles actual state without ever double-adopting.
-        response = client.call(
-            "adopt_animal",
-            kind=primary_kind,
-            qty=want,
-            _transport_retries=1,
+    fallback: Dict[str, Any] = {"ok": 0, "failed": 0, "last_error": None}
+    if try_bulk:
+        try:
+            # A bulk mutation is not transport-retried: the first request may have
+            # committed before a gateway failure. Only a definitive ToolError that
+            # proves the server's advertised qty implementation is broken may enter
+            # the individual fallback; transport ambiguity never does.
+            response = client.call(
+                "adopt_animal",
+                kind=primary_kind,
+                qty=want,
+                _transport_retries=1,
+            )
+            _mark_bulk_healthy()
+        except ToolError as exc:
+            call_error = str(exc)[:240]
+            if BULK_IMPLEMENTATION_ERROR in call_error.lower():
+                _mark_bulk_broken(call_error)
+                execution = "bounded_individual_fallback_after_bulk_error"
+                fallback = _individual_fallback(
+                    client, primary_kind, want, deadline, max(1, args.workers)
+                )
+        except McpError as exc:
+            call_error = str(exc)[:240]
+    else:
+        fallback = _individual_fallback(
+            client, primary_kind, want, deadline, max(1, args.workers)
         )
-    except (ToolError, McpError) as exc:
-        call_error = str(exc)[:240]
 
     final = parse.parse_farm(client.call("list_farm"))
     observed_delta = final.animal_count - farm.animal_count
     adopted = max(0, observed_delta)
-    status = "ok" if call_error is None and adopted > 0 else (
-        "reconciled" if adopted > 0 else "failed"
-    )
+    if adopted > 0 and execution.startswith("bounded_individual"):
+        status = "fallback_ok" if fallback.get("failed", 0) == 0 else "fallback_partial"
+    else:
+        status = "ok" if call_error is None and adopted > 0 else (
+            "reconciled" if adopted > 0 else "failed"
+        )
     duration = time.time() - started
     print(
         "DONE status=%s requested=%d observed_delta=%d in %.1fs | herd %d -> %d | coins %d -> %d"
@@ -248,10 +383,11 @@ def main() -> int:
         "outcome",
         {
             "status": status,
-            "execution": "single_bulk_qty",
+            "execution": execution,
             "requested": want,
             "adopted_observed": adopted,
             "call_error": call_error,
+            "fallback": fallback,
             "response_preview": response[:240],
             "herd_before": farm.animal_count,
             "herd_after": final.animal_count,
@@ -267,10 +403,12 @@ def main() -> int:
         "expansion.completed",
         {
             "status": status,
+            "execution": execution,
             "adopted": adopted,
             "requested": want,
             "failed": 1 if status == "failed" else 0,
             "call_error": call_error,
+            "fallback": fallback,
             "herd_before": farm.animal_count,
             "herd_after": final.animal_count,
             "capacity": final.capacity,

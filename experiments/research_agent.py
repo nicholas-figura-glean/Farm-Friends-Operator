@@ -509,7 +509,7 @@ def settle_active_capability_questions() -> List[str]:
             evidence_refs=["capability-policy:%s" % tool for tool in matched],
             run=canary.latest_run(),
             probe_id="capability-policy",
-            result_status="implemented",
+            result_status="supported",
         )
         settled.append(identity)
     return settled

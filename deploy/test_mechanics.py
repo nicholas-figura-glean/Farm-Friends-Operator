@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, List
 
@@ -325,6 +326,34 @@ def main() -> int:
         "qty=want" in expand_source and "_transport_retries=1" in expand_source,
         "expansion uses one non-retried bulk qty mutation",
     )
+    suite.check(
+        "BULK_IMPLEMENTATION_ERROR" in expand_source
+        and "bounded_individual_fallback_after_bulk_error" in expand_source,
+        "advertised-but-broken bulk behavior has a bounded circuit-breaker fallback",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        breaker = Path(tmp) / "bulk.json"
+        now = 10_000.0
+        breaker.write_text(json.dumps({
+            "disabled": True,
+            "failed_at_epoch": now,
+            "description_sha": expand._adopt_contract_sha(),
+        }), encoding="utf-8")
+        suite.check(not expand.bulk_due(now + expand.BULK_REPROBE_SECONDS - 1, str(breaker)),
+                    "bulk circuit breaker prevents a five-minute error loop")
+        suite.check(expand.bulk_due(now + expand.BULK_REPROBE_SECONDS + 1, str(breaker)),
+                    "bulk behavior is periodically re-probed so a server fix is learned")
+        fallback_client = FakeClient()
+        fallback = expand._individual_fallback(
+            fallback_client, "chicken", 3, time.time() + 5, 1
+        )
+        suite.check(
+            fallback["ok"] == 3
+            and all(call[0] == "adopt_animal" and "qty" not in call[1]
+                    for call in fallback_client.calls),
+            "definitive bulk failure falls back to bounded no-qty calls",
+            {"result": fallback, "calls": fallback_client.calls},
+        )
 
     with tempfile.TemporaryDirectory() as tmp:
         old_store, old_history = growth.STORE, growth.HISTORY
@@ -368,6 +397,12 @@ def main() -> int:
             },
         },
     }
+    suite.check(
+        novelty.event_signature(
+            "💠 PRESTIGE! Nick rose from Platinum II to Platinum I (level 12). 16872 animals retired, coins reset to 50."
+        ) == "progression_completed",
+        "a verified prestige event cannot reopen the risk hold that progression just settled",
+    )
     novelty_result = novelty.assess(
         {"run": 2, "tools": ["list_farm", "prestige"], "trades": [],
          "rival_herds": {}, "rival_coins": {}, "risk_kinds": [], "event_signatures": []},
