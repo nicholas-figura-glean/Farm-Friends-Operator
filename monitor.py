@@ -603,6 +603,65 @@ def _league_state() -> Dict[str, Any]:
     }
 
 
+def _mtime_generation(paths: List[Path]) -> str:
+    values = []
+    for path in paths:
+        try:
+            values.append("%s:%d:%d" % (path.name, path.stat().st_mtime_ns, path.stat().st_size))
+        except OSError:
+            continue
+    return hashlib.sha1("|".join(values).encode("utf-8")).hexdigest()[:12]
+
+
+def _dashboard_generations(
+    latest: Dict[str, Any],
+    release: Dict[str, Any],
+    strategy_view: Dict[str, Any],
+) -> Dict[str, str]:
+    claims_state = _json_object(STATE / "claims.json")
+    policy_state = _json_object(STATE / "policy.json")
+    release_revision = str(
+        release.get("pointer_revision") or release.get("revision") or "unpublished"
+    )
+    state_token = "%s:%s" % (latest.get("run") or 0, latest.get("ts") or "")
+    evidence_token = "%s:%s:%s:%s" % (
+        claims_state.get("registry_version") or 0,
+        claims_state.get("semantic_fingerprint") or "",
+        policy_state.get("policy_id") or "",
+        _mtime_generation([
+            HISTORY, STATE / "questions.ndjson", STATE / "provenance.ndjson",
+            STATE / "experiments.ndjson", STATE / "research_findings.ndjson",
+        ]),
+    )
+    autonomy_token = _mtime_generation([
+        STATE / "canary.json", STATE / "workorders.ndjson", STATE / "author.json",
+        STATE / "contract_watch.json", STATE / "research_agent.json",
+        STATE / "governance_reviews.ndjson", STATE / "dashboard_health.ndjson",
+    ])
+    architecture_token = "%s:%s" % (
+        snapshot_trace_fingerprint() or "", release.get("live_fingerprint") or ""
+    )
+    strategy_token = str(strategy_view.get("fingerprint") or "")
+    return {
+        "state": state_token,
+        "release": release_revision,
+        "autonomy": autonomy_token,
+        "evidence": evidence_token,
+        "strategy": strategy_token,
+        "architecture": architecture_token,
+        # Explicit tab ownership lets both the browser and dashboard agent prove
+        # every visible tab has a current backing generation.
+        "overview": "%s:%s:%s" % (state_token, strategy_token, release_revision),
+        "pipeline": state_token,
+        "healing": autonomy_token,
+        "history": evidence_token,
+        "findings": evidence_token,
+        "game": release_revision,
+        "wire": state_token,
+        "architecture_tab": architecture_token,
+    }
+
+
 def snapshot() -> Dict[str, Any]:
     history = _json_lines(HISTORY, 100)
     intents = _json_lines(INTENTS, 80)
@@ -660,6 +719,8 @@ def snapshot() -> Dict[str, Any]:
                 progression[key] = own_live.get(key)
     scene = _scene(latest, previous)
     scene["progression"] = progression
+    strategy_view = strategy.status()
+    generations = _dashboard_generations(latest, release, strategy_view)
 
     return {
         "app": APP_ID,
@@ -687,7 +748,8 @@ def snapshot() -> Dict[str, Any]:
         "pipeline": _pipeline(),
         "trace": _trace(),
         "growth": _growth_summary(),
-        "strategy": strategy.status(),
+        "strategy": strategy_view,
+        "generations": generations,
         "recovery_watch": _json_object(STATE / "recovery_watch.json"),
         "cost": _cost_detail(history),
         "signals": _signals(latest, previous),
@@ -1775,6 +1837,7 @@ function kv(items) { return items.map(([k,v]) => `<div><span>${esc(k)}</span><sp
 const VIEW_REVISION = __VIEW_REVISION__;
 let LAST = null, LAST_FETCH_MS = null, FETCH_ERROR = null, STATE_LOADING = false;
 let EVIDENCE = null, EVIDENCE_LOADING = false, EVIDENCE_LAST_FETCH_MS = null;
+let MODEL_GENERATIONS = {};
 let ACTIVE_TAB = "overview";
 const EVIDENCE_REFRESH_MS = 60000, ARCHITECTURE_REFRESH_MS = 30000;
 let CHART_METRIC = "produce", ACTIVE_RUN = null;
@@ -2476,6 +2539,31 @@ async function loadEvidence(force=false) {
     safe("findings",()=>renderEvidence({error:error&&error.message?error.message:String(error)}));
   } finally { EVIDENCE_LOADING=false; }
 }
+function generationChanged(next, key) {
+  const value=next&&next[key];
+  return value!=null && MODEL_GENERATIONS[key]!==value;
+}
+function refreshBackingModels(data, now) {
+  const next=(data&&data.generations)||{};
+  const evidenceChanged=generationChanged(next,"evidence")||generationChanged(next,"strategy");
+  const autonomyChanged=generationChanged(next,"autonomy")||generationChanged(next,"strategy");
+  const architectureChanged=generationChanged(next,"architecture")||generationChanged(next,"release");
+  if (!OP_AUTONOMY_LAST_FETCH_MS || autonomyChanged || now-OP_AUTONOMY_LAST_FETCH_MS>=OP_AUTONOMY_REFRESH_MS) {
+    loadOperatorAutonomy(!!OP_AUTONOMY || autonomyChanged);
+  }
+  // Backing models refresh even while their panels are hidden. Activation still
+  // forces a repaint, but never becomes the event that discovers stale data.
+  if (!EVIDENCE || evidenceChanged || !EVIDENCE_LAST_FETCH_MS || now-EVIDENCE_LAST_FETCH_MS>=EVIDENCE_REFRESH_MS) {
+    loadEvidence(true);
+  }
+  if (typeof loadArchitecture==="function" &&
+      (architectureChanged || typeof ARCH_LAST_FETCH_MS==="undefined" || !ARCH_LAST_FETCH_MS ||
+       now-ARCH_LAST_FETCH_MS>=ARCHITECTURE_REFRESH_MS)) {
+    loadArchitecture(true);
+  }
+  MODEL_GENERATIONS=Object.assign({},next);
+}
+
 function refreshForRelease(data) {
   const pointer = data && data.release && (data.release.pointer_revision || data.release.revision);
   const serving = data && data.release && data.release.serving_revision;
@@ -2510,13 +2598,7 @@ async function load() {
     if (refreshForRelease(data)) return;
     render(data);
     const now=Date.now();
-    if (!OP_AUTONOMY_LAST_FETCH_MS || now-OP_AUTONOMY_LAST_FETCH_MS>=OP_AUTONOMY_REFRESH_MS) loadOperatorAutonomy(!!OP_AUTONOMY);
-    if (!EVIDENCE) loadEvidence();
-    else if ((ACTIVE_TAB==="findings"||ACTIVE_TAB==="history") &&
-             (!EVIDENCE_LAST_FETCH_MS || now-EVIDENCE_LAST_FETCH_MS>=EVIDENCE_REFRESH_MS)) loadEvidence(true);
-    if (ACTIVE_TAB==="architecture" && typeof loadArchitecture==="function" &&
-        (typeof ARCH_LAST_FETCH_MS==="undefined" || !ARCH_LAST_FETCH_MS ||
-         now-ARCH_LAST_FETCH_MS>=ARCHITECTURE_REFRESH_MS)) loadArchitecture(true);
+    refreshBackingModels(data,now);
   } catch (error) {
     // Keep polling: a monitor restart or a half-written read must not end the
     // refresh loop. The heartbeat shows the page is trying, not dead.

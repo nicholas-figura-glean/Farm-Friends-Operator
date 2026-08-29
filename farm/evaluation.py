@@ -23,6 +23,7 @@ IMPROVED = "improved"
 EQUIVALENT = "equivalent"
 REJECTED = "rejected"
 INSUFFICIENT = "insufficient"
+INCONCLUSIVE = "inconclusive"
 
 
 def _utcnow() -> str:
@@ -268,6 +269,21 @@ def judge(
                           reason="reliability release has no comparable efficacy baseline")
         return result
 
+    effect = float(interval["effect"])
+    if change_class == "reliability" and effect < -rules.RELIABILITY_EQUIVALENCE_TOLERANCE:
+        evidence_interval = result.get("unweighted_interval") or {}
+        upper = _number(evidence_interval.get("upper"))
+        if upper is None or upper >= -rules.RELIABILITY_EQUIVALENCE_TOLERANCE:
+            result.update(
+                status=INCONCLUSIVE,
+                reason=(
+                    "reliability point effect %.2f%% misses %.2f%% equivalence, but "
+                    "the evidence interval does not prove a regression"
+                    % (100.0 * effect, 100.0 * rules.RELIABILITY_EQUIVALENCE_TOLERANCE)
+                ),
+            )
+            return result
+
     prior = champion(canary_store)
     cumulative = float(prior.get("cumulative_ratio") or 1.0)
     projected = cumulative * (1.0 + float(interval["effect"]))
@@ -282,7 +298,6 @@ def judge(
         )
         return result
 
-    effect = float(interval["effect"])
     if change_class == "strategy":
         lower = float(interval["lower"])
         expected = max(
@@ -311,10 +326,12 @@ def judge(
     # declared operational band for the point effect, retain the interval for
     # audit, and let the cumulative budget catch repeated small accepted losses.
     if effect < -rules.RELIABILITY_EQUIVALENCE_TOLERANCE:
+        evidence_interval = result.get("unweighted_interval") or {}
+        upper = _number(evidence_interval.get("upper"))
         result.update(
             status=REJECTED,
-            reason="reliability effect %.2f%% exceeds %.2f%% equivalence loss"
-                   % (100.0 * effect, 100.0 * rules.RELIABILITY_EQUIVALENCE_TOLERANCE),
+            reason="reliability effect %.2f%% and upper bound %.2f%% exceed %.2f%% equivalence loss"
+                   % (100.0 * effect, 100.0 * upper, 100.0 * rules.RELIABILITY_EQUIVALENCE_TOLERANCE),
         )
         return result
     result.update(

@@ -661,14 +661,25 @@ def _http_fixture(stale=False):
             "pointer_revision": "rev-b" if stale else "rev-a",
             "stale": stale,
         },
+        "strategy": {"errors": []},
+        "generations": {key: "fixture" for key in dashboard_agent.REQUIRED_GENERATIONS},
     }
+    tabs = ("overview", "pipeline", "cost", "history", "findings", "game", "wire", "architecture")
+    tab_html = "".join(
+        '<button data-tab="%s"></button><div id="tab-%s"></div>' % (tab, tab)
+        for tab in tabs
+    )
+    state["generations"]["release"] = state["release"]["pointer_revision"]
+    state["generations"]["evidence"] = "1:fixture"
     bodies = {
-        "/": '<button data-tab="architecture"></button><div id="tab-architecture">'
-             '<div data-arch-loading>Loading</div><script>'
+        "/": tab_html + '<div data-arch-loading>Loading</div><script>'
              'async function loadArchitecture() { fetch("/api/architecture"); }'
-             'if (window.loadArchitecture) window.loadArchitecture();</script></div>',
+             'function refreshBackingModels() {}'
+             'if (window.loadArchitecture) window.loadArchitecture();</script>',
         "/api/state": json.dumps(state),
         "/api/autonomy": json.dumps({"agents": {"live": 9}}),
+        "/api/evidence": json.dumps({"claims": {"registry_version": 1, "claims": [{"id": "objective"}]}}),
+        "/api/topology": json.dumps({"nodes": [{"id": "cycle"}]}),
         "/api/architecture": json.dumps({"current": {"nodes": [{"id": "cycle"}]}}),
     }
 
@@ -686,7 +697,7 @@ try:
     served = dashboard_agent._served_dashboard("http://fixture.invalid")
     check("the browser-path probe accepts a current eight-tab server", served["ok"],
           str(served.get("error")))
-    check("the browser-path probe fetched all four resources",
+    check("the browser-path probe fetched all six backing resources",
           served.get("bytes", 0) > 100, str(served.get("bytes")))
 
     dashboard_agent.urlopen = _http_fixture(stale=True)
@@ -719,10 +730,17 @@ check("tab activation checks the global async loader",
       'typeof loader!=="function"' in composed and "window.loadArchitecture" in composed)
 check("loader failure remains visible and recovery-owned",
       "Renderer restarting" in composed and "Architecture agent owns recovery" in composed)
-check("an open Findings or History tab refreshes on its own",
-      "EVIDENCE_REFRESH_MS = 60000" in composed and "EVIDENCE_LAST_FETCH_MS" in composed)
-check("an open Architecture tab refreshes its model and liveness overlay",
-      "ARCHITECTURE_REFRESH_MS = 30000" in composed and "ARCH_LAST_FETCH_MS" in composed)
+check("hidden Findings and History backing data refreshes on generation or cadence",
+      "function refreshBackingModels" in composed
+      and "evidenceChanged" in composed
+      and "now-EVIDENCE_LAST_FETCH_MS>=EVIDENCE_REFRESH_MS" in composed
+      and "else if ((ACTIVE_TAB" not in composed)
+check("hidden Architecture backing data refreshes on generation or cadence",
+      "architectureChanged" in composed
+      and "now-ARCH_LAST_FETCH_MS>=ARCHITECTURE_REFRESH_MS" in composed)
+check("state advertises one generation owner for every GUI tab",
+      "_dashboard_generations" in monitor_source
+      and set(dashboard_agent.TAB_SOURCES) == {"overview", "pipeline", "healing", "history", "findings", "game", "wire", "architecture"})
 
 
 # --------------------------------------------------------------------------
@@ -826,6 +844,10 @@ source = agent_path.read_text(encoding="utf-8")
 for source_name in ("monitor.snapshot", "evidence.report", "topology.cached_graph",
                     "autonomy.report", "architecture.report"):
     check("probes %s" % source_name, source_name in source)
+check("dashboard agent owns all eight GUI tabs",
+      set(dashboard_agent.TAB_SOURCES) == {"overview", "pipeline", "healing", "history", "findings", "game", "wire", "architecture"})
+check("dashboard agent requires all backing generation tokens",
+      {"state", "release", "autonomy", "evidence", "strategy", "architecture"}.issubset(dashboard_agent.REQUIRED_GENERATIONS))
 
 result = subprocess.run([sys.executable, str(agent_path)],
                         capture_output=True, text=True, timeout=300)

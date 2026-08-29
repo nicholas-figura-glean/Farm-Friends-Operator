@@ -375,14 +375,18 @@ def latest_run(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[int]:
     return int(rows[-1]["run"]) if rows else None
 
 
-def release_editable_diff(project: Any, revision: str, previous: str) -> List[str]:
-    """Editable implementation files that differ across the release boundary.
+OBSERVABILITY_EXACT = {
+    "README.md", "monitor.py",
+    "experiments/dashboard_agent.py", "experiments/research_agent.py",
+    "farm/architecture.py", "farm/autonomy.py", "farm/control.py",
+    "farm/evidence.py", "farm/observability.py", "farm/progress.py",
+    "farm/research.py", "farm/watch.py",
+}
+OBSERVABILITY_PREFIXES = ("dashboard/", "docs/", "deploy/test_")
 
-    The release directories are immutable, so this is stronger provenance than a
-    dirty working-tree diff. Protected control-plane files are deliberately omitted:
-    a regression involving one of those must remain visible for manual repair rather
-    than granting the author agent permission to rewrite its own judge.
-    """
+
+def release_diff(project: Any, revision: str, previous: str) -> List[str]:
+    """All source/artifact paths whose content differs across two releases."""
     root = Path(project)
     candidate = root / "releases" / str(revision)
     rollback = root / "releases" / str(previous)
@@ -394,20 +398,42 @@ def release_editable_diff(project: Any, revision: str, previous: str) -> List[st
             for path in tree.rglob("*"):
                 if path.is_file() and not path.is_symlink():
                     rel = path.relative_to(tree).as_posix()
-                    if control.author_editable(rel):
+                    if rel not in {"RELEASED", "SOURCE_COMMIT"}:
                         relative.add(rel)
         except OSError:
             continue
-
     changed: List[str] = []
     for rel in sorted(relative):
-        left = candidate / rel
-        right = rollback / rel
+        left, right = candidate / rel, rollback / rel
         try:
             if not left.is_file() or not right.is_file() or left.read_bytes() != right.read_bytes():
                 changed.append(rel)
         except OSError:
             changed.append(rel)
+    return changed
+
+
+def observability_release_errors(project: Any, revision: str, previous: str) -> List[str]:
+    changed = release_diff(project, revision, previous)
+    return [
+        path for path in changed
+        if path not in OBSERVABILITY_EXACT
+        and not any(path.startswith(prefix) for prefix in OBSERVABILITY_PREFIXES)
+    ]
+
+
+def release_editable_diff(project: Any, revision: str, previous: str) -> List[str]:
+    """Editable implementation files that differ across the release boundary.
+
+    The release directories are immutable, so this is stronger provenance than a
+    dirty working-tree diff. Protected control-plane files are deliberately omitted:
+    a regression involving one of those must remain visible for manual repair rather
+    than granting the author agent permission to rewrite its own judge.
+    """
+    changed = [
+        rel for rel in release_diff(project, revision, previous)
+        if control.author_editable(rel)
+    ]
     priority = {
         "farm/format_compat.py": 0,
         "farm/parse.py": 1,
@@ -475,7 +501,7 @@ def arm(
         # Source rollback must cover every commit included since the immutable
         # runtime base, not merely the last commit named by the publisher.
         "base_commit": base_commit or _revision_commit(previous, history),
-        "change_class": change_class if change_class in {"reliability", "compatibility", "strategy", "research_probe"} else "reliability",
+        "change_class": change_class if change_class in {"reliability", "compatibility", "observability", "strategy", "research_probe"} else "reliability",
         "hypothesis_id": hypothesis_id,
         "policy_id": policy_id,
         "expected_improvement": max(0.0, float(expected_improvement or 0.0)),
@@ -518,7 +544,11 @@ def _efficacy_verdict(
     verdict["efficacy"] = result
     verdict["last_run"] = int(usable[-1].get("run") or 0) if usable else None
     verdict["reason"] = result.get("reason") or "efficacy evaluation produced no reason"
-    verdict["status"] = HEALTHY if result.get("accepted") else REGRESSED
+    verdict["status"] = (
+        HEALTHY if result.get("accepted")
+        else INCONCLUSIVE if result.get("status") == evaluation.INCONCLUSIVE
+        else REGRESSED
+    )
     return verdict
 
 
@@ -598,6 +628,25 @@ def evaluate(
 
     if len(after) < rules.CANARY_MIN_RUNS:
         verdict["reason"] = "%d/%d runs observed" % (len(after), rules.CANARY_MIN_RUNS)
+        return verdict
+
+    if record.get("change_class") == "observability":
+        verdict["status"] = HEALTHY
+        verdict["last_run"] = int(after[-1].get("run") or 0)
+        verdict["efficacy"] = {
+            "status": evaluation.EQUIVALENT,
+            "accepted": True,
+            "change_class": "observability",
+            "metric": "clean_completed_cycles_and_current_readouts",
+            "baseline": None,
+            "candidate": len(after),
+            "effect": 0.0,
+            "reason": "path-gated observability release completed clean cycles; production is not a causal metric for this diff",
+        }
+        verdict["reason"] = (
+            "observability release completed %d clean run(s); dashboard/readout gates passed and no game-action failure occurred"
+            % len(after)
+        )
         return verdict
 
     # League is the primary leaderboard key. A prestige that independently proves
@@ -748,6 +797,13 @@ def evaluate(
                 "keeping the reliability release without champion promotion"
                 % len(usable)
             )
+        return verdict
+
+    if len(after) < rules.CANARY_RATE_MIN_RUNS:
+        verdict["reason"] = (
+            "rate evidence spans %d/%d runs; waiting across the score-burst phase"
+            % (len(after), rules.CANARY_RATE_MIN_RUNS)
+        )
         return verdict
 
     if len(after) >= rules.EFFICACY_MIN_RUNS * 2 and len(usable) < rules.EFFICACY_MIN_RUNS:

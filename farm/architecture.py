@@ -88,7 +88,7 @@ MODULE_LAYER: Dict[str, str] = {
     "mechanics": "play", "capability_policies": "play", "strategy": "play",
     "strategy_policy": "play", "dual_cap_audit": "research", "format_compat": "play",
     "planner": "play", "actions": "play", "policy": "play", "growth": "play",
-    "journal": "observe", "analysis": "observe", "evidence": "observe",
+    "journal": "observe", "analysis": "observe", "evidence": "observe", "observability": "observe",
     "knowledge": "observe", "ledger": "observe", "compaction": "observe",
     "questions": "observe",
     "topology": "observe", "tool_trace": "observe", "claims": "observe",

@@ -563,8 +563,8 @@ write_runs(base + [{"run": n, "produce_per_min": 100.0, "collected": 10} for n i
 verdict = canary.evaluate(store, runs)
 check("a sustained healthy release is cleared", verdict["status"] == canary.HEALTHY, str(verdict))
 
-# A real regression: output halves.
-write_runs(base + [{"run": n, "produce_per_min": 40.0, "collected": 10} for n in range(7, 10)])
+# A real regression: output halves across a complete burst-spanning floor window.
+write_runs(base + [{"run": n, "produce_per_min": 40.0, "collected": 10} for n in range(7, 13)])
 verdict = canary.evaluate(store, runs)
 check("a halved produce rate is a regression", verdict["status"] == canary.REGRESSED, str(verdict))
 check("the regression is quantified", "baseline" in verdict["reason"], str(verdict))
@@ -606,6 +606,38 @@ check("bursty score growth outweighs collection-only and duplicate-row proxies",
       verdict["status"] == canary.WATCHING
       and 1300.0 < verdict.get("observed_rate", 0) < 1400.0,
       str(verdict))
+
+phase_store = os.path.join(can, "phase-canary.json")
+phase_hist = os.path.join(can, "phase-canary.ndjson")
+phase_base = []
+for run in range(1, 21):
+    high = 200.0 if run <= 14 else 600.0
+    phase_base.append({"run": run, "animals": 100, "interval_min": 5.0,
+                       "produce_per_min": high if run % 2 == 0 else 0.0,
+                       "collected": 10})
+write_runs(phase_base)
+phase_arm = canary.arm(
+    "revPhase", "revA", reason="burst phase", order_id="phase-order",
+    change_class="reliability", store=phase_store, history=phase_hist,
+    run_history=runs,
+)
+phase_candidate = [
+    {"run": 21 + index, "animals": 100, "interval_min": 5.0,
+     "produce_per_min": 440.0 if index % 2 else 0.0, "collected": 10}
+    for index in range(10)
+]
+write_runs(phase_base + phase_candidate[:3])
+phase_early = canary.evaluate(phase_store, runs)
+check("three burst-phase rows cannot trigger ordinary rate rollback",
+      phase_early.get("status") == canary.WATCHING
+      and "score-burst phase" in phase_early.get("reason", ""), str(phase_early))
+write_runs(phase_base + phase_candidate)
+phase_verdict = canary.evaluate(phase_store, runs)
+check("canary baseline spans enough rows to avoid burst-phase false rollback",
+      rules.CANARY_BASELINE_RUNS >= 20
+      and phase_arm.get("baseline_per_animal") < 2.0
+      and phase_verdict.get("status") == canary.HEALTHY,
+      str({"armed": phase_arm, "verdict": phase_verdict}))
 
 # A reliability release may be necessary while the game itself is already stalled.
 # Continuing that pre-existing condition is not candidate evidence in either direction:
@@ -672,6 +704,43 @@ check("an unmeasurable strategy candidate remains fail-closed",
       and "cannot prove" in stalled_strategy.get("reason", ""),
       str(stalled_strategy))
 
+observability_store = os.path.join(can, "observability-canary.json")
+observability_hist = os.path.join(can, "observability-canary.ndjson")
+write_runs(base)
+canary.arm(
+    "revView", "revA", reason="readout-only", order_id="view-order",
+    change_class="observability", store=observability_store,
+    history=observability_hist, run_history=runs,
+)
+view_rows = [
+    {"run": 7 + index, "animals": 100, "produce_per_min": 0.0,
+     "interval_min": 5.0, "collected": 0, "anomalies": []}
+    for index in range(3)
+]
+write_runs(base + view_rows)
+view_verdict = canary.evaluate(observability_store, runs)
+check("path-gated observability release is judged on clean completed cycles",
+      view_verdict.get("status") == canary.HEALTHY
+      and (view_verdict.get("efficacy") or {}).get("metric")
+          == "clean_completed_cycles_and_current_readouts",
+      str(view_verdict))
+
+with tempfile.TemporaryDirectory() as release_root:
+    previous_tree = pathlib.Path(release_root) / "releases" / "old"
+    current_tree = pathlib.Path(release_root) / "releases" / "new"
+    for tree in (previous_tree, current_tree):
+        (tree / "farm").mkdir(parents=True)
+        (tree / "dashboard").mkdir(parents=True)
+        (tree / "monitor.py").write_text("old\n", encoding="utf-8")
+        (tree / "farm" / "cycle.py").write_text("same\n", encoding="utf-8")
+    (current_tree / "monitor.py").write_text("new\n", encoding="utf-8")
+    check("observability path gate accepts dashboard/readout-only changes",
+          canary.observability_release_errors(release_root, "new", "old") == [])
+    (current_tree / "farm" / "cycle.py").write_text("gameplay changed\n", encoding="utf-8")
+    check("observability path gate rejects gameplay changes",
+          canary.observability_release_errors(release_root, "new", "old")
+          == ["farm/cycle.py"])
+
 # A release can be armed in the middle of an existing zero-collection streak. The
 # first candidate row still carries the cycle's global streak, but attribution must
 # restart at one and grow only with candidate-owned rows.
@@ -700,11 +769,13 @@ write_runs(preexisting + [first_candidate])
 scoped = canary.evaluate(scope_store, runs)
 check("the first candidate run does not inherit a pre-release zero streak",
       scoped["status"] == canary.WATCHING and scoped["runs_observed"] == 1, str(scoped))
-second_candidate = dict(first_candidate, run=11, zero_streak=5)
-third_candidate = dict(first_candidate, run=12, zero_streak=6)
-write_runs(preexisting + [first_candidate, second_candidate, third_candidate])
+zero_candidates = [
+    dict(first_candidate, run=10 + index, zero_streak=4 + index)
+    for index in range(rules.CANARY_RATE_MIN_RUNS)
+]
+write_runs(preexisting + zero_candidates)
 scoped_bad = canary.evaluate(scope_store, runs)
-check("three genuinely score-zero candidate runs still trigger rate rollback",
+check("six genuinely score-zero candidate runs still trigger rate rollback",
       scoped_bad["status"] == canary.REGRESSED
       and scoped_bad.get("failure_kind") is None
       and "produce" in scoped_bad.get("reason", ""),
@@ -937,14 +1008,14 @@ canary.resolve({"status": canary.REGRESSED, "reason": "fixture reset"}, rev, sto
 # are genuine post-flip runs to judge.
 write_runs(base)
 canary.arm("revB", "revA", store=store, history=hist, run_history=runs)
-write_runs(base + [{"run": n, "produce_per_min": 40.0, "collected": 10} for n in range(7, 10)])
+write_runs(base + [{"run": n, "produce_per_min": 40.0, "collected": 10} for n in range(7, 13)])
 first = canary.resolve(canary.evaluate(store, runs), rev, store, hist)
 check("a regressed canary acts", first.get("acted") is True, str(first))
 with open(store, encoding="utf-8") as handle:
     resolved_record = json.load(handle)
 check("resolution preserves the structured verdict for operator explanation",
       (resolved_record.get("verdict") or {}).get("status") == canary.REGRESSED
-      and (resolved_record.get("verdict") or {}).get("runs_observed") == 3,
+      and (resolved_record.get("verdict") or {}).get("runs_observed") == 6,
       str(resolved_record.get("verdict")))
 second = canary.evaluate(store, runs)
 check("after resolution the canary is inactive", second["status"] == canary.INACTIVE, str(second))
