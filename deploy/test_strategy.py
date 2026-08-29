@@ -122,6 +122,16 @@ def main() -> int:
                 "near-cap plan prices and selects beehive replacements", near_cap)
     suite.check(growth["kind"] == "chicken" and growth["adopt"] == 400,
                 "below-cap plan retains fast chicken growth", growth)
+    capped_history = [
+        {"run": run, "animals": 16_875, "animal_capacity": 16_875,
+         "coins": 1_000_000 + run * 30_000, "revenue": 30_000,
+         "growth": {"cap": rules.MAINTENANCE_ADOPTIONS}}
+        for run in range(1, rules.AUDIT_WINDOW_RUNS + 1)
+    ]
+    suite.check(rules.strategy_stale(capped_history) is None,
+                "a hard-capped herd is not falsely called stale for accumulating coins")
+    suite.check(rules.idle_capital(capped_history) is None,
+                "idle coins at the hard animal cap are not treated as unspent score growth")
 
     barn_fire = parse.Farm(
         coins=2_000_000, animals=[animal()], animal_total=7_000,

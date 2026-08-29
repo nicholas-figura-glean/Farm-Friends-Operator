@@ -918,12 +918,26 @@ def _audit_rows(history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]
     return list({row["run"]: row for row in rows}.values())
 
 
+def _animal_cap_saturated(row: Dict[str, Any], fraction: float = 0.99) -> bool:
+    capacity = int(row.get("animal_capacity") or 0)
+    animals = int(row.get("animals") or 0)
+    return bool(capacity and animals / float(capacity) >= fraction)
+
+
 def strategy_stale(history: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
-    """A flat herd plus accumulating capital means a standing gate deserves review."""
+    """A flat *uncapped* herd plus accumulating capital deserves review."""
     rows = _audit_rows(history)
     if len(rows) < AUDIT_WINDOW_RUNS:
         return None
     window = rows[-AUDIT_WINDOW_RUNS:]
+    # Once the server itself hard-caps animal slots, a flat herd and accumulating
+    # coins are expected. Strategy freshness is then owned by capped-slot species
+    # evidence, not by an impossible request to buy more animals.
+    if _animal_cap_saturated(window[-1]) and all(
+        int(row.get("animals") or 0) >= 0.90 * int(row.get("animal_capacity") or 0)
+        for row in window if int(row.get("animal_capacity") or 0) > 0
+    ):
+        return None
     animals = [int(row.get("animals") or 0) for row in window]
     if not animals or min(animals) <= 0:
         return None
@@ -969,6 +983,8 @@ def idle_capital(history: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, 
     if len(window) < 6:
         return None
     latest = window[-1]
+    if _animal_cap_saturated(latest):
+        return None
     growth = latest.get("growth") or {}
     cap = growth.get("cap")
     if not isinstance(cap, (int, float)) or cap > MAINTENANCE_ADOPTIONS:
