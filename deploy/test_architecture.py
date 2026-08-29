@@ -8,6 +8,7 @@ that skips the shared MCP boundary.
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -71,6 +72,21 @@ def main():
     live = architecture._runtime_topology()
     check(isinstance(live["edges"], list) and isinstance(live["steps"], list),
           "live topology degrades to a stable payload shape")
+
+    snap = architecture.snapshot()
+    check(snap.get("signature_version") == architecture.SIGNATURE_VERSION,
+          "architecture snapshots identify their signature semantics")
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = os.path.join(tmp, "architecture.ndjson")
+        legacy = dict(snap, signature_version=1)
+        first = architecture.record(legacy, ledger=ledger)
+        current = architecture.record(snap, ledger=ledger)
+        unchanged = architecture.record(snap, ledger=ledger)
+        check(first.get("recorded") and current.get("recorded")
+              and current.get("signature_version") == architecture.SIGNATURE_VERSION,
+              "the same hash under a new reader version records a compatibility boundary")
+        check(not unchanged.get("recorded"),
+              "identical hashes from the same reader version remain deduplicated")
     print("architecture payload: PASS")
 
 

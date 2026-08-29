@@ -444,15 +444,27 @@ check("repeated scans of the same tree agree",
 # The flip-flop signature is oscillation, not adjacent duplication: it produced
 # A-B-A-B, where each row differs from the one before it and so passed a naive
 # adjacency check. What gives it away is a signature *recurring* after something else
-# intervened, which for a system that only moves forwards should not happen.
+# intervened, which for a system that only moves forwards should not happen. Compare
+# only signatures emitted under the same semantics: an old immutable reader can scan
+# today's tree with yesterday's layer/protection vocabulary and produce a different
+# hash for identical source.
 rows_all = architecture.history(limit=500)
+
+
+def _signature_key(row):
+    return (int(row.get("signature_version") or 1), row.get("signature"))
+
+
+check("architecture signature versions separate incompatible readers",
+      _signature_key({"signature": "same", "signature_version": 1})
+      != _signature_key({"signature": "same", "signature_version": 2}))
 seen: dict = {}
 oscillating = []
 for row in rows_all:
-    sig = row.get("signature")
-    if sig in seen and seen[sig] != row.get("version", 0) - 1:
-        oscillating.append((seen[sig], row.get("version"), str(sig)[:8]))
-    seen[sig] = row.get("version", 0)
+    key = _signature_key(row)
+    if key in seen and seen[key] != row.get("version", 0) - 1:
+        oscillating.append((seen[key], row.get("version"), str(key[1])[:8], key[0]))
+    seen[key] = row.get("version", 0)
 # Rows produced by the bug are identifiable rather than merely old: they either carry no
 # root at all (recorded before the field existed) or a root inside releases/. Keying on
 # that instead of a version cutoff means this check keeps working as the ledger grows,
@@ -460,9 +472,9 @@ for row in rows_all:
 by_version = {r.get("version"): r for r in rows_all}
 first_signature_by_commit = {}
 for row in rows_all:
-    commit = row.get("commit")
-    if commit and commit not in first_signature_by_commit:
-        first_signature_by_commit[commit] = row.get("signature")
+    commit_key = (row.get("commit"), int(row.get("signature_version") or 1))
+    if commit_key[0] and commit_key not in first_signature_by_commit:
+        first_signature_by_commit[commit_key] = row.get("signature")
 
 
 def _pre_fix(version: int) -> bool:
@@ -479,7 +491,8 @@ def _dirty_scan(version: int) -> bool:
     # is the committed baseline; later different shapes are retained but not treated
     # as deployed policy oscillation.
     commit = row.get("commit")
-    return bool(commit and row.get("signature") != first_signature_by_commit.get(commit))
+    commit_key = (commit, int(row.get("signature_version") or 1))
+    return bool(commit and row.get("signature") != first_signature_by_commit.get(commit_key))
 
 
 suspect = [
@@ -493,10 +506,20 @@ suspect = [
 # be C, so it is judged against the latest clean recorded version until committed.
 clean_rows = [row for row in rows_all if not _pre_fix(row.get("version", 0))
               and not _dirty_scan(row.get("version", 0))]
-submitted_signature = (snap.get("signature") if not snap.get("dirty_source")
-                       else (clean_rows[-1].get("signature") if clean_rows else None))
+if not snap.get("dirty_source"):
+    submitted_key = _signature_key(snap)
+else:
+    compatible_clean = [
+        row for row in clean_rows
+        if int(row.get("signature_version") or 1) == int(snap.get("signature_version") or 1)
+    ]
+    # A protected signature-version bump has no prior compatible clean row by
+    # definition. Judge that boundary with the submitted reader rather than falling
+    # back to an incompatible historical hash; later dirty scans still use the last
+    # clean row from their own version.
+    submitted_key = _signature_key(compatible_clean[-1] if compatible_clean else snap)
 unresolved = [item for item in suspect
-              if (by_version.get(item[1]) or {}).get("signature") == submitted_signature]
+              if _signature_key(by_version.get(item[1]) or {}) == submitted_key]
 check("the submitted clean architecture is not a recurring shape", not unresolved,
       "recurring: %s" % (unresolved[:3],))
 if oscillating:

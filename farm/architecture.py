@@ -53,6 +53,12 @@ def _project_root() -> Path:
 PROJECT = _project_root()
 LEDGER = PROJECT / "state" / "architecture.ndjson"
 
+# Signature hashes depend on the reader's layer/protection vocabulary as well as the
+# files being scanned. Old immutable releases can inspect a new working tree with old
+# semantics, so recurrence is meaningful only within one signature version. Bump this
+# whenever signature inputs or their interpretation change; historical rows default to 1.
+SIGNATURE_VERSION = 2
+
 # Layers, outermost first. The order is the story the diagram tells: the game is
 # outside our control, the loop plays it, and everything above the loop exists to keep
 # the loop correct without a human.
@@ -408,6 +414,7 @@ def snapshot() -> Dict[str, Any]:
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "signature_version": SIGNATURE_VERSION,
         "signature": sig,
         "short": sig[:12],
         "layers": LAYERS,
@@ -473,14 +480,19 @@ def record(snap: Optional[Dict[str, Any]] = None, trigger: str = "scan",
     snap = snap if snap is not None else snapshot()
     rows = history(limit=1, ledger=ledger)
     previous = rows[-1] if rows else None
-    if previous and previous.get("signature") == snap["signature"]:
+    previous_signature_version = int((previous or {}).get("signature_version") or 1)
+    snapshot_signature_version = int(snap.get("signature_version") or 1)
+    if (previous and previous.get("signature") == snap["signature"]
+            and previous_signature_version == snapshot_signature_version):
         return {"recorded": False, "signature": snap["signature"],
+                "signature_version": snapshot_signature_version,
                 "reason": "architecture unchanged"}
 
     version = int((previous or {}).get("version") or 0) + 1
     row = {
         "version": version,
         "ts": snap["generated_at"],
+        "signature_version": int(snap.get("signature_version") or 1),
         "signature": snap["signature"],
         "short": snap["short"],
         "commit": snap.get("commit"),
