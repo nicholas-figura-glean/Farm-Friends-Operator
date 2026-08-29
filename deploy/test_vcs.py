@@ -238,6 +238,29 @@ try:
     log = git(["log", "--oneline"], repo)
     check("Revert" in log, "the revert is visible in the log")
 
+    section("a multi-commit release reverts the whole candidate range")
+    range_base = vcs.head()
+    with open(os.path.join(repo, "farm", "cycle.py"), "w") as fh:
+        fh.write("VALUE = 4\n")
+    git(["add", "farm/cycle.py"], repo)
+    git(["commit", "-q", "-m", "candidate part one"], repo)
+    with open(os.path.join(repo, "farm", "candidate.py"), "w") as fh:
+        fh.write("ENABLED = True\n")
+    git(["add", "farm/candidate.py"], repo)
+    git(["commit", "-q", "-m", "candidate part two"], repo)
+    range_head = vcs.head()
+    range_inverse = vcs.revert_range(range_base, range_head, "Revert candidate range")
+    check(bool(range_inverse), "a candidate range produces one inverse commit", str(range_inverse))
+    check(git(["show", "%s:farm/cycle.py" % range_inverse], repo).strip() == "VALUE = 1",
+          "range inverse restores content from before the first candidate commit")
+    missing_candidate = subprocess.run(
+        ["git", "cat-file", "-e", "%s:farm/candidate.py" % range_inverse],
+        cwd=repo, capture_output=True, text=True,
+    ).returncode != 0
+    check(missing_candidate, "range inverse removes files introduced by earlier candidate commits")
+    check(vcs.dirty_paths() == [], "range inverse leaves the canonical tree clean",
+          str(vcs.dirty_paths()))
+
     section("release tags join the two histories")
     tag = vcs.tag_release("20260825T190000Z", sha)
     check(tag == "release/20260825T190000Z", "the tag is namespaced", str(tag))

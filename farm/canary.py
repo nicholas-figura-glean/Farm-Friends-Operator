@@ -111,6 +111,20 @@ def _append(path: str, row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def _revision_commit(revision: str, history: str = HISTORY) -> str:
+    """Newest recorded source commit for an immutable release revision."""
+    if not revision:
+        return ""
+    try:
+        rows = compaction.read_rows(history, limit=2_000)
+    except Exception:  # noqa: BLE001 - missing provenance keeps legacy fallback
+        return ""
+    for row in reversed(rows):
+        if row.get("revision") == revision and row.get("commit"):
+            return str(row.get("commit"))
+    return ""
+
+
 def _runs(path: str = RUN_HISTORY, limit: int = 400) -> List[Dict[str, Any]]:
     """Recent logical run rows, oldest first, across active and archived history."""
     return [row for row in compaction.read_rows(path, limit=limit) if row.get("run") is not None]
@@ -216,6 +230,40 @@ def _baseline_stall_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ):
         return recent
     return []
+
+
+def _progression_transition_runs(rows: List[Dict[str, Any]]) -> set[int]:
+    """Runs whose rate denominator is invalid across an intentional herd reset.
+
+    The action row contains output mostly earned by the retiring herd, and the next
+    leaderboard interval can still flush lagging score. Dividing either by the one
+    replacement animal produced a real 443.8/min/animal canary baseline and guaranteed
+    a false rollback. Preserve the rows, but exclude both from rate comparisons.
+    """
+    excluded: set[int] = set()
+    for index, row in enumerate(rows):
+        transition = int(row.get("prestige_count") or 0) > 0
+        for action in row.get("mechanic_actions") or []:
+            if not isinstance(action, dict) or action.get("kind") != "progression":
+                continue
+            verification = action.get("verification") or {}
+            before = verification.get("before") or {}
+            after = verification.get("after") or {}
+            try:
+                transition = transition or (
+                    int(after.get("league_level")) > int(before.get("league_level"))
+                    and int(after.get("lifetime_produce")) >= int(before.get("lifetime_produce"))
+                )
+            except (TypeError, ValueError):
+                pass
+        if not transition:
+            continue
+        run = row.get("run")
+        if isinstance(run, int):
+            excluded.add(run)
+        if index + 1 < len(rows) and isinstance(rows[index + 1].get("run"), int):
+            excluded.add(int(rows[index + 1]["run"]))
+    return excluded
 
 
 def _verified_progression(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -324,6 +372,7 @@ def arm(
     reason: str = "",
     order_id: str = "",
     commit: str = "",
+    base_commit: str = "",
     change_class: str = "reliability",
     hypothesis_id: str = "",
     policy_id: str = "",
@@ -342,8 +391,12 @@ def arm(
         )
     runs = _runs(run_history)
     evaluation.ensure_champion(store, previous, run=latest_run(runs))
-    efficacy_baseline = evaluation.baseline_samples(runs)
-    baseline_stall_rows = _baseline_stall_rows(runs)
+    transition_exclusions = _progression_transition_runs(runs)
+    comparable_runs = [
+        row for row in runs if int(row.get("run") or -1) not in transition_exclusions
+    ]
+    efficacy_baseline = evaluation.baseline_samples(comparable_runs)
+    baseline_stall_rows = _baseline_stall_rows(comparable_runs)
     record = {
         "schema_version": 1,
         "status": WATCHING,
@@ -354,6 +407,9 @@ def arm(
         # The commit this release was built from, so a revert can undo the change by
         # content and not only by re-pointing at the previous directory.
         "commit": commit,
+        # Source rollback must cover every commit included since the immutable
+        # runtime base, not merely the last commit named by the publisher.
+        "base_commit": base_commit or _revision_commit(previous, history),
         "change_class": change_class if change_class in {"reliability", "compatibility", "strategy", "research_probe"} else "reliability",
         "hypothesis_id": hypothesis_id,
         "policy_id": policy_id,
@@ -362,8 +418,9 @@ def arm(
                   if control.author_editable(str(path))],
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
-        "baseline_rate": baseline_rate(runs),
-        "baseline_per_animal": baseline_per_animal(runs),
+        "baseline_rate": baseline_rate(comparable_runs),
+        "baseline_per_animal": baseline_per_animal(comparable_runs),
+        "baseline_transition_excluded_runs": sorted(transition_exclusions),
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
         "baseline_stalled": bool(baseline_stall_rows),
         "baseline_stall_runs": [int(row.get("run") or 0) for row in baseline_stall_rows],
@@ -410,8 +467,12 @@ def evaluate(
     # Runs an outside event ruined say nothing about the release, so they are not
     # evidence either way. They are still counted as observed so a long invasion
     # cannot hold a canary open forever.
-    contaminated = [r for r in after if _exogenous_loss(r)]
-    usable = [r for r in after if not _exogenous_loss(r)]
+    transition_exclusions = _progression_transition_runs(after)
+    contaminated = [
+        row for row in after
+        if _exogenous_loss(row) or int(row.get("run") or -1) in transition_exclusions
+    ]
+    usable = [row for row in after if row not in contaminated]
 
     # Absolute rate is reported for legibility; the per-animal figure decides. Rate
     # windows are time-weighted so a rapid duplicate run cannot outweigh minutes of
@@ -571,7 +632,10 @@ def evaluate(
 
     if contaminated:
         verdict["excluded_runs"] = [int(r.get("run") or 0) for r in contaminated]
-        verdict["excluded_reason"] = _exogenous_loss(contaminated[0])
+        verdict["excluded_reason"] = (
+            _exogenous_loss(contaminated[0])
+            or "progression transition and first lagging score interval"
+        )
 
     # Prefer the herd-normalised comparison. Fall back to absolute only for a canary
     # armed before this field existed, so an in-flight canary still resolves.
@@ -869,15 +933,17 @@ def record_inverse_commit(store: str = STORE) -> Dict[str, Any]:
         from . import vcs
         if not vcs.available():
             return {"error": "version control unavailable after canary rollback"}
-        inverse = vcs.revert_commit(
+        base_commit = str(record.get("base_commit") or "")
+        inverse = vcs.revert_range(
+            base_commit,
             commit,
             "Revert: canary rejected release %s\n\n"
             "Production regressed after this change shipped, so the release pointer\n"
             "was flipped back to %s automatically. This inverse commit exists so the\n"
-            "next release does not re-publish the same change.\n\n"
-            "Reverted commit: %s\n"
+            "next release does not re-publish the same candidate range.\n\n"
+            "Reverted range: %s..%s\n"
             "Reverted by: farm/canary.py, unattended."
-            % (record.get("revision"), record.get("previous"), commit),
+            % (record.get("revision"), record.get("previous"), base_commit or "<single>", commit),
         )
         if not inverse:
             return {"error": "could not record inverse commit after canary rollback"}

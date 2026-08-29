@@ -308,6 +308,11 @@ def main() -> int:
         "the retiring herd's score is never attributed to the reset herd",
         rates,
     )
+    suite.check(
+        canary._progression_transition_runs(transition_rows) == {2, 3},
+        "canary excludes the reset row and first lagging leaderboard interval",
+        canary._progression_transition_runs(transition_rows),
+    )
 
     section("growth and expansion cannot re-enter the old deadlock")
     suite.check(expand.bounded_target(prestige_farm, 250_000) == 10_000,

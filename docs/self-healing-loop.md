@@ -172,9 +172,15 @@ separate gates:
 
 Accepted releases advance a durable champion ledger. Each candidate projects its
 measured ratio through the prior releases; crossing a cumulative 5% regression
-budget reverts even when every individual loss was smaller. Safety properties:
-never revert to a pruned tree, never revert twice, never overlap candidates, and
-never let evaluator bookkeeping delay the runtime pointer flip.
+budget reverts even when every individual loss was smaller. Prestige transitions
+exclude both the reset row and first lagging leaderboard interval from rate
+baselines—the retiring herd must never be divided by the replacement herd.
+
+Safety properties: never revert to a pruned tree, never revert twice, never
+overlap candidates, and never let evaluator bookkeeping delay the runtime pointer
+flip. Every release records its source SHA; source rollback applies the complete
+base..candidate range in one inverse commit, not merely the final commit in a
+multi-commit candidate.
 
 ## research_agent — whether the strategy should change at all
 

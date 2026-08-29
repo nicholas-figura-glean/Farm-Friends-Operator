@@ -87,6 +87,11 @@ PY
 ); then
   exit 3
 fi
+SOURCE_COMMIT="$(git -C "$SOURCE_PROJECT" rev-parse HEAD)"
+BASE_COMMIT=""
+if [[ -n "$PREVIOUS" && -f "$RELEASES/$PREVIOUS/SOURCE_COMMIT" ]]; then
+  BASE_COMMIT="$(cat "$RELEASES/$PREVIOUS/SOURCE_COMMIT")"
+fi
 REV="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGET="$RELEASES/$REV"
 
@@ -206,6 +211,7 @@ find "$TARGET" -name '__pycache__' -type d -prune -exec rm -rf {} +
 ln -sfn "$DEPLOY_PROJECT/state" "$TARGET/state"
 ln -sfn "$DEPLOY_PROJECT/farm-strategy-journal.md" "$TARGET/farm-strategy-journal.md"
 echo "$REV" > "$TARGET/RELEASED"
+echo "$SOURCE_COMMIT" > "$TARGET/SOURCE_COMMIT"
 
 # Verify the staged runtime and composed dashboard in isolation before anything
 # points at them. This catches an incomplete UI manifest as well as Python drift.
@@ -295,7 +301,8 @@ if [[ -n "$PREVIOUS" ]]; then
   fi
   if ! FARM_CANARY_REASON="${FARM_CANARY_REASON:-release $REV}" \
        FARM_CANARY_ORDER_ID="${FARM_CANARY_ORDER_ID:-manual-release-$REV}" \
-       FARM_CANARY_COMMIT="${FARM_CANARY_COMMIT:-}" \
+       FARM_CANARY_COMMIT="${FARM_CANARY_COMMIT:-$SOURCE_COMMIT}" \
+       FARM_CANARY_BASE_COMMIT="${FARM_CANARY_BASE_COMMIT:-$BASE_COMMIT}" \
        FARM_CANARY_CHANGE_CLASS="${FARM_CANARY_CHANGE_CLASS:-reliability}" \
        FARM_CANARY_HYPOTHESIS_ID="${FARM_CANARY_HYPOTHESIS_ID:-}" \
        FARM_CANARY_POLICY_ID="${FARM_CANARY_POLICY_ID:-}" \
@@ -316,6 +323,7 @@ armed = canary.arm(
     reason=os.environ.get("FARM_CANARY_REASON", "release " + revision)[:500],
     order_id=os.environ.get("FARM_CANARY_ORDER_ID", "manual-release-" + revision)[:160],
     commit=os.environ.get("FARM_CANARY_COMMIT", "")[:80],
+    base_commit=os.environ.get("FARM_CANARY_BASE_COMMIT", "")[:80],
     change_class=os.environ.get("FARM_CANARY_CHANGE_CLASS", "reliability")[:40],
     hypothesis_id=os.environ.get("FARM_CANARY_HYPOTHESIS_ID", "")[:120],
     policy_id=os.environ.get("FARM_CANARY_POLICY_ID", "")[:120],

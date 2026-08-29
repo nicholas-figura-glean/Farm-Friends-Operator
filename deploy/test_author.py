@@ -360,6 +360,11 @@ check("the release remote gate is fail-closed rather than advisory",
       "release rejected: remote synchronization failed" in release_source)
 check("detached release gates retain the canonical rollback root",
       'export FARM_PROJECT_ROOT="$DEPLOY_PROJECT"' in release_source)
+check("release metadata and canary retain the complete source range",
+      'SOURCE_COMMIT' in release_source
+      and 'BASE_COMMIT' in release_source
+      and 'FARM_CANARY_BASE_COMMIT' in release_source
+      and '"$TARGET/SOURCE_COMMIT"' in release_source)
 
 
 # -- remote publication ------------------------------------------------------
@@ -500,11 +505,15 @@ def write_runs(rows):
 # Six healthy runs at ~100/min, then the flip.
 base = [{"run": n, "produce_per_min": 100.0, "collected": 10} for n in range(1, 7)]
 write_runs(base)
+with open(hist, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps({"event": "armed", "revision": "revA", "commit": "a" * 40}) + "\n")
 
 check("no canary is armed initially", canary.active(store) is None)
-armed = canary.arm("revB", "revA", reason="test", order_id="o1",
+armed = canary.arm("revB", "revA", reason="test", order_id="o1", commit="b" * 40,
                    store=store, history=hist, run_history=runs)
 check("arming records the previous revision", armed["previous"] == "revA")
+check("arming derives the complete candidate range base from release history",
+      armed.get("base_commit") == "a" * 40, str(armed))
 check("arming captures a baseline rate", abs(armed["baseline_rate"] - 100.0) < 0.01, str(armed))
 check("arming records the flip point", armed["armed_at_run"] == 6)
 check("the canary is now active", canary.active(store) is not None)
@@ -848,16 +857,24 @@ section("a canary inverse commit is pushed without delaying runtime rollback")
 
 inverse_store = os.path.join(can, "inverse-canary.json")
 rejected_sha = "c" * 40
+base_sha = "b" * 40
 inverse_sha = "d" * 40
 with open(inverse_store, "w") as handle:
-    json.dump({"commit": rejected_sha, "revision": "revB", "previous": "revA"}, handle)
+    json.dump({"commit": rejected_sha, "base_commit": base_sha,
+               "revision": "revB", "previous": "revA"}, handle)
 saved_available = vcs.available
-saved_revert_commit = vcs.revert_commit
+saved_revert_range = vcs.revert_range
 saved_push_main = vcs.push_main
 push_args = {}
+range_args = {}
 try:
     vcs.available = lambda: True
-    vcs.revert_commit = lambda *a, **k: inverse_sha
+
+    def _revert_range(base, sha, message=None):
+        range_args.update({"base": base, "sha": sha, "message": message})
+        return inverse_sha
+
+    vcs.revert_range = _revert_range
 
     def _push_inverse(sha, **kwargs):
         push_args.update({"sha": sha, **kwargs})
@@ -867,11 +884,14 @@ try:
     inverse_result = canary.record_inverse_commit(inverse_store)
 finally:
     vcs.available = saved_available
-    vcs.revert_commit = saved_revert_commit
+    vcs.revert_range = saved_revert_range
     vcs.push_main = saved_push_main
 
 check("the inverse commit is retained in rollback bookkeeping",
       inverse_result.get("commit") == inverse_sha, str(inverse_result))
+check("source rollback covers the complete release candidate range",
+      range_args.get("base") == base_sha and range_args.get("sha") == rejected_sha,
+      str(range_args))
 check("the inverse commit is pushed to origin/main",
       inverse_result.get("pushed") is True and inverse_result.get("remote") == "origin/main",
       str(inverse_result))
@@ -883,7 +903,7 @@ check("rollback push leases against the rejected remote commit",
 
 try:
     vcs.available = lambda: True
-    vcs.revert_commit = lambda *a, **k: inverse_sha
+    vcs.revert_range = lambda *a, **k: inverse_sha
 
     def _fail_inverse_push(*args, **kwargs):
         raise vcs.GitError("SSH unavailable")
@@ -892,7 +912,7 @@ try:
     failed_inverse = canary.record_inverse_commit(inverse_store)
 finally:
     vcs.available = saved_available
-    vcs.revert_commit = saved_revert_commit
+    vcs.revert_range = saved_revert_range
     vcs.push_main = saved_push_main
 check("a rollback push failure remains explicit without erasing the local inverse",
       failed_inverse.get("commit") == inverse_sha

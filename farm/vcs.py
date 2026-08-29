@@ -268,7 +268,9 @@ def sync_live_tree(paths: List[str]) -> List[str]:
     """
     updated = []
     for path in paths:
-        if _run(["checkout", MAIN, "--", path], check=False).returncode == 0:
+        exists = _run(["cat-file", "-e", "%s:%s" % (MAIN, path)], check=False).returncode == 0
+        command = ["checkout", MAIN, "--", path] if exists else ["rm", "-f", "--", path]
+        if _run(command, check=False).returncode == 0:
             updated.append(path)
     return updated
 
@@ -451,30 +453,50 @@ def tag_release(revision: str, sha: Optional[str] = None) -> Optional[str]:
         return None
 
 
-def revert_commit(sha: str, message: Optional[str] = None) -> Optional[str]:
-    """Record an inverse commit on main for a change the canary rejected.
+def revert_range(
+    base_exclusive: str,
+    sha: str,
+    message: Optional[str] = None,
+) -> Optional[str]:
+    """Record one inverse commit for every candidate commit after the live base.
 
-    This complements the symlink revert rather than replacing it. The symlink flip
-    is what makes the farm healthy again in seconds; this is what stops the rejected
-    change from being silently re-published by the next release, and what leaves a
-    reviewable record that it was tried and rejected.
-
-    The inverse is authored in a temporary worktree, so no half-written revert is
-    visible. After main moves, only clean paths touched by the inverse are synchronized
-    into the canonical tree; concurrent operator edits are never overwritten.
+    A release may contain several pushed commits. Reverting only its final SHA left
+    earlier candidate commits on ``main`` even though the runtime pointer rolled all
+    the way back. The next release could then silently republish rejected code. This
+    applies the entire ``base..sha`` range, newest first, in an isolated worktree and
+    advances main once.
     """
     dirty_before = set(dirty_paths(include_untracked=True))
     path = tempfile.mkdtemp(prefix="revert-wt-")
     os.rmdir(path)
-    branch = "revert/" + short(sha)
+    branch = "revert/%s-range" % short(sha)
     try:
+        if base_exclusive:
+            ancestor = _run(
+                ["merge-base", "--is-ancestor", base_exclusive, sha], check=False
+            )
+            if ancestor.returncode != 0:
+                return None
+            commits = [
+                value for value in _run(
+                    ["rev-list", "%s..%s" % (base_exclusive, sha)]
+                ).stdout.splitlines() if value
+            ]
+        else:
+            commits = [sha]
+        if not commits:
+            return None
         _run(["worktree", "add", "--quiet", "-B", branch, path, MAIN])
-        proc = _run(["revert", "--no-edit", sha], cwd=path, check=False)
+        proc = _run(["revert", "--no-commit"] + commits, cwd=path, check=False)
         if proc.returncode != 0:
             _run(["revert", "--abort"], cwd=path, check=False)
             return None
-        if message:
-            _run(["commit", "-q", "--amend", "-m", message], cwd=path)
+        if not _run(["diff", "--cached", "--name-only"], cwd=path).stdout.strip():
+            return None
+        _run([
+            "commit", "-q", "-m",
+            message or "Revert rejected release candidate %s" % short(sha),
+        ], cwd=path)
         reverted = _run(["rev-parse", "HEAD"], cwd=path).stdout.strip()
         main_sha = _run(["rev-parse", MAIN]).stdout.strip()
         changed = _run(["diff", "--name-only", main_sha, reverted], cwd=path).stdout.split()
@@ -490,6 +512,11 @@ def revert_commit(sha: str, message: Optional[str] = None) -> Optional[str]:
             shutil.rmtree(path, ignore_errors=True)
         _run(["worktree", "prune"], check=False)
         _run(["branch", "-D", branch], check=False)
+
+
+def revert_commit(sha: str, message: Optional[str] = None) -> Optional[str]:
+    """Backward-compatible one-commit inverse."""
+    return revert_range("", sha, message)
 
 
 def recent(limit: int = 12) -> List[Dict[str, str]]:
