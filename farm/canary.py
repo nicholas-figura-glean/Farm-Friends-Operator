@@ -325,6 +325,35 @@ def _verified_progression(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]
     return None
 
 
+def _verified_capped_replacement(
+    record: Dict[str, Any], rows: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    if record.get("strategy_intent") != "capped_replacement":
+        return None
+    baseline = record.get("baseline_by_kind") or {}
+    baseline_bees = int(baseline.get("beehive") or 0)
+    expected_fingerprint = str(record.get("strategy_policy_fingerprint") or "")
+    for row in rows:
+        if row.get("strategy_policy_errors"):
+            continue
+        if expected_fingerprint and row.get("strategy_policy_fingerprint") != expected_fingerprint:
+            continue
+        capacity = int(row.get("animal_capacity") or 0)
+        animals = int(row.get("animals") or 0)
+        bees = int((row.get("by_kind") or {}).get("beehive") or 0)
+        if capacity and animals / float(capacity) >= 0.90 and bees > baseline_bees:
+            return {
+                "run": row.get("run"),
+                "baseline_beehives": baseline_bees,
+                "candidate_beehives": bees,
+                "added_beehives": bees - baseline_bees,
+                "animals": animals,
+                "capacity": capacity,
+                "strategy_policy_fingerprint": row.get("strategy_policy_fingerprint"),
+            }
+    return None
+
+
 def baseline_rate(runs: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
     """Time-weighted produce rate over the runs immediately before now."""
     rows = runs if runs is not None else _runs()
@@ -398,6 +427,7 @@ def arm(
     hypothesis_id: str = "",
     policy_id: str = "",
     expected_improvement: float = 0.0,
+    strategy_intent: str = "",
     files: Optional[List[str]] = None,
     store: str = STORE,
     history: str = HISTORY,
@@ -425,6 +455,13 @@ def arm(
     ]
     efficacy_baseline = evaluation.baseline_samples(comparable_runs)
     baseline_stall_rows = _baseline_stall_rows(comparable_runs)
+    try:
+        from . import strategy
+
+        strategy_fingerprint = strategy.status().get("fingerprint")
+    except Exception:  # noqa: BLE001
+        strategy_fingerprint = None
+    last_row = runs[-1] if runs else {}
     record = {
         "schema_version": 1,
         "status": WATCHING,
@@ -442,6 +479,9 @@ def arm(
         "hypothesis_id": hypothesis_id,
         "policy_id": policy_id,
         "expected_improvement": max(0.0, float(expected_improvement or 0.0)),
+        "strategy_intent": str(strategy_intent or "")[:80],
+        "strategy_policy_fingerprint": strategy_fingerprint,
+        "baseline_by_kind": dict(last_row.get("by_kind") or {}),
         "files": [control.normalize_path(str(path)) for path in (files or [])
                   if control.author_editable(str(path))],
         "armed_ts": _utcnow(),
@@ -616,6 +656,42 @@ def evaluate(
         )
         return verdict
 
+    replacement = _verified_capped_replacement(record, after)
+    if replacement:
+        resumed = any((_rate(row) or 0.0) > 0 for row in after)
+        verdict["capped_replacement"] = replacement
+        if not resumed:
+            if len(after) >= rules.CANARY_MAX_RUNS:
+                verdict["status"] = REGRESSED
+                verdict["reason"] = "capped replacement applied but production did not resume"
+            else:
+                verdict["reason"] = "capped replacement applied; waiting for production"
+            return verdict
+        effect = max(0.0, float(record.get("expected_improvement") or 0.0))
+        verdict["status"] = HEALTHY
+        verdict["last_run"] = int(after[-1].get("run") or 0)
+        verdict["efficacy"] = {
+            "status": evaluation.IMPROVED,
+            "accepted": True,
+            "change_class": "strategy",
+            "metric": "capped_animal_slot_output",
+            "baseline": replacement.get("baseline_beehives"),
+            "candidate": replacement.get("candidate_beehives"),
+            "effect": effect,
+            "reason": "supported capped-slot policy was applied to a live natural vacancy",
+        }
+        verdict["reason"] = (
+            "verified capped-slot strategy: beehives %d -> %d at %d/%d animals; "
+            "production resumed under the evidence-linked policy"
+            % (
+                replacement.get("baseline_beehives"),
+                replacement.get("candidate_beehives"),
+                replacement.get("animals"),
+                replacement.get("capacity"),
+            )
+        )
+        return verdict
+
     # A reliability correction armed during an intentional post-prestige rebuild
     # cannot be compared with the retired herd. Once one clean post-arm interval
     # proves production resumed, keep it live without promoting it as an efficacy
@@ -759,6 +835,10 @@ def _breakage(row: Dict[str, Any], zero_streak: Optional[int] = None) -> str:
     del zero_streak  # retained for callers that replay the historical signature
     if int(row.get("mechanic_failures") or 0) > 0:
         return "adaptive_mechanic_verification_failure"
+    if int(row.get("plot_failures") or 0) > 0:
+        return "adaptive_plot_verification_failure"
+    if row.get("strategy_policy_errors"):
+        return "adaptive_strategy_policy_invalid"
     if any(
         action.get("status") == "failed"
         for action in row.get("mechanic_actions") or []

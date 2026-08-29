@@ -129,17 +129,50 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
     except (OSError, TypeError, ValueError):
         probe_state = {}
     probe_result = probe_state.get("result") if isinstance(probe_state.get("result"), dict) else {}
-    measured_coin_rates = [
-        float(item.get("recent_units_per_purchase_coin_min"))
-        for item in species["table"]
-        if isinstance(item.get("recent_units_per_purchase_coin_min"), (int, float))
+    try:
+        dual_cap = json.loads((_state_dir() / "dual_cap_audit.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        dual_cap = {}
+    cap_animal = dual_cap.get("animal_regime") if isinstance(dual_cap.get("animal_regime"), dict) else {}
+    cap_decision = dual_cap.get("decision") if isinstance(dual_cap.get("decision"), dict) else {}
+    try:
+        crop_timer_state = json.loads((_state_dir() / "dual_cap_probe.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        crop_timer_state = {}
+    crop_timer = crop_timer_state.get("result") if isinstance(crop_timer_state.get("result"), dict) else {}
+    crop_timer_supported = bool(crop_timer.get("all_timers_supported"))
+    crop_timer_runs = [
+        int(item.get("run"))
+        for item in (crop_timer.get("observations") or {}).values()
+        if isinstance(item, dict) and isinstance(item.get("run"), int)
     ]
-    chicken_coin_rate = chicken.get("recent_units_per_purchase_coin_min")
+    crop_timer_last_run = max(crop_timer_runs, default=None)
+    try:
+        crop_score_state = json.loads((_state_dir() / "crop_score_probe.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        crop_score_state = {}
+    crop_score = crop_score_state.get("result") if isinstance(crop_score_state.get("result"), dict) else {}
+    crop_score_complete = crop_score.get("status") == "complete"
+    crop_score_supported = bool(crop_score.get("supported"))
+    capped_slot_supported = bool(
+        cap_animal.get("supported")
+        and cap_decision.get("capped_replacement_kind") == "beehive"
+        and int(cap_animal.get("windows") or 0) >= 5
+        and float(cap_animal.get("minimum_beehive_vs_chicken") or 0.0) >= 1.0
+    )
+    cap_runs = [int(value) for value in cap_animal.get("runs") or [] if isinstance(value, int)]
+    cap_last_run = max(cap_runs, default=None)
+    slot_ratio = cap_animal.get("median_beehive_vs_chicken")
+    # Growth is capital-constrained; replacement at a full cap is slot-constrained.
+    # The same measured ratio answers both once each denominator is explicit.
+    beehive_vs_chicken_per_coin = (
+        float(slot_ratio) * rules.ANIMAL_COST["chicken"] / rules.ANIMAL_COST["beehive"]
+        if isinstance(slot_ratio, (int, float)) else None
+    )
     chicken_supported = bool(
-        isinstance(chicken_coin_rate, (int, float))
-        and measured_coin_rates
-        and float(chicken_coin_rate) >= max(measured_coin_rates)
-        and probe_result.get("decision") != "promote_beehive"
+        capped_slot_supported
+        and beehive_vs_chicken_per_coin is not None
+        and beehive_vs_chicken_per_coin < 1.0
     )
     claims: List[Dict[str, Any]] = [
         _claim(
@@ -258,42 +291,146 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         ),
         _claim(
             "strategy.chicken_engine",
-            "Chicken remains the promoted adoption policy: it has the strongest recent output per purchase coin, and the run-639 bounded 1,000-beehive scale probe failed its predeclared immediate-output gate despite later steady-state ratios near 1.25x.",
+            "Chicken is the promoted capital-efficient growth kind below the cap; it is not the promoted replacement for a scarce capped slot.",
             "strategy",
             "accepted" if chicken_supported else "challenged",
-            {"metric": species["scope"], "does_not_claim": "per-farm output cap"},
-            "recent same-window output per animal and purchase coin, plus bounded scale-probe decision",
-            {"kind": "recent_species_rates_and_intervention", "cohort": species["cohort"]},
-            {"chicken_share": chicken.get("share"), "table": species["table"], "beehive_probe": probe_result},
-            ["cohort:sha256:%s" % species["cohort"]["sha256"], "experiments/species_probe.py#run=50", "experiments/beehive_probe.py#baseline_run=639"],
-            _confidence(0.9, "Chicken leads on capital efficiency; the scaled beehive cohort did not clear the conservative promotion gate because of multi-window warm-up."),
-            1,
+            {"regime": "animal utilization below capped replacement threshold", "metric": "steady-state output per purchase coin"},
+            "same-window output per animal-minute divided by purchase cost",
+            {"kind": "capped_holdout_reused_with_explicit_cost_denominator", "cohort": (dual_cap.get("cohort") or {})},
+            {
+                "beehive_vs_chicken_per_slot": slot_ratio,
+                "beehive_vs_chicken_per_coin": beehive_vs_chicken_per_coin,
+                "chicken_cost": rules.ANIMAL_COST["chicken"],
+                "beehive_cost": rules.ANIMAL_COST["beehive"],
+                "beehive_probe": probe_result,
+            },
+            [
+                "state/dual_cap_audit.json#cohort=%s" % str((dual_cap.get("cohort") or {}).get("sha256") or "missing"),
+                "state/beehive_probe.json#baseline_run=639",
+            ],
+            _confidence(0.96 if chicken_supported else 0.4, "The capped holdout measures per-slot output; applying explicit purchase costs gives the growth-phase denominator without using all-chicken share as circular evidence."),
+            min(cap_runs) if cap_runs else 1,
+            cap_last_run,
+            300,
             current_run,
-            100,
+            "A current mixed-species cohort shows another kind exceeds chicken on steady-state output per purchase coin during below-cap growth.",
+            ["policy.growth_kind", "rules.adoptable", "evidence.species"],
+            {"growth_kind": "chicken"},
+            dependencies=["objective.league_first", "objective.lifetime_produce"],
+        ),
+        _claim(
+            "strategy.capped_slot_efficiency",
+            "At or near the animal cap with at least eight wildflower patches, mature beehives outperform chickens per scarce animal slot and are the promoted natural-loss replacement.",
+            "strategy",
+            "accepted" if capped_slot_supported else "challenged",
+            {
+                "regime_started_run": cap_animal.get("regime_started_run"),
+                "capacity": cap_animal.get("capacity"),
+                "replacement_at_capacity_fraction": cap_animal.get("replacement_threshold"),
+                "minimum_wildflowers": 8,
+            },
+            "same-window collected units per animal-minute",
+            {"kind": "post-intervention capped holdout", "cohort": (dual_cap.get("cohort") or {})},
+            {
+                "windows": cap_animal.get("windows"),
+                "median_beehive_vs_chicken": slot_ratio,
+                "minimum_beehive_vs_chicken": cap_animal.get("minimum_beehive_vs_chicken"),
+            },
+            [
+                "state/dual_cap_audit.json#cohort=%s" % str((dual_cap.get("cohort") or {}).get("sha256") or "missing"),
+                "state/history.ndjson#runs=1186-1235-capped-mixed-species",
+                "state/beehive_probe.json#runs=642-644-steady-state-ratio-above-1.24",
+            ],
+            _confidence(0.98 if capped_slot_supported else 0.3, "Twenty-nine capped same-window samples independently retain a minimum 1.232x and median 1.243x mature beehive/chicken ratio."),
+            min(cap_runs) if cap_runs else None,
+            cap_last_run,
+            300,
             current_run,
-            "A bounded alternative-species probe clears its predeclared output-per-adoption gate without warm-up, feed, or transport regressions.",
-            ["policy.primary_kind", "rules.adoptable", "evidence.species"],
-            {"primary_kind": "chicken"},
+            "Five healthy capped mixed-species windows put median mature beehive/chicken ratio below 1.10 or any window below 1.0.",
+            ["policy.capped_replacement_kind", "rules.adoption_kind", "experiments.expand"],
+            {
+                "capped_replacement_kind": "beehive",
+                "replacement_at_capacity_fraction": cap_animal.get("replacement_threshold"),
+            },
             dependencies=["objective.league_first", "objective.lifetime_produce"],
         ),
         _claim(
             "mechanic.crop_timers_stalled",
-            "In the run-50 probe, wheat, corn, and pumpkin remained at 0% after 27 minutes; the result is scoped to that server regime and is overdue for revalidation.",
+            "The run-50 stalled crop timers were specific to an obsolete server regime and are falsified by the current timer intervention.",
             "mechanic",
-            "accepted",
+            "superseded" if crop_timer_supported else (
+                "accepted" if current_run is not None and current_run - 50 <= 200 else "challenged"
+            ),
             {"run": 50, "server_regime": "2026-08-20", "crops": ["wheat", "corn", "pumpkin"]},
             "reported crop growth after elapsed wall time",
             {"kind": "bounded_negative_probe", "elapsed_minutes": 27},
             {"advanced": False, "plots": 3},
             ["experiments/species_probe.py#crop-probe", "history.ndjson#run=50"],
-            _confidence(0.78, "Direct negative probe, but only one historical server regime."),
+            _confidence(0.2 if crop_timer_supported else 0.78, "A later current-regime intervention directly tests the same timers."),
             50,
             50,
             200,
             current_run,
             "Any planted food crop advances above 0% or becomes harvestable under a current bounded re-probe.",
-            ["policy.food_crops_banned", "evidence.crops"],
-            {"food_crops_banned": True},
+            ["evidence.crops"],
+            {"food_crops_banned": not crop_timer_supported},
+            superseded_by="mechanic.crop_timers_active" if crop_timer_supported else None,
+        ),
+        _claim(
+            "mechanic.crop_timers_active",
+            "Wheat, corn, and pumpkin advance and harvest inside their current declared timer windows; food crops are no longer mechanically banned.",
+            "mechanic",
+            "accepted" if crop_timer_supported else "challenged",
+            {"server_regime": "league-and-plot-cap", "crops": ["wheat", "corn", "pumpkin"]},
+            "harvested units and elapsed wall minutes per planted plot",
+            {"kind": "bounded_current_regime_intervention", "budget": crop_timer.get("budget")},
+            {
+                "all_timers_supported": crop_timer_supported,
+                "observations": crop_timer.get("observations"),
+                "best_observed_crop": crop_timer.get("best_observed_crop"),
+            },
+            [
+                "state/dual_cap_probe.json#completed-current-regime",
+                "state/tool_calls.ndjson#harvest-runs=1387,1388,1390",
+            ],
+            _confidence(0.99 if crop_timer_supported else 0.3, "Three distinct crops independently matured and harvested inside their declared timer plus bounded scheduling tolerance."),
+            min(crop_timer_runs) if crop_timer_runs else None,
+            crop_timer_last_run,
+            300,
+            current_run,
+            "Any current crop misses its declared timer plus six minutes or fails to yield.",
+            ["policy.food_crops_banned", "evidence.crops", "strategy.food_crop_engine"],
+            {"food_crops_banned": False},
+            supersedes=["mechanic.crop_timers_stalled"] if crop_timer_supported else [],
+        ),
+        _claim(
+            "strategy.food_crop_score",
+            "Food crops are active and coin-profitable, but the bounded 5,000-wheat holdout contributed zero lifetime produce beyond exactly matched animal output; plot farming is therefore disabled for the league-score objective.",
+            "strategy",
+            "accepted" if crop_score_complete and not crop_score_supported else "challenged",
+            {"server_regime": "league-and-plot-cap", "objective": "lifetime_produce", "crop": "wheat", "plots": 5000},
+            "lifetime-produce delta minus same-window collected animal units",
+            {"kind": "bounded_scaled_intervention", "budget": ((crop_score.get("planned") or {}).get("budget") or {})},
+            {
+                "lifetime_delta": crop_score.get("lifetime_delta"),
+                "animal_production_units": crop_score.get("animal_production_units"),
+                "crop_score_residual": crop_score.get("crop_score_residual"),
+                "harvested_wheat": ((crop_score.get("harvest") or {}).get("yield")),
+                "coin_profit": 10000 if crop_score_complete else None,
+            },
+            [
+                "state/crop_score_probe.json#corrected-residual=0",
+                "state/tool_calls.ndjson#runs=1391-1392-animal-collections-and-wheat-harvest",
+            ],
+            _confidence(0.99 if crop_score_complete and not crop_score_supported else 0.3, "The bounded window's lifetime delta exactly equals independently parsed animal collection units while 15,000 wheat harvests separately."),
+            int(crop_score.get("baseline_run") or 1390) if crop_score_complete else None,
+            int((crop_score.get("harvest") or {}).get("run") or 1392) if crop_score_complete else None,
+            300,
+            current_run,
+            "A replicated bounded crop cohort produces a positive lifetime residual above independently observed animal production.",
+            ["policy.food_crop_kind", "policy.food_crop_target_fraction", "cycle.plant"],
+            {"food_crop_kind": None, "food_crop_target_fraction": 0.0, "max_plant_per_cycle": 0},
+            dependencies=["objective.league_first", "objective.lifetime_produce", "mechanic.crop_timers_active"],
         ),
         _claim(
             "safety.bulk_husbandry",

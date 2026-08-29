@@ -144,6 +144,7 @@ fi
 /usr/bin/python3 deploy/test_governance.py
 /usr/bin/python3 deploy/test_safety.py
 /usr/bin/python3 deploy/test_mechanics.py
+/usr/bin/python3 deploy/test_strategy.py
 if [[ "$COMPATIBILITY_RELEASE" -eq 0 ]]; then
   /usr/bin/python3 deploy/test_evidence.py
 else
@@ -307,6 +308,7 @@ if [[ -n "$PREVIOUS" ]]; then
        FARM_CANARY_HYPOTHESIS_ID="${FARM_CANARY_HYPOTHESIS_ID:-}" \
        FARM_CANARY_POLICY_ID="${FARM_CANARY_POLICY_ID:-}" \
        FARM_CANARY_EXPECTED_IMPROVEMENT="${FARM_CANARY_EXPECTED_IMPROVEMENT:-0}" \
+       FARM_CANARY_STRATEGY_INTENT="${FARM_CANARY_STRATEGY_INTENT:-}" \
        /usr/bin/python3 - "$TARGET" "$DEPLOY_PROJECT" "$REV" "$PREVIOUS" <<'PY'
 import os
 import sys
@@ -328,6 +330,7 @@ armed = canary.arm(
     hypothesis_id=os.environ.get("FARM_CANARY_HYPOTHESIS_ID", "")[:120],
     policy_id=os.environ.get("FARM_CANARY_POLICY_ID", "")[:120],
     expected_improvement=float(os.environ.get("FARM_CANARY_EXPECTED_IMPROVEMENT", "0") or 0),
+    strategy_intent=os.environ.get("FARM_CANARY_STRATEGY_INTENT", "")[:80],
     files=canary.release_editable_diff(root, revision, previous),
     store=str(root / canary.STORE),
     history=str(root / canary.HISTORY),

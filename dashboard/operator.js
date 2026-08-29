@@ -168,6 +168,9 @@ function operatorOverview(data, autonomy, overall) {
   if (produceGain == null) produceGain = opDelta(trend, "produce");
   var herdGain = opDelta(trend, "animals");
   var adaptive = data.adaptive || {};
+  var strategyPolicy = (data.strategy || {}).effective || {};
+  var animalPolicy = strategyPolicy.animal || {};
+  var plotPolicy = strategyPolicy.plots || {};
   var adaptiveDomains = opList(adaptive.blocked_domains);
   var adaptiveLabel = adaptiveDomains.length ? "holding " + adaptiveDomains.join(" + ") : "clear";
   var deltas = [
@@ -176,6 +179,10 @@ function operatorOverview(data, autonomy, overall) {
     '<span class="delta good">Herd <b>' + esc(opSigned(herdGain)) + '</b></span>',
     '<span class="delta ' + (progression.capacity_remaining === 0 ? "watch" : "good") + '">Barn <b>'
       + (progression.capacity_remaining == null ? "—" : esc(num(progression.capacity_remaining)) + " slots open") + '</b></span>',
+    '<span class="delta good">Animal policy <b>'
+      + esc((animalPolicy.growth_kind || "chicken") + " growth · " + (animalPolicy.capped_replacement_kind || animalPolicy.growth_kind || "chicken") + " near cap") + '</b></span>',
+    '<span class="delta ' + (plotPolicy.food_crop_kind ? "watch" : "good") + '">Plot policy <b>'
+      + esc(plotPolicy.food_crop_kind ? plotPolicy.food_crop_kind + " ramp" : (plotPolicy.status || "no score crop")) + '</b></span>',
     '<span class="delta ' + (progression.prestige_available ? "watch" : "good") + '">Prestige <b>'
       + (progression.prestige_available ? "available · autonomous action queued" : (latest.prestige_count ? num(latest.prestige_count) + " verified" : "not available")) + '</b></span>',
     '<span class="delta ' + (progression.active_crisis ? "watch" : "good") + '">Crisis <b>'

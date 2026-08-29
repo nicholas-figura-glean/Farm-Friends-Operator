@@ -30,7 +30,7 @@ sys.path.insert(0, str(PROJECT))
 
 # Reuse the operator's own modules so the dashboard can never disagree with the
 # loop about knobs, cost, or which agents are supposed to exist.
-from farm import compaction, evidence, growth, heal, progress, release as release_info, rules, scheduler, tokens, topology, workorders  # noqa: E402
+from farm import compaction, evidence, growth, heal, progress, release as release_info, rules, scheduler, strategy, tokens, topology, workorders  # noqa: E402
 
 STATE = PROJECT / "state"
 HISTORY = STATE / "history.ndjson"
@@ -687,6 +687,7 @@ def snapshot() -> Dict[str, Any]:
         "pipeline": _pipeline(),
         "trace": _trace(),
         "growth": _growth_summary(),
+        "strategy": strategy.status(),
         "recovery_watch": _json_object(STATE / "recovery_watch.json"),
         "cost": _cost_detail(history),
         "signals": _signals(latest, previous),

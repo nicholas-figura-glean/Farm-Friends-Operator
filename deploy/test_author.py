@@ -60,6 +60,10 @@ check("literal capability policies are author-editable",
       author_agent.editable("experiments/capability_policies.py") is None)
 check("the capability executor is protected",
       author_agent.editable("farm/mechanics.py") is not None)
+check("literal strategy policy is author-editable",
+      author_agent.editable("experiments/strategy_policy.py") is None)
+check("strategy policy loader is protected",
+      author_agent.editable("farm/strategy.py") is not None)
 check("run.py is protected orchestration", author_agent.editable("run.py") is not None)
 check("monitor.py remains repairable behind independent gates",
       author_agent.editable("monitor.py") is None)
@@ -76,6 +80,9 @@ check("the release script cannot be edited", author_agent.editable("deploy/relea
 check("rules.py (all budgets) cannot be edited", author_agent.editable("farm/rules.py") is not None)
 check("mechanics regression gate is mandatory for autonomous patches",
       any(name == "mechanics" and command[-1] == "deploy/test_mechanics.py"
+          for name, command in author_agent.GATES))
+check("dual-cap strategy gate is mandatory for autonomous patches",
+      any(name == "strategy" and command[-1] == "deploy/test_strategy.py"
           for name, command in author_agent.GATES))
 check("path traversal is refused", author_agent.editable("../../etc/passwd") is not None)
 check("absolute paths are refused", author_agent.editable("/etc/hosts") is not None)
@@ -365,6 +372,8 @@ check("release metadata and canary retain the complete source range",
       and 'BASE_COMMIT' in release_source
       and 'FARM_CANARY_BASE_COMMIT' in release_source
       and '"$TARGET/SOURCE_COMMIT"' in release_source)
+check("release canary can verify a named evidence-backed strategy action",
+      "FARM_CANARY_STRATEGY_INTENT" in release_source and "strategy_intent=" in release_source)
 
 
 # -- remote publication ------------------------------------------------------

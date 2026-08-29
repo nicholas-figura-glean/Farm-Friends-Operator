@@ -45,6 +45,7 @@ from farm import (  # noqa: E402
     llm,
     mechanics,
     policy,
+    strategy,
     probes,
     progress,
     provenance,
@@ -860,7 +861,10 @@ def do_capabilities_status() -> int:
     """Show executable adaptive mechanics and their validation evidence."""
     import json
 
-    print(json.dumps(mechanics.status(), indent=2, sort_keys=True, allow_nan=False))
+    print(json.dumps(
+        {"mechanics": mechanics.status(), "strategy": strategy.status()},
+        indent=2, sort_keys=True, allow_nan=False,
+    ))
     return 0
 
 

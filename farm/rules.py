@@ -24,8 +24,24 @@ ITEM_VALUE = {
 FEED_COST = 1
 
 # --- engine choice (settled by large-sample measurement) --------------------
-PRIMARY_KIND = "chicken"
+PRIMARY_KIND = "chicken"  # capital-efficient growth phase fallback
+CAPPED_REPLACEMENT_KIND = "beehive"
+CAPPED_REPLACEMENT_THRESHOLD = 0.90
 MEASURED_UNITS_PER_COIN_TICK = {"chicken": 0.0895, "beehive": 0.0235, "pig": 0.0210}
+
+
+def adoption_kind(
+    animal_count: int,
+    animal_capacity: Optional[int] = None,
+    crop_counts: Optional[Dict[str, int]] = None,
+) -> str:
+    """Evidence-linked growth kind for the current capacity regime."""
+    try:
+        from . import strategy
+
+        return strategy.animal_kind(animal_count, animal_capacity, crop_counts)
+    except Exception:  # noqa: BLE001 - protected safe fallback
+        return PRIMARY_KIND
 
 # Adoption is restricted to chickens by comparative economics, not by the old
 # per-farm-cap hypothesis. The run-50 mixed-species probe showed alternatives
@@ -36,11 +52,9 @@ MEASURED_UNITS_PER_COIN_TICK = {"chicken": 0.0895, "beehive": 0.0235, "pig": 0.0
 # animal added past 8,000 produces nothing.
 ADOPTABLE_KINDS = ("chicken",)   # and only while growth_verdict() says it pays
 
-# Crops were banned on prompt-era reasoning (worse units/coin than chickens).
-# Also tested at run 50: one wheat, one corn and one pumpkin plot planted. 27
-# minutes later all three still read "0% grown, about 15/20/30 min left" - the
-# timers do not advance, so a plot is a coin sink that never yields produce.
-# plant() does create unlimited extra plots, so this would have scaled badly.
+# Run-50 crop timers were a server-regime artifact. The current bounded timer
+# probe (runs 1387/1388/1390) harvested wheat/corn/pumpkin inside their declared
+# windows; plot strategy remains separately gated on the scaled score holdout.
 
 # --- husbandry --------------------------------------------------------------
 # REVERSED after measurement. The reasoning that produced the cooldown was that
@@ -244,7 +258,7 @@ FEED_TRADE_MARKUP = 2
 TRADE_MIN_SURPLUS = 1
 
 # --- prohibitions -----------------------------------------------------------
-FOOD_CROPS_BANNED = True
+FOOD_CROPS_BANNED = False
 NEVER_SELL = ("feed",)
 THREAT_SHARE = 0.50  # rival units/tick at or above this share of ours escalates
 
@@ -568,25 +582,37 @@ def expansion_plan(
     committed_feed: int,
     cap: int = None,
     animal_capacity: Optional[int] = None,
-) -> Dict[str, int]:
-    """Jointly solve feed top-up and chicken count.
+    crop_counts: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Jointly solve feed top-up and evidence-selected animal count.
 
-    Each new chicken consumes animal cost plus its feed reserve. Expansion also
+    Each new animal consumes its purchase cost plus its feed reserve. Expansion also
     preserves RISK_COIN_RESERVE for automatic vet and repair bills.
     `cap` lets the supervisor throttle growth without editing strategy;
     `animal_capacity` is the authoritative current league ceiling.
     """
-    cost = ANIMAL_COST[PRIMARY_KIND]
+    kind = adoption_kind(animal_count, animal_capacity, crop_counts)
+    cost = ANIMAL_COST[kind]
     spendable = max(0, int(coins) - RISK_COIN_RESERVE)
     limit = MAX_ADOPTIONS_PER_RUN if cap is None else max(0, min(int(cap), MAX_ADOPTIONS_PER_RUN))
     if isinstance(animal_capacity, int):
         limit = min(limit, max(0, animal_capacity - int(animal_count)))
-    best = {"adopt": 0, "buy_feed": 0, "cash_reserve": RISK_COIN_RESERVE}
+    best: Dict[str, Any] = {
+        "adopt": 0,
+        "buy_feed": 0,
+        "cash_reserve": RISK_COIN_RESERVE,
+        "kind": kind,
+    }
     for n in range(min(limit, spendable // cost), -1, -1):
         target = feed_reserve_target(animal_count + n, committed_feed)
         need_feed = max(0, target - feed)
         if need_feed * FEED_COST + n * cost <= spendable:
-            best = {"adopt": n, "buy_feed": need_feed, "cash_reserve": RISK_COIN_RESERVE}
+            best = {
+                "adopt": n,
+                "buy_feed": need_feed,
+                "cash_reserve": RISK_COIN_RESERVE,
+                "kind": kind,
+            }
             break
     return best
 
@@ -1201,7 +1227,12 @@ def herd_to_out_rate(rival_rate: float, our_yield: float) -> int:
     return int(rival_rate / our_yield)
 
 
-def affordable_adoptions(coins: int, herd: int, feed_on_hand: int = 0) -> int:
+def affordable_adoptions(
+    coins: int,
+    herd: int,
+    feed_on_hand: int = 0,
+    kind: Optional[str] = None,
+) -> int:
     """How many animals we can adopt and still keep the whole herd fed.
 
     Every adopted animal costs its price now, plus a feed reserve for itself:
@@ -1230,7 +1261,7 @@ def affordable_adoptions(coins: int, herd: int, feed_on_hand: int = 0) -> int:
     hours without ever starving. The old floor capped the herd at ~64,570, which
     the same simulation shows never wins at all.
     """
-    cost = ANIMAL_COST[PRIMARY_KIND]
+    cost = ANIMAL_COST.get(kind or PRIMARY_KIND, ANIMAL_COST[PRIMARY_KIND])
     per_animal = cost + FEED_PER_ANIMAL_RESERVE * FEED_COST
     shortfall = max(0, FEED_PER_ANIMAL_RESERVE * int(herd or 0) - int(feed_on_hand or 0))
     spendable = int(coins or 0) - shortfall * FEED_COST - RISK_COIN_RESERVE

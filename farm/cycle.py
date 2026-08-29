@@ -34,6 +34,7 @@ from . import (
     progress,
     questions,
     rules,
+    strategy,
 )
 from .mcp import Client, McpError, ToolError
 
@@ -255,12 +256,15 @@ class Cycle(object):
             "sold": {},
             "feed_bought": 0,
             "adopted": 0,
+            "adopt_kind": None,
             "adopt_requested": 0,
             "adopt_stopped": "none",
             "adopt_failures": 0,
             "collect_passes": 1,
             "fed": False,
             "harvested": False,
+            "flowers_planted": 0,
+            "plot_failures": 0,
             "verified": False,
             "trades_sent": 0,
             "trades_accepted": 0,
@@ -278,6 +282,8 @@ class Cycle(object):
             "crises_resolved": 0,
             "progression_pending": False,
             "capability_policy_errors": [],
+            "strategy_policy_errors": [],
+            "strategy_policy_fingerprint": None,
             "concurrent_expansion": False,
         }
         self.notes: List[str] = []
@@ -778,6 +784,63 @@ class Cycle(object):
         self.actions["progression_pending"] = bool(farm.prestige_available)
         return farm
 
+    def ensure_flower_bonus(self, farm: parse.Farm) -> parse.Farm:
+        """Restore only the measured whole-farm wildflower bonus floor."""
+        loaded = strategy.load()
+        if loaded.get("errors"):
+            self.actions["plot_failures"] += 1
+            self.notes.append(
+                "strategy policy invalid; flower maintenance held: %s"
+                % "; ".join(loaded.get("errors")[:2])
+            )
+            return farm
+        want = strategy.flower_plan(farm, loaded)
+        if want <= 0:
+            return farm
+        if farm.crisis:
+            self.notes_soft.append(
+                "flower maintenance held during active %s" % farm.crisis.kind
+            )
+            return farm
+        cost = want * 3
+        if self.coins - cost < rules.RISK_COIN_RESERVE:
+            self.notes_soft.append("flower maintenance held by coin reserve")
+            return farm
+        with mechanics.exclusive_expansion_lock() as acquired:
+            if not acquired:
+                self.notes_soft.append("flower maintenance deferred behind expansion lock")
+                return farm
+            before = int(farm.counts_by_crop.get("wildflowers") or 0)
+            _intent("wildflower_floor_start", before=before, planned=want)
+            errors: List[str] = []
+            for _ in range(want):
+                try:
+                    self.c.call("plant", kind="wildflowers", _transport_retries=1)
+                except (ToolError, McpError) as exc:
+                    errors.append(str(exc)[:160])
+                    break
+            try:
+                after = self.read_state("post_wildflower_floor")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc)[:160])
+                after = farm
+            planted = max(0, int(after.counts_by_crop.get("wildflowers") or 0) - before)
+            self.actions["flowers_planted"] += planted
+            if planted < want:
+                self.actions["plot_failures"] += 1
+                self.notes.append(
+                    "wildflower floor planted %d/%d%s"
+                    % (planted, want, ": %s" % errors[0] if errors else "")
+                )
+            _intent(
+                "wildflower_floor_done",
+                before=before,
+                planned=want,
+                planted=planted,
+                errors=errors,
+            )
+            return after
+
     def handle_incoming_trades(self, farm: parse.Farm) -> None:
         blocked_coin_offers = 0
         # Evaluate a batch against running balances. Otherwise two offers can
@@ -885,8 +948,8 @@ class Cycle(object):
         self.actions["feed_bought"] += int(result["qty"])
         self.coins = int(result["coins_after"])
 
-    def adopt_chickens(self, n: int, deadline: float) -> None:
-        """Adopt until the plan is met, the clock runs out, or the server balks.
+    def adopt_chickens(self, n: int, deadline: float, kind: Optional[str] = None) -> None:
+        """Adopt the evidence-selected kind until plan, clock, or server stop.
 
         Parallel above a threshold because adoptions per run grow with revenue.
         Total pressure is bounded by the global rate limiter, not by the worker
@@ -894,8 +957,18 @@ class Cycle(object):
         """
         if n <= 0:
             return
+        selected_kind = str(kind or rules.PRIMARY_KIND)
+        if selected_kind not in rules.ANIMAL_COST:
+            raise ValueError("unsupported adoption kind %s" % selected_kind)
+        self.actions["adopt_kind"] = selected_kind
         workers = 1 if n < rules.ADOPT_PARALLEL_THRESHOLD else rules.adopt_worker_count(self.knobs)
-        _intent("adopt_batch_start", count=n, workers=workers, rate=mcp.LIMITER.rate)
+        _intent(
+            "adopt_batch_start",
+            count=n,
+            kind=selected_kind,
+            workers=workers,
+            rate=mcp.LIMITER.rate,
+        )
 
         state = {
             "claimed": 0,
@@ -931,7 +1004,7 @@ class Cycle(object):
                 started = time.time()
                 try:
                     result = parse.parse_adopt(
-                        client.call("adopt_animal", kind=rules.PRIMARY_KIND)
+                        client.call("adopt_animal", kind=selected_kind)
                     )
                 except (ToolError, McpError, parse.ParseDrift) as exc:
                     message = str(exc)
@@ -1007,6 +1080,7 @@ class Cycle(object):
         _intent(
             "adopt_batch_done",
             requested=n,
+            kind=selected_kind,
             adopted=state["done"],
             stopped=stopped,
             rate=round(rate, 2),
@@ -1213,6 +1287,14 @@ class Cycle(object):
         with self._step("tools") as step:
             tools = self.c.tool_names()
             step["count"] = len(tools)
+        strategy_state = strategy.load()
+        self.actions["strategy_policy_errors"] = list(strategy_state.get("errors") or [])
+        self.actions["strategy_policy_fingerprint"] = strategy_state.get("fingerprint")
+        if self.actions["strategy_policy_errors"]:
+            self.notes.append(
+                "strategy policy invalid; safe defaults active: %s"
+                % "; ".join(self.actions["strategy_policy_errors"][:2])
+            )
 
         previous_ts = parse_ts((self.prev or {}).get("ts"))
         gap_minutes = (
@@ -1240,6 +1322,7 @@ class Cycle(object):
                 state.committed_feed,
                 cap=decision["cap"],
                 animal_capacity=state.capacity,
+                crop_counts=state.counts_by_crop,
             )
             mechanic_preview = mechanics.next_decision(
                 state, tools, run=run_no, attempted={}
@@ -1340,6 +1423,11 @@ class Cycle(object):
             if refreshed is not None:
                 board = refreshed
 
+        with self._step("plots") as step:
+            state = self.ensure_flower_bonus(state)
+            step["flowers_planted"] = self.actions["flowers_planted"]
+            step["food_crop_policy"] = strategy.plot_policy().get("status")
+
         progression_pending = bool(self.actions["progression_pending"])
         if progression_pending and state.incoming:
             self._skip("trades", "additional prestige levels pending; preserving state")
@@ -1377,6 +1465,7 @@ class Cycle(object):
                 state.committed_feed,
                 cap=decision["cap"],
                 animal_capacity=state.capacity,
+                crop_counts=state.counts_by_crop,
             )
             if progression_pending and plan["adopt"] > 0:
                 plan["adopt_before_progression_hold"] = plan["adopt"]
@@ -1400,7 +1489,8 @@ class Cycle(object):
             with mechanics.exclusive_expansion_lock() as owns_growth:
                 if owns_growth:
                     with self._step("adopt") as step:
-                        self.adopt_chickens(plan["adopt"], deadline)
+                        self.adopt_chickens(plan["adopt"], deadline, kind=plan.get("kind"))
+                        step["kind"] = self.actions["adopt_kind"]
                         step["adopted"] = self.actions["adopted"]
                         step["requested"] = self.actions["adopt_requested"]
                         step["stopped"] = self.actions["adopt_stopped"]
@@ -1593,6 +1683,7 @@ class Cycle(object):
             ),
             "feed_bought": self.actions["feed_bought"],
             "adopted": self.actions["adopted"],
+            "adopt_kind": self.actions["adopt_kind"],
             "adopt_requested": self.actions["adopt_requested"],
             "adopt_stopped": self.actions["adopt_stopped"],
             "adopt_failures": self.actions["adopt_failures"],
@@ -1609,15 +1700,22 @@ class Cycle(object):
             "crises_resolved": self.actions["crises_resolved"],
             "progression_pending": self.actions["progression_pending"],
             "capability_policy_errors": self.actions["capability_policy_errors"],
+            "strategy_policy_errors": self.actions["strategy_policy_errors"],
+            "strategy_policy_fingerprint": self.actions["strategy_policy_fingerprint"],
             "concurrent_expansion": self.actions["concurrent_expansion"],
             "league": final.league or (me.league if me else None),
             "league_level": final.league_level,
             "animal_capacity": final.capacity or (me.capacity if me else None),
+            "plots": final.plot_count,
+            "plot_counts": final.counts_by_crop,
+            "food_crop_count": final.food_crop_count,
             "plot_capacity": final.plot_capacity,
             "prestige_available": final.prestige_available,
             "next_level_produce": final.next_level_produce,
             "active_crisis": mechanics.farm_snapshot(final).get("crisis_kind"),
             "harvested": self.actions["harvested"],
+            "flowers_planted": self.actions["flowers_planted"],
+            "plot_failures": self.actions["plot_failures"],
             "trades_out": len([t for t in final.trades if t.outgoing]),
             "trades_in": len([t for t in final.trades if not t.outgoing]),
             "trades_sent": self.actions["trades_sent"],

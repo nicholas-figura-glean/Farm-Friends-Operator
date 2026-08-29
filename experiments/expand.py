@@ -64,9 +64,14 @@ def _arm_watchdog(seconds: int) -> None:
     signal.alarm(seconds)
 
 
-def affordable(coins: int, herd: int, feed_on_hand: int = 0) -> int:
-    """How many animals we can adopt and still preserve feed/cash reserves."""
-    return rules.affordable_adoptions(coins, herd, feed_on_hand)
+def affordable(
+    coins: int,
+    herd: int,
+    feed_on_hand: int = 0,
+    kind: str = rules.PRIMARY_KIND,
+) -> int:
+    """How many selected animals preserve feed/cash reserves."""
+    return rules.affordable_adoptions(coins, herd, feed_on_hand, kind=kind)
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -240,11 +245,13 @@ def main() -> int:
     _arm_watchdog(int(args.max_seconds) + 20)
 
     parameters = runtime_policy.get("parameters") or {}
-    primary_kind = str(parameters.get("primary_kind") or rules.PRIMARY_KIND)
     call_ceiling = float(parameters.get("max_calls_per_second") or rules.MAX_CALLS_PER_SECOND)
     mcp.LIMITER.set_rate(min(args.rate, call_ceiling))
     client = Client()
     farm = parse.parse_farm(client.call("list_farm"))
+    primary_kind = rules.adoption_kind(
+        farm.animal_count, farm.capacity, farm.counts_by_crop
+    )
 
     # Progression owns the herd reset. Continuing to adopt here caused 1,122
     # guaranteed barn-full errors while prestige was visibly available.
@@ -280,7 +287,9 @@ def main() -> int:
 
     target = bounded_target(farm, args.target)
     room = max(0, target - farm.animal_count)
-    can_afford = affordable(farm.coins, farm.animal_count, farm.feed)
+    can_afford = affordable(
+        farm.coins, farm.animal_count, farm.feed, kind=primary_kind
+    )
     want = min(room, can_afford, MAX_BULK_ADOPT)
 
     print("herd=%d/%s coins=%d feed=%d" % (

@@ -59,6 +59,20 @@ coin fractions, and incomplete outcome checks. The cycle coordinates these actio
 against the expansion lock and treats a failed post-state invariant as decisive
 canary breakage.
 
+`experiments/strategy_policy.py` is a second literal-only seam for denominator
+changes inside known mechanics. It separates below-cap growth kind, near-cap
+replacement kind, flower floor, and food-crop target. `farm/strategy.py` verifies
+contract enums/fingerprints and durable result nodes before exposing those values;
+invalid or stale evidence falls back to chicken growth and no crops.
+
+The dual-cap audit deliberately keeps unlike resources separate. Twenty-nine
+capped mixed-species windows support beehive replacement at >=90% animal capacity
+(median 1.243x, minimum 1.232x chicken output per slot), while chicken remains more
+capital-efficient below cap. Current crop timers work, but a 5,000-wheat holdout
+produced zero lifetime-score residual beyond exactly matched animal output, so food
+crops remain disabled for the league objective and only eight wildflowers are
+maintained for the beehive bonus.
+
 The same classifier now drives both contract and research routing:
 
 - direct server mechanism -> implementation policy order;

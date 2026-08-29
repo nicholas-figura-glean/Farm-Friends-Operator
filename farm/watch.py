@@ -47,8 +47,15 @@ def evaluate(
             "CAPABILITY POLICY INVALID: %s"
             % "; ".join(str(value) for value in row.get("capability_policy_errors")[:3])
         )
+    if row.get("strategy_policy_errors"):
+        out.append(
+            "STRATEGY POLICY INVALID: %s"
+            % "; ".join(str(value) for value in row.get("strategy_policy_errors")[:3])
+        )
     if int(row.get("mechanic_failures") or 0) > 0:
         out.append("ADAPTIVE MECHANIC FAILED VERIFICATION")
+    if int(row.get("plot_failures") or 0) > 0:
+        out.append("ADAPTIVE PLOT ACTION FAILED VERIFICATION")
     if row.get("prestige_available"):
         acted = any(
             item.get("kind") == "progression" and item.get("status") in {"verified", "reconciled"}

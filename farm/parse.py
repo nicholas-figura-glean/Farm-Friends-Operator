@@ -159,11 +159,16 @@ class Plot:
     id: int
     crop: str
     status: str
+    count: int = 1
+    ready_count: Optional[int] = None
 
     @property
     def harvestable(self) -> bool:
+        if self.ready_count is not None:
+            return self.ready_count > 0
         low = self.status.lower()
-        return "ready" in low or "harvest" in low
+        zero_ready = re.search(r"\b0\s+ready(?:\s+to\s+harvest)?\b", low)
+        return not zero_ready and ("ready" in low or "harvestable" in low)
 
     @property
     def food_crop(self) -> bool:
@@ -230,6 +235,17 @@ class Farm:
     @property
     def capacity_fraction(self) -> Optional[float]:
         return (float(self.animal_count) / float(self.capacity)) if self.capacity else None
+
+    @property
+    def counts_by_crop(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for plot in self.plots:
+            counts[plot.crop] = counts.get(plot.crop, 0) + max(0, int(plot.count))
+        return counts
+
+    @property
+    def food_crop_count(self) -> int:
+        return sum(count for crop, count in self.counts_by_crop.items() if crop != "wildflowers")
 
     @property
     def counts_by_kind(self) -> Dict[str, int]:
@@ -392,8 +408,17 @@ def parse_farm(text: str) -> Farm:
             m = FIELD_KIND_SUMMARY_RE.match(line)
             if not m:
                 raise ParseDrift("field summary line drift: %r" % stripped[:120])
+            status = m.group("status")
+            planted = re.search(r"\b(\d+)\s+planted\b", status, re.IGNORECASE)
+            ready = re.search(r"\b(\d+)\s+ready(?:\s+to\s+harvest)?\b", status, re.IGNORECASE)
             farm.plots.append(
-                Plot(id=0, crop=m.group("crop").lower(), status=m.group("status"))
+                Plot(
+                    id=0,
+                    crop=m.group("crop").lower(),
+                    status=status,
+                    count=int(planted.group(1)) if planted else 1,
+                    ready_count=int(ready.group(1)) if ready else None,
+                )
             )
         elif section == "fields":
             m = FIELD_RE.match(line)

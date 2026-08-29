@@ -62,6 +62,8 @@ def event_signature(text: str) -> str:
         (r"\btrade\b|\boffers?\b", "trade_event"),
         (r"\bprestige\b.*\brose from\b.*\banimals retired\b|\brose from\b.*\bcoins reset\b", "progression_completed"),
         (r"\bprestige (?:is )?available\b|\bcall prestige\b", "progression_available"),
+        (r"\bbarn fire\b.*\blost\b.*\bchickens?\b|\bbarn is on fire\b", "risk:barn_fire"),
+        (r"\blocust swarm\b.*\bplots? destroyed\b", "risk:locust_swarm"),
         (r"\b(?:rustlers|crop blight|locust swarm|barn fire|wolf pack|alien invasion)\b.*\bin progress\b", "active_crisis"),
     )
     for pattern, label in routine:

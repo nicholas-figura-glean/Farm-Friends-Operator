@@ -85,7 +85,8 @@ LAYERS: List[Dict[str, str]] = [
 # module shows up as a gap to classify rather than silently landing in a default.
 MODULE_LAYER: Dict[str, str] = {
     "cycle": "play", "rules": "play", "mcp": "play", "parse": "play",
-    "mechanics": "play", "capability_policies": "play", "format_compat": "play",
+    "mechanics": "play", "capability_policies": "play", "strategy": "play",
+    "strategy_policy": "play", "dual_cap_audit": "research", "format_compat": "play",
     "planner": "play", "actions": "play", "policy": "play", "growth": "play",
     "journal": "observe", "analysis": "observe", "evidence": "observe",
     "knowledge": "observe", "ledger": "observe", "compaction": "observe",
@@ -714,7 +715,7 @@ def _ndjson(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def report(limit: int = 32) -> Dict[str, Any]:
+def report(limit: int = 24) -> Dict[str, Any]:
     """Current architecture plus bounded recent history for the dashboard.
 
     The live snapshot grows as the control plane gains safeguards, so keep enough
@@ -734,7 +735,7 @@ def report(limit: int = 32) -> Dict[str, Any]:
     return {
         "current": snap,
         "timeline": list(reversed(timeline)),
-        "events": events(),
+        "events": events(limit=40),
         "versions": len(rows),
         "live_matches_recorded": bool(rows) and rows[-1].get("signature") == snap["signature"],
     }

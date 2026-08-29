@@ -40,6 +40,7 @@ STEPS: List[Dict[str, str]] = [
     {"name": "events", "label": "Risk events", "detail": "wolves, sickness, storms, spoilage, and automatic bills"},
     {"name": "novelty", "label": "Activity sentinel", "detail": "hold affected strategy domains before acting in a new regime"},
     {"name": "mechanics", "label": "Adaptive mechanics", "detail": "contract-backed prestige and active-crisis decisions with outcome verification"},
+    {"name": "plots", "label": "Plot strategy", "detail": "maintain only evidence-backed flower/crop targets under the league plot cap"},
     {"name": "trades", "label": "Incoming trades", "detail": "adversarial value, reserve, and novelty gates"},
     {"name": "sell", "label": "Sell produce", "detail": "never sells feed"},
     {"name": "plan", "label": "Plan expansion", "detail": "joint feed + adoption solve"},

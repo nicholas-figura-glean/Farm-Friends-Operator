@@ -161,6 +161,7 @@ TRUSTED_PATHS = frozenset(
         "farm/research.py",
         "farm/rules.py",
         "farm/scheduler.py",
+        "farm/strategy.py",
         "farm/tokens.py",
         "farm/vcs.py",
         "farm/watch.py",

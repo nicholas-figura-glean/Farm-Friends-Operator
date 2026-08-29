@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import claims, mechanics, provenance, rules
+from . import claims, mechanics, provenance, rules, strategy
 
 SCHEMA_VERSION = 1
 
@@ -34,7 +34,7 @@ INVARIANTS: Dict[str, str] = {
 # Every parameter has a claim and/or invariant owner. This is itself validated.
 OWNERS: Dict[str, Dict[str, List[str]]] = {
     "primary_kind": {"claims": ["strategy.chicken_engine"], "invariants": ["bounded_mutation"]},
-    "food_crops_banned": {"claims": ["mechanic.crop_timers_stalled"], "invariants": ["bounded_mutation"]},
+    "food_crops_banned": {"claims": ["mechanic.crop_timers_active"], "invariants": ["bounded_mutation"]},
     "growth_min_marginal_gain": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
     "growth_recent_band": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
     "growth_smaller_low": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
@@ -57,6 +57,14 @@ OWNERS: Dict[str, Dict[str, List[str]]] = {
     "audit_window_runs": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["question_not_remedy"]},
     "rival_wake_min_rate": {"claims": ["objective.lifetime_produce"], "invariants": ["question_not_remedy"]},
     "capability_policy_schema": {"claims": ["objective.league_first"], "invariants": ["bounded_mutation", "strict_parsing", "explicit_promotion"]},
+    "strategy_policy_fingerprint": {"claims": ["strategy.chicken_engine", "strategy.capped_slot_efficiency"], "invariants": ["strict_parsing", "explicit_promotion"]},
+    "growth_kind": {"claims": ["strategy.chicken_engine"], "invariants": ["bounded_mutation"]},
+    "capped_replacement_kind": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
+    "replacement_at_capacity_fraction": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
+    "minimum_wildflowers": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
+    "food_crop_kind": {"claims": ["mechanic.crop_timers_active", "strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
+    "food_crop_target_fraction": {"claims": ["strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
+    "max_plant_per_cycle": {"claims": ["strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
 }
 
 REQUIRED_CLAIMS = {
@@ -64,7 +72,6 @@ REQUIRED_CLAIMS = {
     "objective.lifetime_produce",
     "mechanic.output_linear_with_herd",
     "mechanic.collection_not_score",
-    "strategy.chicken_engine",
     "safety.bulk_husbandry",
     "transport.bulk_operations_constant_time",
 }
@@ -87,6 +94,7 @@ def _utcnow() -> str:
 
 
 def parameters() -> Dict[str, Any]:
+    strategy_parameters = strategy.parameters()
     return {
         "primary_kind": rules.PRIMARY_KIND,
         "food_crops_banned": rules.FOOD_CROPS_BANNED,
@@ -112,6 +120,7 @@ def parameters() -> Dict[str, Any]:
         "audit_window_runs": getattr(rules, "AUDIT_WINDOW_RUNS", 30),
         "rival_wake_min_rate": getattr(rules, "RIVAL_WAKE_MIN_RATE", 0.5),
         "capability_policy_schema": mechanics.POLICY_SCHEMA_VERSION,
+        **strategy_parameters,
     }
 
 
@@ -141,8 +150,13 @@ def compile_snapshot(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     values = parameters()
     errors = list(claims.validate(registry))
     warnings: List[str] = []
+    required_claims = set(REQUIRED_CLAIMS)
+    if values.get("capped_replacement_kind") != values.get("growth_kind"):
+        required_claims.update({"strategy.chicken_engine", "strategy.capped_slot_efficiency"})
+    if values.get("food_crop_kind"):
+        required_claims.update({"mechanic.crop_timers_active", "strategy.food_crop_score"})
 
-    for required in sorted(REQUIRED_CLAIMS):
+    for required in sorted(required_claims):
         claim = mapping.get(required)
         if claim is None:
             errors.append("required claim missing: %s" % required)
@@ -183,7 +197,7 @@ def compile_snapshot(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         "claim_registry_version": registry.get("registry_version"),
         "claim_semantic_fingerprint": registry.get("semantic_fingerprint"),
         "claim_policy_fingerprint": registry.get("policy_fingerprint") or claims.policy_fingerprint(registry),
-        "required_claims": sorted(REQUIRED_CLAIMS),
+        "required_claims": sorted(required_claims),
         "audit": {"ok": not errors, "errors": sorted(set(errors)), "warnings": sorted(set(warnings))},
     }
     snapshot["policy_id"] = _policy_id(snapshot)

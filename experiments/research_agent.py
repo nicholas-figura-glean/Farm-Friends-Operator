@@ -53,7 +53,7 @@ sys.path.insert(0, str(PROJECT))
 
 from farm import (  # noqa: E402
     analysis, canary, claims, contract, journal, ledger, llm, mechanics, policy, provenance,
-    questions, research, rules, workorders,
+    questions, research, rules, strategy, workorders,
 )
 
 STATE = PROJECT / "state"
@@ -222,6 +222,76 @@ def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
         },
         "change_class": "research_probe",
     }
+
+
+def dual_cap_strategy_proposals() -> List[Tuple[Dict[str, Any], str]]:
+    """Bridge regime audit results into the literal strategy implementation."""
+    try:
+        audit = json.loads((STATE / "dual_cap_audit.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return []
+    current = strategy.load()
+    effective = current.get("effective") or {}
+    animal = effective.get("animal") or {}
+    plots = effective.get("plots") or {}
+    proposals: List[Tuple[Dict[str, Any], str]] = []
+    cap = audit.get("animal_regime") or {}
+    recommended = (audit.get("decision") or {}).get("capped_replacement_kind")
+    if cap.get("supported") and recommended and animal.get("capped_replacement_kind") != recommended:
+        key = "dual-cap-animal:%s:%s" % (recommended, (audit.get("cohort") or {}).get("sha256"))
+        proposals.append(({
+            "change": {
+                "id": "research-strategy-dual-cap-animal",
+                "severity": "degraded",
+                "kind": "strategy_policy",
+                "summary": "Capped slot evidence recommends %s replacements while live strategy uses %s"
+                           % (recommended, animal.get("capped_replacement_kind")),
+                "detail": {"audit": audit, "strategy_errors": current.get("errors")},
+            },
+            "intent": (
+                "Update only %s so below-cap growth retains its capital-efficient kind "
+                "and near-cap natural-loss replacement uses `%s` with the measured flower "
+                "and capacity preconditions. Pin the supported result lineage."
+                % (strategy.POLICY_RELATIVE, recommended)
+            ),
+            "acceptance": [
+                "literal strategy policy matches the supported dual-cap cohort",
+                "below-cap growth and near-cap replacement remain separate decisions",
+                "farm/strategy.py, farm/rules.py, and farm/cycle.py are unchanged by this order",
+                "strategy and full release gates pass",
+            ],
+            "files": [strategy.POLICY_RELATIVE],
+            "evidence_spec": {
+                "hypothesis": "The capped replacement kind improves output per scarce animal slot.",
+                "null_hypothesis": "The replacement kind does not clear the per-slot gate.",
+                "falsifier": audit.get("falsifier"),
+                "primary_metric": cap.get("scarce_slot_metric"),
+                "expected_improvement": 0.10,
+            },
+            "change_class": "strategy",
+        }, key))
+    crop = audit.get("plot_regime") or {}
+    if not crop.get("crop_score_supported") and plots.get("food_crop_kind") is not None:
+        key = "dual-cap-plots:disable:%s" % crop.get("crop_score_residual")
+        proposals.append(({
+            "change": {
+                "id": "research-strategy-dual-cap-plots",
+                "severity": "degraded",
+                "kind": "strategy_policy",
+                "summary": "Scaled crop holdout has no league-score residual; active crop ramp must stop",
+                "detail": {"audit": audit},
+            },
+            "intent": "Disable food-crop ramp fields in %s while retaining the eight-flower beehive floor."
+                      % strategy.POLICY_RELATIVE,
+            "acceptance": [
+                "food_crop_kind is null and target fraction is zero",
+                "falsified crop-score result lineage is retained",
+                "flower bonus maintenance remains enabled",
+            ],
+            "files": [strategy.POLICY_RELATIVE],
+            "change_class": "strategy",
+        }, key))
+    return proposals
 
 
 # -- 2 & 3. parameter sensitivity and outcome correlation --------------------
@@ -591,12 +661,22 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print("  could not open question for %s: %s" % (item["parameter"], str(exc)[:80]))
 
-    proposals: List[Dict[str, Any]] = []
+    proposals: List[Tuple[Dict[str, Any], str]] = []
 
-    # Cheapest source first: capabilities we have never tried. Directly documented
+    # A measured server-regime change outranks speculative capability work because
+    # it can invalidate the denominator of the live strategy.
+    for proposal, key in dual_cap_strategy_proposals():
+        if key not in proposed:
+            proposals.append((proposal, key))
+        if len(proposals) >= MAX_PROPOSALS_PER_PASS:
+            break
+
+    # Cheapest source next: capabilities we have never tried. Directly documented
     # progression/crisis mechanics route to the literal implementation surface;
     # uncertain tools still earn a probe first.
     for entry in capabilities:
+        if len(proposals) >= MAX_PROPOSALS_PER_PASS:
+            break
         key = "capability:%s" % entry["capability"]
         if key in proposed:
             continue

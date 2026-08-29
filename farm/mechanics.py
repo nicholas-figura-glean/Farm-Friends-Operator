@@ -48,9 +48,10 @@ PROGRESSION_VERIFY = {
     "league_level_increases", "lifetime_produce_preserved", "capacity_does_not_decrease",
 }
 CRISIS_VERIFY = {"crisis_cleared", "cost_within_declared_fraction"}
-ANIMAL_CRISES = {"wolf_pack", "wolves", "rustlers"}
+ANIMAL_CRISES = {"wolf_pack", "wolves", "rustlers", "barn_fire"}
 FIELD_CRISES = {"crop_blight", "locust_swarm"}
 INVENTORY_CRISES = {"barn_fire"}
+HIGH_IMPACT_CRISES = {"barn_fire"}
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -303,7 +304,10 @@ def _plot_fraction(farm: parse.Farm) -> float:
 def _operating_coin_floor(farm: parse.Farm) -> int:
     gap = max(0, int(farm.capacity or farm.animal_count) - farm.animal_count)
     immediate = min(gap, rules.MAX_ADOPTIONS_PER_RUN)
-    per_animal = rules.ANIMAL_COST[rules.PRIMARY_KIND] + rules.FEED_PER_ANIMAL_RESERVE
+    replacement_kind = rules.adoption_kind(
+        farm.animal_count, farm.capacity, farm.counts_by_crop
+    )
+    per_animal = rules.ANIMAL_COST[replacement_kind] + rules.FEED_PER_ANIMAL_RESERVE
     return rules.RISK_COIN_RESERVE + immediate * per_animal
 
 
@@ -315,6 +319,8 @@ def _crisis_material(farm: parse.Farm, policy: Dict[str, Any]) -> Tuple[bool, st
     if farm.prestige_available and activation.get("allow_when_progression_pending") is True:
         return True, "clear the active crisis before an already-earned prestige resets coins"
     kind = crisis.kind
+    if kind in HIGH_IMPACT_CRISES:
+        return True, "active barn fire directly destroys animals; preserve irreversible score capacity while coins remain replaceable"
     if kind in ANIMAL_CRISES or kind in {"alien_invasion", "aliens"}:
         threshold = _float(activation.get("minimum_animal_capacity_fraction"), 1.0)
         if _capacity_fraction(farm) >= threshold:

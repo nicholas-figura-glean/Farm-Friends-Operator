@@ -287,9 +287,10 @@ def research_state(limit: int = 6) -> Dict[str, Any]:
 
 def capabilities_state() -> Dict[str, Any]:
     """Validated adaptive policies and their most recent executed outcomes."""
-    from farm import compaction, mechanics
+    from farm import compaction, mechanics, strategy
 
     view = mechanics.status()
+    view["strategy"] = strategy.status()
     history = compaction.read_rows(PROJECT / "state" / "history.ndjson", limit=80)
     actions: List[Dict[str, Any]] = []
     for row in reversed(history):
@@ -582,6 +583,13 @@ def blockers(view: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
             "severity": "critical",
             "what": "adaptive capability policy failed validation",
             "why": "; ".join(str(value) for value in capability_view.get("errors")[:3]),
+        })
+    strategy_view = capability_view.get("strategy") or {}
+    if strategy_view.get("errors"):
+        out.append({
+            "severity": "critical",
+            "what": "adaptive strategy policy failed validation",
+            "why": "; ".join(str(value) for value in strategy_view.get("errors")[:3]),
         })
 
     governance_view = view.get("governance") or {}
