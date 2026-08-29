@@ -148,6 +148,22 @@ PROBES = {
         "stop_condition": "one visit_farm call against the current best rival or prior evidence exists",
         "evidence_destination": "state/peek_top_rival_probe.json and state/experiments.ndjson",
     },
+    "verify_rival_dormancy": {
+        "hypothesis_id": "hyp-1b6a1b1123efffe4",
+        "hypothesis": "best_rival_gain=0 reflects true rival inactivity, so no defensive parameter change is currently warranted.",
+        "null_hypothesis": "The probe produces no measurable improvement in max_top5_rival_gain_per_min.",
+        "falsifier": "Any top-5 rival shows positive net gain across two consecutive scoreboard samples within one cycle.",
+        "primary_metric": "max_top5_rival_gain_per_min",
+        "evidence_class": "causal_validation",
+        "question_classes": ["opportunity", "strategy_hypothesis", "threat", "rival_wake"],
+        "subject_patterns": ["scoreboard", "rival", "dormancy", "top-5"],
+        "command": ["experiments/verify_rival_dormancy_probe.py"],
+        "read_only": True,
+        "autonomous": True,
+        "budget": {"coins": 0, "calls": 2, "wall_seconds": 285},
+        "stop_condition": "two get_scoreboard samples within one cycle are compared for top-5 rival animals, coins, and produce gains",
+        "evidence_destination": "state/verify_rival_dormancy_probe.json and state/experiments.ndjson",
+    },
 }
 
 
