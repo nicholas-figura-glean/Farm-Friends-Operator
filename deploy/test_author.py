@@ -358,6 +358,8 @@ check("the canonical release path independently requires remote synchronization"
       "vcs.require_remote_sync(require_clean=True)" in release_source)
 check("the release remote gate is fail-closed rather than advisory",
       "release rejected: remote synchronization failed" in release_source)
+check("detached release gates retain the canonical rollback root",
+      'export FARM_PROJECT_ROOT="$DEPLOY_PROJECT"' in release_source)
 
 
 # -- remote publication ------------------------------------------------------
