@@ -9,7 +9,7 @@ normal variation: short intervals, growth dilution, and empty collections.
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import rules
+from . import observability, rules
 
 
 def _wall_minutes(a: Optional[str], b: Optional[str]) -> Optional[float]:
@@ -523,8 +523,10 @@ def evaluate(
         audit_rows = list(history)
         if not audit_rows or audit_rows[-1].get("run") != row.get("run"):
             audit_rows.append(row)
-        findings = rules.strategy_audit(audit_rows)
+        raw_findings = rules.strategy_audit(audit_rows)
+        findings, suppressed = observability.filter_strategy_findings(raw_findings, row)
         row["strategy_audit"] = findings
+        row["strategy_audit_suppressed"] = suppressed
         for finding in findings:
             alert = finding.get("alert")
             if alert and alert not in out:

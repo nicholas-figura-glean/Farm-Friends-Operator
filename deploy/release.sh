@@ -261,6 +261,19 @@ print("dashboard gate: %d tabs packaged, all wired" % len(buttons))
 PY
 )
 
+if [[ "${FARM_CANARY_CHANGE_CLASS:-reliability}" == "observability" ]]; then
+  ( cd "$TARGET" && FARM_PROJECT_ROOT="$DEPLOY_PROJECT" /usr/bin/python3 - "$DEPLOY_PROJECT" "$REV" "$PREVIOUS" <<'PY'
+import sys
+from farm import canary
+project, revision, previous = sys.argv[1:]
+errors = canary.observability_release_errors(project, revision, previous)
+if errors:
+    raise SystemExit("observability release touches gameplay/control judge paths: " + ", ".join(errors))
+print("observability gate: changed paths are readout-only")
+PY
+  )
+fi
+
 if [[ "$STAGE_ONLY" -eq 1 ]]; then
   echo "staged $REV at $TARGET; live pointer unchanged"
   exit 0

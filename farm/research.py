@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from . import analysis, claims, policy, questions, rules
+from . import analysis, claims, observability, policy, questions, rules
 
 SCHEMA_VERSION = 1
 
@@ -409,7 +409,8 @@ def run_audit(
         audit_history[-1] = latest_with_claims
     latest = audit_history[-1] if audit_history else {}
     reconciliation = questions.reconcile_duplicates(run=latest.get("run"))
-    findings = rules.strategy_audit(audit_history)
+    raw_findings = rules.strategy_audit(audit_history)
+    findings, suppressed = observability.filter_strategy_findings(raw_findings, latest)
     findings.extend(model_drift(audit_history))
     for claim in claims.overdue(registry):
         findings.append({
@@ -454,6 +455,7 @@ def run_audit(
         "ts": _utcnow(),
         "run": latest.get("run"),
         "findings": findings,
+        "suppressed_findings": suppressed,
         "questions": opened,
         "question_reconciliation": reconciliation,
         "semantic": audit,
