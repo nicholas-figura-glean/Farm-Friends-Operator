@@ -2774,3 +2774,39 @@ on :8766 serves them, 80 farm self-test checks green, farm code untouched.
 
 - Release candidate preserves the accepted strategy and adds evidence-attribution/self-reconciliation fixes only.
 - Complete release matrix passed before commit: runtime self-test 173; knowledge 70; governance 33; safety 51; mechanics 43; strategy 28; evidence 43; tool trace 23; topology 64; dashboard 176; recovery 12; notifications 40; degraded cycle 16; runtime compatibility 30; contract 49; contract watch 79; VCS 70; author 221 with one intentionally skipped paid gateway smoke test; dashboard agent 235; UI/game checks 69 plus game tests.
+
+## 2026-08-31T03:21:48Z - runs 1781-1800 (generated)
+
+- Rank: #1, lifetime produce 262766408 (+326710 this window)
+- Animals: 16874 (beehive 3256, chicken 13618), +-1 this window
+- Output: 0.241 units/chicken/min mean (min 0.191, max 0.608) over 20 measurable runs
+- Economy: 993130 coins revenue, 338621 spent on feed (34.1%), 0 chickens adopted of 0 planned
+- Husbandry: peak hunger 0 against threshold 6 (stop 70); feed 506235 vs reserve 506235
+- Throughput: 238 calls, 8s mean / 15s max per run, rate limit 5.0/s
+- Rivals:
+  - Neill: 41386637 lifetime (+10 this window, 0.0% of our gain)
+  - John: 27843928 lifetime (+138440 this window, 42.4% of our gain)
+  - Deep: 3235713 lifetime (+0 this window, 0.0% of our gain)
+  - Moe: 169338 lifetime (+0 this window, 0.0% of our gain)
+  - Chuck: 73 lifetime (+0 this window, 0.0% of our gain)
+  - Jason: 32 lifetime (+0 this window, 0.0% of our gain)
+  - Vijay: 19 lifetime (+0 this window, 0.0% of our gain)
+  - Guillermo G.: 7 lifetime (+0 this window, 0.0% of our gain)
+  - Matthew: 4 lifetime (+0 this window, 0.0% of our gain)
+  - Aaron: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Alexander: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Brendan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - Kannan: 0 lifetime (+0 this window, 0.0% of our gain)
+  - john: 0 lifetime (+0 this window, 0.0% of our gain)
+- Threat check: no rival above 50% of our gain
+- Alerts this window: NOVEL ACTIVITY [rival]: new players=[]; material rival changes=['John']; holding offers,trades pending evidence; animal count fell from 16875 to 16874; THREAT: John gained 18361 vs our 28508 (>= 50%); animal count fell from 16875 to 16874; animal count fell from 16875 to 16872
+- Nothing anomalous; rules unchanged.
+- Active rules: engine chicken, feed at 6, reserve 30/animal, budget 260s, call rate 5.0/s, 6 adopt workers, verify every 6 runs, food crops allowed
+
+## 2026-08-31T04:04:41Z - release verification (curated)
+
+- Source commit `8c4e4c39a0372a73005ca9fc66582566bc8fbb48` was pushed and published as immutable release `20260831T031250Z`; pointer, serving revision, and browser view all matched.
+- The ten-run reliability canary did not regress or roll back. Its production point estimate was 0.179378 per animal versus baseline 0.203608 (-11.90%), but the unweighted evidence interval [-82.96%, +49.05%] did not establish a loss, so the bounded verdict was `inconclusive` and the release remained live.
+- Structural evidence stayed clean: rank #1, latest run 1808 at 5,513 produce/min, 16,873 animals (3,267 beehives and 13,606 chickens), eight wildflowers, and no anomalies.
+- Post-release governance recorded 9 pass, 0 fail, and one warning for the genuine aged research backlog. `knowledge.policy` remained pass with policy `pol-4ffbcde210a925e1` and matching claim-policy fingerprint `03f7ec1e34a8774b`.
+- The corrected dual-cap audit remained stable at 369 qualified windows and minimum ratio 1.138317 while the two crop-freshness questions were reopened, proving the narrowed router no longer lets those questions rewrite species evidence.
