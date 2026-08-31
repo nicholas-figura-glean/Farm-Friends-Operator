@@ -163,6 +163,15 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
     cap_runs = [int(value) for value in cap_animal.get("runs") or [] if isinstance(value, int)]
     cap_last_run = max(cap_runs, default=None)
     slot_ratio = cap_animal.get("median_beehive_vs_chicken")
+    slot_minimum = cap_animal.get("minimum_beehive_vs_chicken")
+    slot_windows = int(cap_animal.get("windows") or 0)
+    slot_rationale = (
+        "%d bloom-qualified capped samples retain a minimum %.3fx and median %.3fx "
+        "mature beehive/chicken ratio."
+        % (slot_windows, float(slot_minimum), float(slot_ratio))
+        if slot_windows and isinstance(slot_minimum, (int, float)) and isinstance(slot_ratio, (int, float))
+        else "Bloom-qualified capped evidence is currently insufficient."
+    )
     # Growth is capital-constrained; replacement at a full cap is slot-constrained.
     # The same measured ratio answers both once each denominator is explicit.
     beehive_vs_chicken_per_coin = (
@@ -328,25 +337,28 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
                 "capacity": cap_animal.get("capacity"),
                 "replacement_at_capacity_fraction": cap_animal.get("replacement_threshold"),
                 "minimum_wildflowers": 8,
+                "minimum_flower_qualification_rows": (dual_cap.get("plot_regime") or {}).get(
+                    "minimum_flower_qualification_rows"
+                ),
             },
             "same-window collected units per animal-minute",
             {"kind": "post-intervention capped holdout", "cohort": (dual_cap.get("cohort") or {})},
             {
                 "windows": cap_animal.get("windows"),
                 "median_beehive_vs_chicken": slot_ratio,
-                "minimum_beehive_vs_chicken": cap_animal.get("minimum_beehive_vs_chicken"),
+                "minimum_beehive_vs_chicken": slot_minimum,
             },
             [
                 "state/dual_cap_audit.json#cohort=%s" % str((dual_cap.get("cohort") or {}).get("sha256") or "missing"),
-                "state/history.ndjson#runs=1186-1235-capped-mixed-species",
+                "state/history.ndjson#bloom-qualified-capped-mixed-species",
                 "state/beehive_probe.json#runs=642-644-steady-state-ratio-above-1.24",
             ],
-            _confidence(0.98 if capped_slot_supported else 0.3, "Twenty-nine capped same-window samples independently retain a minimum 1.232x and median 1.243x mature beehive/chicken ratio."),
+            _confidence(0.98 if capped_slot_supported else 0.3, slot_rationale),
             min(cap_runs) if cap_runs else None,
             cap_last_run,
             300,
             current_run,
-            "Five healthy capped mixed-species windows put median mature beehive/chicken ratio below 1.10 or any window below 1.0.",
+            "Five healthy, bloom-qualified capped mixed-species windows put median mature beehive/chicken ratio below 1.10 or any qualified window below 1.0.",
             ["policy.capped_replacement_kind", "rules.adoption_kind", "experiments.expand"],
             {
                 "capped_replacement_kind": "beehive",

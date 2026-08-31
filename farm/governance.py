@@ -331,9 +331,21 @@ def _trend(checks: List[Dict[str, Any]], previous: Dict[str, Any]) -> Dict[str, 
     return {"regressions": regressions, "recoveries": recoveries}
 
 
+def _policy_repair_scope(registry: Dict[str, Any], promoted: Dict[str, Any]) -> Dict[str, Any]:
+    """Identify the narrow editable evidence producer for known claim drift."""
+    mapping = {row.get("id"): row for row in registry.get("claims") or []}
+    drifted = sorted(
+        claim_id for claim_id in promoted.get("required_claims") or []
+        if (mapping.get(claim_id) or {}).get("status") != "accepted"
+    )
+    dual_cap_claims = {"strategy.chicken_engine", "strategy.capped_slot_efficiency"}
+    files = ["experiments/dual_cap_audit.py"] if drifted and set(drifted).issubset(dual_cap_claims) else []
+    return {"claims": drifted, "files": files}
+
+
 def remediate(snapshot: Dict[str, Any], checks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Apply only pre-declared, bounded recovery paths; never invent strategy."""
-    from . import canary, questions, scheduler, workorders
+    from . import canary, claims, policy, questions, scheduler, workorders
 
     by_id = {row["id"]: row for row in checks}
     actions: List[Dict[str, Any]] = []
@@ -358,6 +370,85 @@ def remediate(snapshot: Dict[str, Any], checks: List[Dict[str, Any]]) -> List[Di
             "action": "retry_compaction",
             "compacted": [row.get("ledger") for row in results if row.get("compacted")],
         })
+
+    knowledge = by_id.get("knowledge.policy") or {}
+    if knowledge.get("status") == FAIL:
+        # First reconcile persisted claims from current local evidence. This is a
+        # metadata refresh only: it cannot promote policy or change runtime rules.
+        registry = claims.refresh()
+        runtime = policy.runtime_context(registry)
+        if runtime.get("compatible"):
+            knowledge.update({
+                "status": PASS,
+                "summary": "runtime policy and claims reconciled from current evidence",
+                "evidence": {
+                    "policy_id": runtime.get("policy_id"),
+                    "claim_registry_version": runtime.get("claim_registry_version"),
+                    "errors": [],
+                },
+            })
+            actions.append({
+                "action": "refresh_claim_registry",
+                "result": "compatible",
+                "policy_id": runtime.get("policy_id"),
+            })
+        else:
+            errors = list(runtime.get("errors") or knowledge.get("evidence", {}).get("errors") or [])
+            opened = questions.open_or_update(
+                "policy_drift",
+                "POLICY DRIFT: runtime policy remains incompatible after deterministic claim refresh: %s"
+                % ("; ".join(errors[:3]) or "unknown mismatch"),
+                item={"run": snapshot.get("run"), "ts": _utcnow()},
+                subject="semantic_contract",
+                decision_bundle={
+                    "policy_id": runtime.get("promoted_policy_id"),
+                    "claim_registry_version": runtime.get("claim_registry_version"),
+                    "errors": errors,
+                },
+                evidence_refs=["governance_reviews.ndjson#run=%s" % snapshot.get("run")],
+            )
+            actions.append({
+                "action": "route_policy_review",
+                "question_id": opened["question"].get("id"),
+                "opened": bool(opened.get("opened") or opened.get("reopened")),
+            })
+            scope = _policy_repair_scope(registry, policy.load())
+            if scope["files"]:
+                order_id = "governance-policy-claims-" + "-".join(
+                    claim_id.rsplit(".", 1)[-1] for claim_id in scope["claims"]
+                )
+                submitted = workorders.submit(
+                    {
+                        "id": order_id,
+                        "severity": "breaking",
+                        "kind": "policy_claim_drift",
+                        "summary": "Promoted policy dependencies are challenged: %s"
+                        % ", ".join(scope["claims"]),
+                        "we_use_it": True,
+                        "sites": scope["files"],
+                        "detail": {"claims": scope["claims"], "errors": errors},
+                    },
+                    source="governance",
+                    intent=(
+                        "Repair the local evidence producer so its cohort matches each claim's declared "
+                        "regime and denominator. Do not edit policy, claims, runtime strategy, thresholds, "
+                        "or promotion controls; preserve fail-closed behavior if qualified evidence truly falsifies the claim."
+                    ),
+                    acceptance=[
+                        "the evidence cohort enforces the claim's declared regime and timing",
+                        "same-cycle mutations cannot contaminate the measured denominator",
+                        "a deterministic regression fixture reproduces the drift",
+                        "claim refresh restores compatibility only when decisions match the promoted policy",
+                    ],
+                    files=scope["files"],
+                    path=str(_state_dir() / "workorders.ndjson"),
+                )
+                actions.append({
+                    "action": "route_policy_repair",
+                    "order_id": order_id,
+                    "submitted": bool(submitted),
+                    "files": scope["files"],
+                })
 
     learning = by_id.get("learning.question_flow") or {}
     if learning.get("status") == FAIL:

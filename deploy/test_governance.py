@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import control, governance, questions, rules  # noqa: E402
+from farm import claims, control, governance, policy, questions, rules  # noqa: E402
 
 
 class Suite:
@@ -170,10 +170,52 @@ def main() -> int:
             actions = {row.get("action") for row in routed.get("actions") or []}
             suite.check("route_learning_review" in actions,
                         "a stalled learning loop opens a bounded strategy question", routed.get("actions"))
+            suite.check("route_policy_review" in actions,
+                        "unresolved policy drift enters the bounded research lifecycle", routed.get("actions"))
             opened = [row for row in questions.open_questions()
                       if row.get("subject") == "governance learning loop"]
             suite.check(len(opened) == 1 and opened[0]["class"] == "strategy_stale",
                         "governance remediation enters the existing probe lifecycle", opened)
+            policy_questions = [row for row in questions.open_questions()
+                                if row.get("subject") == "semantic_contract"]
+            suite.check(len(policy_questions) == 1
+                        and policy_questions[0]["class"] == "policy_drift",
+                        "policy incompatibility stays visible as a critical question", policy_questions)
+
+            scope = governance._policy_repair_scope(
+                {"claims": [
+                    {"id": "strategy.chicken_engine", "status": "challenged"},
+                    {"id": "strategy.capped_slot_efficiency", "status": "challenged"},
+                ]},
+                {"required_claims": [
+                    "strategy.chicken_engine", "strategy.capped_slot_efficiency",
+                ]},
+            )
+            suite.check(scope["files"] == ["experiments/dual_cap_audit.py"],
+                        "known dual-cap claim drift routes only to its editable evidence producer", scope)
+
+            stale_snapshot = healthy_snapshot(180)
+            stale_snapshot["policy"] = {
+                "compatible": False, "policy_id": "compiled-fixture",
+                "errors": ["claim decisions differ from promoted policy"],
+            }
+            stale_checks = governance.assess(stale_snapshot)
+            saved_refresh, saved_runtime = claims.refresh, policy.runtime_context
+            try:
+                claims.refresh = lambda: {"registry_version": 9, "claims": []}
+                policy.runtime_context = lambda registry=None: {
+                    "compatible": True, "policy_id": "pol-restored",
+                    "claim_registry_version": 9, "errors": [],
+                }
+                reconciliation = governance.remediate(stale_snapshot, stale_checks)
+            finally:
+                claims.refresh, policy.runtime_context = saved_refresh, saved_runtime
+            knowledge = next(row for row in stale_checks if row["id"] == "knowledge.policy")
+            suite.check(knowledge["status"] == governance.PASS
+                        and any(row.get("action") == "refresh_claim_registry"
+                                for row in reconciliation),
+                        "governance immediately clears drift caused only by stale persisted claims",
+                        {"check": knowledge, "actions": reconciliation})
     finally:
         os.environ.clear()
         os.environ.update(previous_env)

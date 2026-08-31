@@ -14,7 +14,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from farm import (  # noqa: E402
-    analysis, canary, compaction, control, evaluation, policy, probes,
+    analysis, canary, claims, compaction, control, evaluation, policy, probes,
     provenance, questions, workorders,
 )
 
@@ -313,6 +313,43 @@ def main() -> int:
                 stale_after = next(row for row in questions.load_all() if row["id"] == stale["id"])
                 suite.check(stale_after["status"] == "answered",
                             "a successful replay closes an unlinked strategy question", stale_after)
+
+                policy_question = questions.open_or_update(
+                    "policy_drift", "POLICY DRIFT: fixture", item={"run": 93},
+                    subject="semantic_contract",
+                )["question"]
+                saved_refresh, saved_runtime = claims.refresh, policy.runtime_context
+                try:
+                    claims.refresh = lambda: {"registry_version": 2, "claims": []}
+                    policy.runtime_context = lambda registry=None: {
+                        "compatible": False, "errors": ["fixture remains incompatible"],
+                    }
+                    probes._finish_questions(
+                        [policy_question["id"]], "unlinked", 94,
+                        {"status": "passed", "ts": "2026-08-27T00:00:00Z"},
+                    )
+                    unresolved = next(
+                        row for row in questions.load_all() if row["id"] == policy_question["id"]
+                    )
+                    suite.check(unresolved["status"] == "open"
+                                and unresolved.get("probe_result_status") == "incompatible",
+                                "a successful probe cannot hide unresolved policy drift", unresolved)
+
+                    policy.runtime_context = lambda registry=None: {
+                        "compatible": True, "errors": [], "policy_id": "pol-restored",
+                    }
+                    probes._finish_questions(
+                        [policy_question["id"]], "unlinked", 95,
+                        {"status": "passed", "ts": "2026-08-27T00:01:00Z"},
+                    )
+                    resolved = next(
+                        row for row in questions.load_all() if row["id"] == policy_question["id"]
+                    )
+                    suite.check(resolved["status"] == "answered"
+                                and resolved.get("probe_result_status") == "compatible",
+                                "policy drift closes only after the promoted fingerprint is restored", resolved)
+                finally:
+                    claims.refresh, policy.runtime_context = saved_refresh, saved_runtime
             finally:
                 probes._registry, probes._command = saved_registry, saved_command
 

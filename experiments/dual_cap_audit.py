@@ -32,6 +32,10 @@ MIN_WINDOWS = 5
 MIN_SLOT_RATIO = 1.10
 CAP_FRACTION = 0.90
 MIN_FLOWERS = 8
+# Wildflowers take ten minutes to bloom. At the normal five-minute cycle cadence,
+# three consecutive observations (the planting row plus two later rows) prove that
+# the whole-farm honey bonus was active for the measured collection interval.
+MIN_FLOWER_QUALIFY_ROWS = 3
 
 
 def utcnow() -> str:
@@ -55,8 +59,30 @@ def _ratio_rows(
     fallback_capacity: Optional[int],
     regime_start: Optional[int],
 ) -> List[Dict[str, Any]]:
+    """Return bonus-qualified, pre-mutation species-rate observations.
+
+    A cycle collects before it adopts and records the final herd afterward. Using
+    that final herd as the collection denominator made newly adopted beehives look
+    unproductive. The smaller of the previous and final species counts excludes
+    same-cycle additions while still accounting for losses.
+
+    Plot telemetry records planted flowers, not bloom state. Requiring three
+    consecutive rows at the eight-flower floor covers the declared ten-minute
+    bloom delay and prevents no-bonus intervals from falsifying a bonus-scoped
+    claim. Legacy rows without plot telemetry are intentionally not guessed into
+    the current-regime cohort.
+    """
     samples: List[Dict[str, Any]] = []
+    previous: Optional[Dict[str, Any]] = None
+    flower_streak = 0
     for row in rows:
+        plot_counts = row.get("plot_counts")
+        flowers = (
+            int(plot_counts.get("wildflowers") or 0)
+            if isinstance(plot_counts, dict) else None
+        )
+        flower_streak = flower_streak + 1 if flowers is not None and flowers >= MIN_FLOWERS else 0
+
         run = int(row.get("run") or 0)
         capacity = int(row.get("animal_capacity") or 0)
         capacity_source = "history"
@@ -64,36 +90,55 @@ def _ratio_rows(
             capacity = int(fallback_capacity)
             capacity_source = "inferred_from_current_contract_after_regime_boundary"
         animals = int(row.get("animals") or 0)
-        if not capacity or animals / float(capacity) < CAP_FRACTION:
-            continue
         by_kind = row.get("by_kind") or {}
         collected = row.get("collected") or {}
-        bees = int(by_kind.get("beehive") or 0)
-        chickens = int(by_kind.get("chicken") or 0)
+        reported_bees = int(by_kind.get("beehive") or 0)
+        reported_chickens = int(by_kind.get("chicken") or 0)
+        bees = reported_bees
+        chickens = reported_chickens
+        exposure_source = "current_state"
+        previous_by_kind = (previous or {}).get("by_kind") or {}
+        if previous_by_kind:
+            prior_bees = int(previous_by_kind.get("beehive") or reported_bees)
+            prior_chickens = int(previous_by_kind.get("chicken") or reported_chickens)
+            bees = min(reported_bees, prior_bees)
+            chickens = min(reported_chickens, prior_chickens)
+            exposure_source = "minimum_of_previous_and_final_state"
+
         honey = int(collected.get("honey") or 0)
         eggs = int(collected.get("egg") or 0)
         interval = float(row.get("interval_min") or 0.0)
-        if not (bees and chickens and honey and eggs and interval > 0):
-            continue
-        bee_rate = honey / float(bees) / interval
-        chicken_rate = eggs / float(chickens) / interval
-        if chicken_rate <= 0:
-            continue
-        samples.append({
-            "run": run,
-            "league": row.get("league"),
-            "capacity": capacity,
-            "capacity_source": capacity_source,
-            "animals": animals,
-            "beehives": bees,
-            "chickens": chickens,
-            "honey": honey,
-            "eggs": eggs,
-            "interval_min": interval,
-            "beehive_per_animal_min": bee_rate,
-            "chicken_per_animal_min": chicken_rate,
-            "ratio": bee_rate / chicken_rate,
-        })
+        eligible = bool(
+            capacity
+            and animals / float(capacity) >= CAP_FRACTION
+            and flower_streak >= MIN_FLOWER_QUALIFY_ROWS
+            and bees and chickens and honey and eggs and interval > 0
+        )
+        if eligible:
+            bee_rate = honey / float(bees) / interval
+            chicken_rate = eggs / float(chickens) / interval
+            if chicken_rate > 0:
+                samples.append({
+                    "run": run,
+                    "league": row.get("league"),
+                    "capacity": capacity,
+                    "capacity_source": capacity_source,
+                    "animals": animals,
+                    "beehives": bees,
+                    "chickens": chickens,
+                    "reported_beehives": reported_bees,
+                    "reported_chickens": reported_chickens,
+                    "exposure_source": exposure_source,
+                    "wildflowers": flowers,
+                    "flower_qualification_rows": flower_streak,
+                    "honey": honey,
+                    "eggs": eggs,
+                    "interval_min": interval,
+                    "beehive_per_animal_min": bee_rate,
+                    "chicken_per_animal_min": chicken_rate,
+                    "ratio": bee_rate / chicken_rate,
+                })
+        previous = row
     return samples
 
 
@@ -181,6 +226,7 @@ def analyze(
             ),
             "counts": current.counts_by_crop if current else {},
             "minimum_wildflowers": MIN_FLOWERS,
+            "minimum_flower_qualification_rows": MIN_FLOWER_QUALIFY_ROWS,
             "flower_bonus_satisfied": flowers >= MIN_FLOWERS,
             "food_crop_policy": crop_policy,
             "crop_score_residual": crop_result.get("crop_score_residual"),
@@ -198,8 +244,8 @@ def analyze(
             "food_crop_kind": None,
         },
         "falsifier": (
-            "Five current healthy capped mixed-species windows put mature beehive/chicken "
-            "per-slot ratio below 1.10 or any window below 1.0."
+            "Five current healthy, bloom-qualified capped mixed-species windows put mature "
+            "beehive/chicken per-slot ratio below 1.10 or any qualified window below 1.0."
         ),
     }
 

@@ -47,8 +47,8 @@ PROBES = {
     },
     "dual_cap_audit": {
         "hypothesis": "Animal and plot caps change the scarce-resource denominator: growth should optimize output per coin, while near-cap replacements optimize output per animal slot and plots are evaluated independently.",
-        "question_classes": ["model_drift", "strategy_stale", "knob_age", "idle_capital"],
-        "subject_patterns": ["chicken", "beehive", "crop", "plot", "capacity", "cap"],
+        "question_classes": ["model_drift", "policy_drift", "strategy_stale", "knob_age", "idle_capital"],
+        "subject_patterns": ["chicken", "beehive", "capacity", "cap", "semantic_contract"],
         "command": ["experiments/dual_cap_audit.py"],
         "read_only": True,
         "autonomous": True,

@@ -85,14 +85,17 @@ def main() -> int:
 
     print("\n== cap-regime audit")
     rows = [
-        {"run": 1, "animals": 100_000, "collected": {}, "by_kind": {}},
-        {"run": 2, "animals": 10_000, "collected": {}, "by_kind": {}},
+        {"run": 1, "animals": 100_000, "collected": {}, "by_kind": {},
+         "plot_counts": {"wildflowers": 8}},
+        {"run": 2, "animals": 10_000, "collected": {}, "by_kind": {},
+         "plot_counts": {"wildflowers": 8}},
     ]
     for run in range(3, 8):
         rows.append({
             "run": run,
             "animals": 9_500,
             "interval_min": 5.0,
+            "plot_counts": {"wildflowers": 8},
             "by_kind": {"beehive": 100, "chicken": 9_400},
             "collected": {"honey": 125, "egg": 9_400},
         })
@@ -108,6 +111,38 @@ def main() -> int:
     suite.check(audit["animal_regime"]["supported"]
                 and audit["decision"]["capped_replacement_kind"] == "beehive",
                 "five capped same-window samples support slot-efficient replacement", audit["animal_regime"])
+
+    conditioned = list(rows)
+    conditioned.extend([
+        {"run": 8, "animals": 9_500, "interval_min": 5.0,
+         "plot_counts": {}, "by_kind": {"beehive": 100, "chicken": 9_400},
+         "collected": {"honey": 50, "egg": 9_400}},
+        {"run": 9, "animals": 9_500, "interval_min": 5.0,
+         "plot_counts": {"wildflowers": 8}, "by_kind": {"beehive": 100, "chicken": 9_400},
+         "collected": {"honey": 50, "egg": 9_400}},
+        {"run": 10, "animals": 9_500, "interval_min": 5.0,
+         "plot_counts": {"wildflowers": 8}, "by_kind": {"beehive": 100, "chicken": 9_400},
+         "collected": {"honey": 50, "egg": 9_400}},
+        {"run": 11, "animals": 9_500, "interval_min": 5.0,
+         "plot_counts": {"wildflowers": 8}, "by_kind": {"beehive": 100, "chicken": 9_400},
+         "collected": {"honey": 125, "egg": 9_400}},
+        {"run": 12, "animals": 9_500, "interval_min": 5.0,
+         "plot_counts": {"wildflowers": 8}, "by_kind": {"beehive": 200, "chicken": 9_300},
+         "collected": {"honey": 125, "egg": 9_300}},
+    ])
+    conditioned_audit = dual_cap_audit.analyze(conditioned, fixture_farm)
+    conditioned_samples = {
+        item["run"]: item for item in conditioned_audit["cohort"]["samples"]
+    }
+    suite.check(not {8, 9, 10}.intersection(conditioned_samples)
+                and {11, 12}.issubset(conditioned_samples),
+                "pre-bloom flower rows cannot falsify the bonus-scoped cohort",
+                sorted(conditioned_samples))
+    suite.check(conditioned_samples[12]["beehives"] == 100
+                and conditioned_samples[12]["reported_beehives"] == 200
+                and conditioned_samples[12]["ratio"] > 1.1,
+                "collection denominators exclude same-cycle species additions",
+                conditioned_samples[12])
 
     print("\n== runtime planning")
     near_cap = rules.expansion_plan(
@@ -143,10 +178,16 @@ def main() -> int:
     suite.check(by_id["strategy.chicken_engine"]["status"] == "accepted"
                 and by_id["strategy.chicken_engine"]["decision"] == {"growth_kind": "chicken"},
                 "chicken claim is scoped to capital-efficient growth", by_id["strategy.chicken_engine"])
-    suite.check(by_id["strategy.capped_slot_efficiency"]["status"] == "accepted"
-                and by_id["strategy.capped_slot_efficiency"]["last_validated_run"] < by_id["objective.league_first"]["last_validated_run"],
-                "capped replacement claim uses its actual evidence run, not today's all-chicken share",
-                by_id["strategy.capped_slot_efficiency"])
+    capped_claim = by_id["strategy.capped_slot_efficiency"]
+    capped_samples = (capped_claim.get("estimator") or {}).get("cohort", {}).get("samples") or []
+    suite.check(capped_claim["status"] == "accepted"
+                and capped_samples
+                and capped_claim["last_validated_run"] == capped_samples[-1]["run"]
+                and capped_claim["value"]["minimum_beehive_vs_chicken"] >= 1.0
+                and capped_claim["scope"]["minimum_flower_qualification_rows"] == 3,
+                "capped replacement claim uses the current bloom-qualified exposure cohort",
+                {"last_validated_run": capped_claim.get("last_validated_run"),
+                 "samples": len(capped_samples), "minimum": capped_claim.get("value", {}).get("minimum_beehive_vs_chicken")})
     suite.check(by_id["mechanic.crop_timers_stalled"]["status"] == "superseded"
                 and by_id["mechanic.crop_timers_active"]["status"] == "accepted",
                 "current timer intervention supersedes the stale run-50 claim")
@@ -159,6 +200,12 @@ def main() -> int:
                 and registry.PROBES["dual_cap_audit"]["read_only"]
                 and registry.PROBES["dual_cap_audit"]["autonomous"],
                 "dual-cap audit is registered for autonomous read-only refresh")
+    dual_cap_route = registry.PROBES["dual_cap_audit"]
+    suite.check("policy_drift" in dual_cap_route["question_classes"]
+                and "semantic_contract" in dual_cap_route["subject_patterns"]
+                and not {"crop", "plot"}.intersection(dual_cap_route["subject_patterns"]),
+                "dual-cap reconciliation cannot falsely settle generic crop freshness",
+                dual_cap_route)
     suite.check("crop_timer_revalidation" in registry.PROBES
                 and not registry.PROBES["crop_timer_revalidation"]["autonomous"],
                 "mutating crop timer probe remains explicit and bounded")

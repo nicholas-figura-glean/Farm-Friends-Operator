@@ -114,9 +114,25 @@ def _finish_questions(
         refs.append(str(destination))
 
     supported = {"supported", "accepted", "passed", "falsified", "rejected"}
-    result_status = str((hypothesis_result or {}).get("status") or status)
-    settled = status == "passed" and (not hypothesis_id or result_status in supported)
+    base_result_status = str((hypothesis_result or {}).get("status") or status)
+    base_settled = status == "passed" and (not hypothesis_id or base_result_status in supported)
+    question_map = {row.get("id"): row for row in questions.load_all()}
+    policy_reconciliation: Optional[Dict[str, Any]] = None
     for question_id in question_ids:
+        question = question_map.get(question_id) or {}
+        result_status = base_result_status
+        settled = base_settled
+        # A policy audit exiting zero means only that it completed. It may not
+        # close a policy-drift question until rebuilding the claims restores the
+        # exact promoted policy fingerprint. This prevents a successful local
+        # probe from hiding an unresolved runtime incompatibility.
+        if question.get("class") == "policy_drift" and status == "passed":
+            if policy_reconciliation is None:
+                from . import claims, policy
+                registry = claims.refresh()
+                policy_reconciliation = policy.runtime_context(registry)
+            settled = bool(policy_reconciliation.get("compatible"))
+            result_status = "compatible" if settled else "incompatible"
         if settled:
             answer = "Probe %s completed with durable result %s." % (probe_id, result_status)
             questions.set_status(
@@ -124,9 +140,10 @@ def _finish_questions(
                 run=run, probe_id=probe_id, result_status=result_status,
             )
         else:
-            answer = "Probe %s did not settle the question: %s." % (
-                probe_id, result.get("reason") or result_status,
-            )
+            reason = result.get("reason") or result_status
+            if policy_reconciliation and not policy_reconciliation.get("compatible"):
+                reason = "; ".join(policy_reconciliation.get("errors") or []) or reason
+            answer = "Probe %s did not settle the question: %s." % (probe_id, reason)
             questions.set_status(
                 question_id, "open", answer=answer, evidence_refs=refs,
                 run=run, probe_id=probe_id, result_status=result_status,
