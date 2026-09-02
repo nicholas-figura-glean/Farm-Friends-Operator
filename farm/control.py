@@ -134,6 +134,7 @@ SERVICES: List[Dict[str, Any]] = [
 TRUSTED_PATHS = frozenset(
     {
         "run.py",
+        "farm/__init__.py",
         "farm/analysis.py",
         "farm/architecture.py",
         "farm/autonomy.py",
@@ -146,8 +147,11 @@ TRUSTED_PATHS = frozenset(
         "farm/cycle.py",
         "farm/evaluation.py",
         "farm/evidence.py",
+        "farm/format_compat.py",
+        "farm/gates.py",
         "farm/heal.py",
         "farm/governance.py",
+        "farm/journal.py",
         "farm/ledger.py",
         "farm/llm.py",
         "farm/mcp.py",
@@ -155,27 +159,47 @@ TRUSTED_PATHS = frozenset(
         "farm/notify.py",
         "farm/novelty.py",
         "farm/observability.py",
+        "farm/parse.py",
         "farm/policy.py",
+        "farm/probe_guard.py",
         "farm/probes.py",
         "farm/provenance.py",
         "farm/questions.py",
         "farm/research.py",
         "farm/rules.py",
+        "farm/sandbox.py",
         "farm/scheduler.py",
+        "farm/staged_verify.py",
         "farm/strategy.py",
         "farm/tokens.py",
         "farm/vcs.py",
         "farm/watch.py",
         "farm/workorders.py",
+        "monitor.py",
+        "experiments/__init__.py",
+        "experiments/activity_probe.py",
         "experiments/author_agent.py",
+        "experiments/capability_policies.py",
         "experiments/contract_watch.py",
         "experiments/dashboard_agent.py",
+        "experiments/dual_cap_audit.py",
+        "experiments/endgame.py",
         "experiments/eod_report.py",
+        "experiments/expand.py",
         "experiments/outage_notifier.py",
         "experiments/recovery_watch.py",
+        "experiments/registry.py",
+        "experiments/rescue_feed.py",
         "experiments/research_agent.py",
+        "experiments/strategy_policy.py",
         "deploy/install.sh",
+        "deploy/prepare_activation.py",
         "deploy/release.sh",
+        "deploy/run_sandboxed.py",
+        "deploy/test_architecture_js.sh",
+        "deploy/test_mcp_wire.sh",
+        "deploy/test_probe_guard.py",
+        "deploy/test_sandbox.py",
     }
     | {"deploy/%s.plist" % service["label"] for service in SERVICES}
 )
@@ -186,8 +210,13 @@ TRUSTED_PATHS = frozenset(
 # displays remain protected above. Compatibility work orders offer only
 # ``farm/format_compat.py``; adapter-only activation independently proves that no
 # parser, strategy, policy, or control-plane byte changed with that repair.
-AUTHOR_EDITABLE_PREFIXES = ("farm/", "experiments/")
-AUTHOR_EDITABLE_FILES = ("monitor.py",)
+# Model judgement is confined to sandboxed, non-autonomous experiment scripts.
+# Deterministic mechanical rewrites retain a wider inspected surface, but their
+# exact transformation is protected code and still passes the full matrix.
+MECHANICAL_EDITABLE_PREFIXES = ("farm/", "experiments/")
+MECHANICAL_EDITABLE_FILES = ("monitor.py",)
+AUTHOR_EDITABLE_PREFIXES = ("experiments/",)
+AUTHOR_EDITABLE_FILES: tuple = ()
 
 # Files that define a release. A dirty strategy journal is intentionally excluded: it
 # is linked as live evidence rather than packaged code and must not prevent repairs.
@@ -219,12 +248,19 @@ def mechanically_editable(path: str) -> bool:
     rel = normalize_path(path)
     if not rel.endswith(".py") or rel.startswith("/") or ".." in rel.split("/"):
         return False
-    return rel in AUTHOR_EDITABLE_FILES or any(rel.startswith(prefix) for prefix in AUTHOR_EDITABLE_PREFIXES)
+    return rel in MECHANICAL_EDITABLE_FILES or any(
+        rel.startswith(prefix) for prefix in MECHANICAL_EDITABLE_PREFIXES
+    )
 
 
 def author_editable(path: str) -> bool:
     rel = normalize_path(path)
-    return mechanically_editable(rel) and not is_protected(rel)
+    if not rel.endswith(".py") or rel.startswith("/") or ".." in rel.split("/"):
+        return False
+    offered = rel in AUTHOR_EDITABLE_FILES or any(
+        rel.startswith(prefix) for prefix in AUTHOR_EDITABLE_PREFIXES
+    )
+    return offered and not is_protected(rel)
 
 
 def service(value: str) -> Optional[Dict[str, Any]]:

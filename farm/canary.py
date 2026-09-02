@@ -423,16 +423,15 @@ def observability_release_errors(project: Any, revision: str, previous: str) -> 
 
 
 def release_editable_diff(project: Any, revision: str, previous: str) -> List[str]:
-    """Editable implementation files that differ across the release boundary.
+    """Release-source files that differ across the immutable boundary.
 
-    The release directories are immutable, so this is stronger provenance than a
-    dirty working-tree diff. Protected control-plane files are deliberately omitted:
-    a regression involving one of those must remain visible for manual repair rather
-    than granting the author agent permission to rewrite its own judge.
+    The historical name is retained for stored canary compatibility. Provenance
+    now keeps protected changes too; the author agent independently refuses those
+    and routes them to human approval instead of erasing the causal file list.
     """
     changed = [
         rel for rel in release_diff(project, revision, previous)
-        if control.author_editable(rel)
+        if control.is_release_source(rel)
     ]
     priority = {
         "farm/format_compat.py": 0,
@@ -509,7 +508,7 @@ def arm(
         "strategy_policy_fingerprint": strategy_fingerprint,
         "baseline_by_kind": dict(last_row.get("by_kind") or {}),
         "files": [control.normalize_path(str(path)) for path in (files or [])
-                  if control.author_editable(str(path))],
+                  if control.is_release_source(str(path))],
         "armed_ts": _utcnow(),
         "armed_at_run": latest_run(runs),
         "baseline_rate": baseline_rate(comparable_runs),
@@ -926,7 +925,7 @@ def _regression_order(
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in identity).strip("-")[:120]
     order_id = "canary-regression-%s" % (slug or "unknown")
     files = [control.normalize_path(str(path)) for path in (record.get("files") or [])
-             if control.author_editable(str(path))]
+             if control.is_release_source(str(path))]
     change = {
         "id": order_id,
         "kind": "canary_regression",

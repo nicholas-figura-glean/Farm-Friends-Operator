@@ -54,7 +54,8 @@ SAFETY_MIN = 60.0        # keep this many minutes of feed buyable at all times
 
 
 def latest_row():
-    path = os.path.join(ROOT, "state", "history.ndjson")
+    state = os.path.realpath(os.environ.get("FARM_STATE_DIR", os.path.join(ROOT, "state")))
+    path = os.path.join(state, "history.ndjson")
     row = None
     with open(path) as fh:
         for line in fh:

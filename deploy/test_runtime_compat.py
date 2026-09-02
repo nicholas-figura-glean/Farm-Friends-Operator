@@ -78,12 +78,16 @@ legacy_rows = parse.parse_leaderboard(
 check(len(legacy_rows) == 1 and legacy_rows[0].animals == 146,
       "legacy leaderboard format remains unchanged", legacy_rows)
 
-# The only model-editable extension point is normalization; validation stays trusted.
-check(control.author_editable(compatibility.ADAPTER_FILE),
-      "format adapter is author-editable")
+# Runtime code carries credentials after promotion, so even the narrow adapter now
+# requires independent approval. Deterministic containment continues to file the
+# exact bounded order while the last accepted release remains live.
+check(control.is_protected(compatibility.ADAPTER_FILE)
+      and not control.author_editable(compatibility.ADAPTER_FILE),
+      "format adapter requires independent approval")
 check(control.is_protected("farm/compatibility.py")
-      and control.author_editable("farm/parse.py"),
-      "trusted routing preserves the existing parser permission boundary")
+      and control.is_protected("farm/parse.py")
+      and not control.author_editable("farm/parse.py"),
+      "parser and its compatibility router share the trusted boundary")
 response_order = contract_watch.order_for({
     "kind": "response_templates_changed",
     "tool": "list_farm",
@@ -197,8 +201,9 @@ with tempfile.TemporaryDirectory() as tmp:
     order = next(iter(current.values()))
     check(order.get("severity") == "breaking" and order.get("source") == "runtime_parse_drift",
           "runtime parser failure jumps ahead of degraded and speculative work", order)
-    check(order.get("files") == [compatibility.ADAPTER_FILE],
-          "runtime repair cannot target the protected parser", order.get("files"))
+    check(order.get("files") == [compatibility.ADAPTER_FILE]
+          and author_agent.editable(compatibility.ADAPTER_FILE) is not None,
+          "runtime drift is bounded to an independently approved adapter change", order.get("files"))
     check((order.get("provenance") or {}).get("change_class") == "compatibility",
           "runtime repair carries compatibility release provenance", order.get("provenance"))
     check((order.get("detail") or {}).get("sample") == sample.name,

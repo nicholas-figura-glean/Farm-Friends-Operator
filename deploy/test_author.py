@@ -19,6 +19,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -54,25 +55,50 @@ def section(name):
 
 section("the edit policy refuses what it must")
 
-check("farm modules are editable", author_agent.editable("farm/parse.py") is None)
-check("experiments are editable", author_agent.editable("experiments/expand.py") is None)
-check("literal capability policies are author-editable",
-      author_agent.editable("experiments/capability_policies.py") is None)
+check("runtime farm modules require independent approval",
+      author_agent.editable("farm/parse.py") is not None)
+check("scheduled expansion code requires independent approval",
+      author_agent.editable("experiments/expand.py") is not None)
+check("literal capability policies require independent approval",
+      author_agent.editable("experiments/capability_policies.py") is not None)
+check("unscheduled probe candidates remain model-editable only inside the sandbox",
+      author_agent.editable("experiments/new_bounded_probe.py") is None)
 check("the capability executor is protected",
       author_agent.editable("farm/mechanics.py") is not None)
-check("literal strategy policy is author-editable",
-      author_agent.editable("experiments/strategy_policy.py") is None)
+check("literal strategy policy requires independent approval",
+      author_agent.editable("experiments/strategy_policy.py") is not None)
 check("strategy policy loader is protected",
       author_agent.editable("farm/strategy.py") is not None)
 check("run.py is protected orchestration", author_agent.editable("run.py") is not None)
-check("monitor.py remains repairable behind independent gates",
-      author_agent.editable("monitor.py") is None)
+check("the long-running monitor requires independent approval",
+      author_agent.editable("monitor.py") is not None)
 check("author resolves the canonical deployable checkout",
       (author_agent.PROJECT / "deploy" / "release.sh").is_file()
       and author_agent.PROJECT == control.project_root())
 
 for protected in author_agent.PROTECTED:
     check("%s is protected" % protected, author_agent.editable(protected) is not None)
+
+# Independent expectations catch a path accidentally omitted from the manifest;
+# deriving this set from author_agent.PROTECTED would merely prove the list agrees
+# with itself.
+required_tcb = {
+    "farm/__init__.py", "farm/control.py", "farm/format_compat.py", "farm/gates.py",
+    "farm/governance.py", "farm/journal.py", "farm/mcp.py", "farm/parse.py",
+    "farm/policy.py", "farm/probe_guard.py", "farm/probes.py", "farm/sandbox.py",
+    "farm/staged_verify.py", "monitor.py", "experiments/__init__.py",
+    "experiments/activity_probe.py", "experiments/author_agent.py",
+    "experiments/dual_cap_audit.py", "experiments/endgame.py", "experiments/expand.py",
+    "experiments/registry.py", "deploy/prepare_activation.py", "deploy/release.sh",
+    "deploy/run_sandboxed.py",
+    "deploy/test_probe_guard.py", "deploy/test_sandbox.py",
+}
+check("independent trusted-boundary manifest is fully protected",
+      all(control.is_protected(path) for path in required_tcb),
+      str(sorted(path for path in required_tcb if not control.is_protected(path))))
+check("independent trusted-boundary manifest names real files",
+      all((pathlib.Path(ROOT) / path).is_file() for path in required_tcb),
+      str(sorted(path for path in required_tcb if not (pathlib.Path(ROOT) / path).is_file())))
 
 check("the canary cannot be edited", author_agent.editable("farm/canary.py") is not None)
 check("its own source cannot be edited", author_agent.editable("experiments/author_agent.py") is not None)
@@ -84,6 +110,8 @@ check("mechanics regression gate is mandatory for autonomous patches",
 check("dual-cap strategy gate is mandatory for autonomous patches",
       any(name == "strategy" and command[-1] == "deploy/test_strategy.py"
           for name, command in author_agent.GATES))
+check("probe authority and sandbox gates are mandatory for autonomous patches",
+      {"probe-guard", "sandbox"}.issubset({name for name, _ in author_agent.GATES}))
 check("path traversal is refused", author_agent.editable("../../etc/passwd") is not None)
 check("absolute paths are refused", author_agent.editable("/etc/hosts") is not None)
 check("non-Python files are refused", author_agent.editable("farm/notes.md") is not None)
@@ -97,6 +125,7 @@ section("edit block parsing and application")
 
 sandbox = tempfile.mkdtemp()
 os.makedirs(os.path.join(sandbox, "farm"))
+os.makedirs(os.path.join(sandbox, "experiments"))
 TARGET = """\
 def parse_animal(line):
     hunger = extract(line, "hunger")
@@ -108,10 +137,10 @@ def other(line):
     hunger = extract(line, "hunger")
     return hunger
 """
-with open(os.path.join(sandbox, "farm", "parse.py"), "w") as handle:
+with open(os.path.join(sandbox, "experiments", "parser_probe.py"), "w") as handle:
     handle.write(TARGET)
 
-block = '''--- FILE: farm/parse.py
+block = '''--- FILE: experiments/parser_probe.py
 <<<<<<< SEARCH
     happiness = extract(line, "happiness")
 =======
@@ -119,14 +148,14 @@ block = '''--- FILE: farm/parse.py
 >>>>>>> REPLACE'''
 edits = author_agent.parse_edits(block)
 check("a well formed edit block parses", len(edits) == 1, str(edits))
-check("the target path is extracted", edits and edits[0]["path"] == "farm/parse.py")
+check("the target path is extracted", edits and edits[0]["path"] == "experiments/parser_probe.py")
 
 applied = author_agent.apply_edits(edits, sandbox)
-check("a unique edit applies", "farm/parse.py" in applied["files"], str(applied["problems"]))
+check("a unique edit applies", "experiments/parser_probe.py" in applied["files"], str(applied["problems"]))
 check("no problems are reported", applied["problems"] == [], str(applied["problems"]))
-check("the replacement is present", 'extract(line, "mood")' in applied["files"]["farm/parse.py"])
+check("the replacement is present", 'extract(line, "mood")' in applied["files"]["experiments/parser_probe.py"])
 
-ambiguous = author_agent.parse_edits('''--- FILE: farm/parse.py
+ambiguous = author_agent.parse_edits('''--- FILE: experiments/parser_probe.py
 <<<<<<< SEARCH
     hunger = extract(line, "hunger")
 =======
@@ -136,7 +165,7 @@ result = author_agent.apply_edits(ambiguous, sandbox)
 check("an ambiguous SEARCH is refused, not guessed", result["files"] == {}, str(result))
 check("the ambiguity is explained", any("ambiguous" in p for p in result["problems"]), str(result["problems"]))
 
-missing = author_agent.parse_edits('''--- FILE: farm/parse.py
+missing = author_agent.parse_edits('''--- FILE: experiments/parser_probe.py
 <<<<<<< SEARCH
 this text does not exist anywhere
 =======
@@ -156,10 +185,25 @@ result = author_agent.apply_edits(protected_edit, sandbox)
 check("an edit to protected code is refused", result["files"] == {})
 check("the refusal names protection", any("protected" in p for p in result["problems"]), str(result["problems"]))
 
+outside = os.path.join(sandbox, "outside.py")
+with open(outside, "w", encoding="utf-8") as handle:
+    handle.write("VALUE = 'outside'\n")
+link = os.path.join(sandbox, "experiments", "linked.py")
+os.symlink(outside, link)
+symlink_result = author_agent.apply_edits(
+    [{"path": "experiments/linked.py", "search": "outside", "replace": "changed"}],
+    sandbox,
+    allowed=["experiments/linked.py"],
+)
+check("candidate edits cannot follow a symlink outside their path",
+      not symlink_result["files"] and any("symlink" in p for p in symlink_result["problems"]),
+      str(symlink_result))
+check("refused symlink edit leaves the target unchanged",
+      "outside" in pathlib.Path(outside).read_text(encoding="utf-8"))
+
 check("prose without edit blocks yields no edits",
       author_agent.parse_edits("I would change the parser to handle the new field.") == [])
 
-os.makedirs(os.path.join(sandbox, "experiments"))
 new_block = author_agent.parse_edits(
     "--- FILE: experiments/bounded_probe.py\n"
     + "<<<<<<< SEARCH\n\n"
@@ -203,22 +247,22 @@ check("a model cannot invent an unoffered new path",
       refused_new["files"] == {} and any("not offered" in p for p in refused_new["problems"]),
       str(refused_new))
 existing_empty = author_agent.apply_edits(
-    [{"path": "farm/parse.py", "search": "", "replace": "VALUE = 3\n"}],
+    [{"path": "experiments/parser_probe.py", "search": "", "replace": "VALUE = 3\n"}],
     sandbox,
-    allowed=["farm/parse.py"],
+    allowed=["experiments/parser_probe.py"],
 )
 check("empty SEARCH remains invalid for an existing file",
       existing_empty["files"] == {}
       and any("only valid for a new file" in p for p in existing_empty["problems"]),
       str(existing_empty))
 large_existing = "PREFIX = 1\n" + ("# padding\n" * 6000)
-with open(os.path.join(sandbox, "farm", "large.py"), "w") as handle:
+with open(os.path.join(sandbox, "experiments", "large.py"), "w") as handle:
     handle.write(large_existing)
-small_edit = [{"path": "farm/large.py", "search": "PREFIX = 1", "replace": "PREFIX = 2"}]
-small_result = author_agent.apply_edits(small_edit, sandbox, allowed=["farm/large.py"])
+small_edit = [{"path": "experiments/large.py", "search": "PREFIX = 1", "replace": "PREFIX = 2"}]
+small_result = author_agent.apply_edits(small_edit, sandbox, allowed=["experiments/large.py"])
 check("patch accounting measures changed text rather than the whole output file",
       small_result["changed_bytes"] < 100
-      and len(small_result["files"]["farm/large.py"]) > 40_000,
+      and len(small_result["files"]["experiments/large.py"]) > 40_000,
       str(small_result.get("changed_bytes")))
 
 
@@ -281,16 +325,16 @@ prompt_order = {
     "severity": "shape",
     "kind": "response_numeric_labels_changed",
     "tool": "list_farm",
-    "summary": "list_farm response numeric fields changed: -hunger +fullness",
-    "intent": "Update the parser to accept the new field name.",
-    "acceptance": ["farm/parse.py handles both formats"],
-    "sites": ["farm/parse.py:12"],
+    "summary": "probe response numeric fields changed: -hunger +fullness",
+    "intent": "Update the bounded probe parser to accept the new field name.",
+    "acceptance": ["experiments/parser_probe.py handles both formats"],
+    "sites": ["experiments/parser_probe.py:12"],
     "detail": {"removed": ["hunger"], "added": ["fullness"]},
-    "files": ["farm/parse.py"],
+    "files": ["experiments/parser_probe.py"],
 }
 user, offered = author_agent.build_prompt(prompt_order, sandbox)
-check("the prompt offers the target file", offered == ["farm/parse.py"], str(offered))
-check("the prompt states the intent", "Update the parser" in user)
+check("the prompt offers the target file", offered == ["experiments/parser_probe.py"], str(offered))
+check("the prompt states the intent", "Update the bounded probe parser" in user)
 check("the prompt states acceptance criteria", "handles both formats" in user)
 check("the prompt includes the file body", "def parse_animal" in user)
 check("the prompt includes machine detail", "fullness" in user)
@@ -307,6 +351,7 @@ capability_order = research_agent.capability_proposal({
     "capability": "future_tool", "description": "fixture", "required": [], "args": [],
 })
 hypothesis_order = research_agent.hypothesis_proposal({
+    "question_id": "q-fixture",
     "title": "Future Strategy", "hypothesis": "A future strategy helps.",
     "falsifier": "The outcome is flat.", "probe": "Replay a fixture.",
     "metric": "fixture output", "risk": "none",
@@ -314,9 +359,72 @@ hypothesis_order = research_agent.hypothesis_proposal({
 check("research capability orders declare their new probe file",
       capability_order["files"][0] == "experiments/future_tool_probe.py",
       str(capability_order["files"]))
-check("strategy hypothesis orders declare their new probe file",
-      hypothesis_order["files"][0] == "experiments/future_strategy_probe.py",
-      str(hypothesis_order["files"]))
+check("strategy hypothesis orders declare only their non-autonomous probe candidate",
+      hypothesis_order["files"] == ["experiments/future_strategy_probe.py"]
+      and hypothesis_order["question_ids"] == ["q-fixture"]
+      and "experiments/registry.py" not in hypothesis_order["files"],
+      str(hypothesis_order))
+check("capability probe proposals cannot edit the protected registry",
+      "experiments/registry.py" not in capability_order["files"],
+      str(capability_order["files"]))
+
+
+# -- gates -------------------------------------------------------------------
+
+section("candidate gates fail closed")
+saved_gates = author_agent.GATES
+try:
+    author_agent.GATES = (("missing", ["/usr/bin/python3", "deploy/does_not_exist.py"]),)
+    missing_gate_result = author_agent.run_gates(sandbox)
+finally:
+    author_agent.GATES = saved_gates
+check("a missing mandatory gate is a failure rather than a skip",
+      not missing_gate_result["passed"]
+      and missing_gate_result["failed"][0]["gate"] == "missing",
+      str(missing_gate_result))
+
+with tempfile.TemporaryDirectory(prefix="activation-guard-test-") as activation_tmp:
+    activation_project = pathlib.Path(activation_tmp) / "project"
+    activation_target = pathlib.Path(activation_tmp) / "target"
+    (activation_project / "state").mkdir(parents=True)
+    (activation_project / "deploy").mkdir()
+    (activation_project / "deploy" / "release.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    previous_release = activation_project / "releases" / "rev-old"
+    (previous_release / "farm").mkdir(parents=True)
+    (activation_target / "farm").mkdir(parents=True)
+    (previous_release / "farm" / "value.py").write_text("VALUE=1\n", encoding="utf-8")
+    (activation_target / "farm" / "value.py").write_text("VALUE=2\n", encoding="utf-8")
+    with (activation_project / "state" / "history.ndjson").open("w", encoding="utf-8") as handle:
+        for run in range(1, 8):
+            handle.write(json.dumps({
+                "run": run, "animals": 100, "produce_per_min": 10.0,
+                "collected": 1, "verified": True,
+            }) + "\n")
+    activation = subprocess.run(
+        [
+            sys.executable, str(pathlib.Path(ROOT) / "deploy" / "prepare_activation.py"),
+            str(activation_target), str(activation_project), "rev-new", "rev-old",
+            ROOT, str(pathlib.Path(ROOT) / "farm" / "gates.py"), "0",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    canary_path = activation_project / "state" / "canary.json"
+    check("activation preparation writes the canonical canary before exposure",
+          activation.returncode == 0 and canary_path.is_file()
+          and not (activation_project / "state" / "state" / "canary.json").exists(),
+          "rc=%s stdout=%s stderr=%s" % (activation.returncode, activation.stdout, activation.stderr))
+    (activation_project / "state" / "history.ndjson").unlink()
+    missing_history = subprocess.run(
+        [
+            sys.executable, str(pathlib.Path(ROOT) / "deploy" / "prepare_activation.py"),
+            str(activation_target), str(activation_project), "rev-missing", "rev-old",
+            ROOT, str(pathlib.Path(ROOT) / "farm" / "gates.py"), "1",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    check("activation cannot refresh inherited evidence without a current run identity",
+          missing_history.returncode != 0 and "run-history identity" in missing_history.stderr,
+          "rc=%s stderr=%s" % (missing_history.returncode, missing_history.stderr))
 
 
 # -- isolated publication ----------------------------------------------------
@@ -361,6 +469,36 @@ check("publication invokes the canonical release script",
 check("author source no longer writes candidate bodies into PROJECT before release",
       "live.write_text(body" not in pathlib.Path(author_agent.__file__).read_text(encoding="utf-8"))
 release_source = (pathlib.Path(ROOT) / "deploy" / "release.sh").read_text(encoding="utf-8")
+release_targets = {
+    part for _, command in author_agent.GATES for part in command
+    if part.startswith("deploy/")
+}
+check("manual and autonomous release matrices contain the same gate targets",
+      all(target in release_source for target in release_targets),
+      str(sorted(target for target in release_targets if target not in release_source)))
+check("policy compatibility executes inside the candidate sandbox",
+      "gate /usr/bin/python3 - <<'PY'" in release_source)
+activation_source = (pathlib.Path(ROOT) / "deploy" / "prepare_activation.py").read_text(encoding="utf-8")
+check("release preflight never imports candidate source with coordinator authority",
+      'PYTHONPATH="$PREFLIGHT_RUNTIME"' in release_source
+      and 'PYTHONPATH="$SCRIPT_PROJECT"' in release_source
+      and 'PYTHONPATH="$SOURCE_PROJECT"' not in release_source)
+check("release coordination imports the previously accepted safety kernel",
+      'TRUSTED_RUNTIME="$RELEASES/$PREVIOUS"' in release_source
+      and "prepare_activation.py" in release_source
+      and "sys.path.insert(0, target)" not in release_source
+      and "sys.path.insert(0, str(Path(trusted_runtime).resolve()))" in activation_source
+      and "sys.path.insert(0, str(target" not in activation_source)
+check("release guard state is durable before pointer exposure",
+      release_source.index("prepare_activation.py") < release_source.index("os.replace(tmp, link)"))
+check("release activation is serialized across coordinators",
+      'RELEASE_LOCK="$DEPLOY_PROJECT/state/.release.lock"' in release_source
+      and "another release process is active" in release_source)
+check("interrupted pre-activation restores or recovers prior guard state",
+      "recover_stale_release" in release_source
+      and "restore_activation_guards" in release_source
+      and "trap release_cleanup EXIT INT TERM" in release_source
+      and '"guarded" > "$RELEASE_LOCK/phase"' in release_source)
 check("the canonical release path independently requires remote synchronization",
       "vcs.require_remote_sync(require_clean=True)" in release_source)
 check("the release remote gate is fail-closed rather than advisory",
@@ -373,7 +511,7 @@ check("release metadata and canary retain the complete source range",
       and 'FARM_CANARY_BASE_COMMIT' in release_source
       and '"$TARGET/SOURCE_COMMIT"' in release_source)
 check("release canary can verify a named evidence-backed strategy action",
-      "FARM_CANARY_STRATEGY_INTENT" in release_source and "strategy_intent=" in release_source)
+      "FARM_CANARY_STRATEGY_INTENT" in release_source and "strategy_intent=" in activation_source)
 
 
 # -- remote publication ------------------------------------------------------
@@ -758,8 +896,8 @@ scope_armed = canary.arm(
     commit="a" * 40, files=["monitor.py", "farm/canary.py"],
     store=scope_store, history=scope_hist, run_history=runs,
 )
-check("arming retains only editable repair provenance",
-      scope_armed.get("files") == ["monitor.py"], str(scope_armed.get("files")))
+check("arming retains complete release-source provenance",
+      scope_armed.get("files") == ["monitor.py", "farm/canary.py"], str(scope_armed.get("files")))
 first_candidate = {
     "run": 10, "animals": 100, "produce_per_min": 0.0,
     "collected": 0, "zero_streak": 4,
@@ -787,10 +925,10 @@ check("a genuine canary regression files one idempotent work order",
       queued.get("created") is True and queued_again.get("created") is False
       and queued_row.get("status") == workorders.OPEN,
       "%s %s %s" % (queued, queued_again, queued_row))
-check("the regression order carries candidate evidence and editable files",
+check("the regression order carries candidate evidence and complete changed files",
       queued_row.get("source") == "release_canary"
       and queued_row.get("kind") == "canary_regression"
-      and queued_row.get("files") == ["monitor.py"]
+      and queued_row.get("files") == ["monitor.py", "farm/canary.py"]
       and ((queued_row.get("detail") or {}).get("verdict") or {}).get("status")
           == canary.REGRESSED,
       str(queued_row))
@@ -889,8 +1027,8 @@ with open(os.path.join(rev, "releases", "revA", "farm", "canary.py"), "w") as ha
     handle.write("old protected gate\n")
 with open(os.path.join(rev, "releases", "revB", "farm", "canary.py"), "w") as handle:
     handle.write("new protected gate\n")
-check("release provenance records changed editable files only",
-      canary.release_editable_diff(rev, "revB", "revA") == ["monitor.py"],
+check("release provenance records every changed release-source file",
+      canary.release_editable_diff(rev, "revB", "revA") == ["monitor.py", "farm/canary.py"],
       str(canary.release_editable_diff(rev, "revB", "revA")))
 os.symlink(os.path.join(rev, "releases", "revB"), os.path.join(rev, "release"))
 
@@ -1064,10 +1202,6 @@ with tempfile.TemporaryDirectory() as budget_tmp:
     finally:
         tokens.LEDGER = saved_ledger
 
-check("a live canary blocks a new authoring pass",
-      "canary" in (author_agent.budget_check({}) or "").lower()
-      or author_agent.budget_check({}) is None or True)
-
 # Directly exercise the interval rule, which is the one that stops a tight loop.
 # spend_today() reads the real append-only log, so it must be stubbed too: without
 # this the assertions below silently test the daily-budget branch instead of the
@@ -1086,10 +1220,10 @@ runtime_compat_order = {
     "provenance": {"change_class": "compatibility"},
 }
 compat_reserve = author_agent.max_model_pass_cost(runtime_compat_order, sandbox)
-check("narrow runtime compatibility repair reserves a bounded smaller response",
+check("protected runtime compatibility repair reserves no autonomous model spend",
       author_agent.model_output_token_limit(runtime_compat_order)
       == author_agent.COMPAT_MODEL_OUTPUT_TOKENS
-      and 0 < compat_reserve < model_reserve,
+      and compat_reserve == 0,
       str((author_agent.model_output_token_limit(runtime_compat_order), compat_reserve)))
 
 saved_overlay = author_agent.compatibility_overlay_proof
@@ -1106,12 +1240,20 @@ saved_spend = author_agent.spend_today
 saved_reserve = author_agent.max_model_pass_cost
 saved_active = canary.active
 saved_dirty = vcs.dirty_paths
+saved_question_health = author_agent.questions.health
 canary.latest_run = lambda *a, **k: 100
 author_agent.spend_today = lambda *a, **k: (0, 0.0)
 author_agent.max_model_pass_cost = lambda *a, **k: 0.0
 canary.active = lambda *a, **k: False
 vcs.dirty_paths = lambda *a, **k: []
+author_agent.questions.health = lambda *a, **k: {"status": "pass", "reasons": []}
 try:
+    canary.active = lambda *a, **k: {"revision": "rev-watching"}
+    live_canary_reason = author_agent.budget_check({})
+    check("a live canary blocks a new authoring pass",
+          live_canary_reason is not None and "canary" in live_canary_reason.lower(),
+          str(live_canary_reason))
+    canary.active = lambda *a, **k: False
     check("with budget, source and canary clear, the interval rule is what decides",
           author_agent.budget_check({}) is None, str(author_agent.budget_check({})))
 
@@ -1155,6 +1297,57 @@ try:
     reason = author_agent.budget_check({}, breaking_repair, [breaking_repair])
     check("a pass is refused when worst-case in-flight cost would cross the ceiling",
           reason is not None and "headroom" in reason, str(reason))
+
+    speculative = dict(
+        fresh_opportunity, source="research_agent", kind="strategy_hypothesis",
+    )
+    trusted_repair = dict(
+        breaking_repair, source="governance", kind="policy_claim_drift",
+    )
+    author_agent.spend_today = lambda *a, **k: (0, 2.8)
+    author_agent.max_model_pass_cost = lambda *a, **k: 0.3
+    exploration_reason = author_agent.budget_check({}, speculative, [speculative])
+    check("speculative work cannot consume the protected repair reserve",
+          exploration_reason is not None and "held for repair" in exploration_reason,
+          str(exploration_reason))
+    check("a trusted repair may draw from the reserve",
+          author_agent.budget_check({}, trusted_repair, [trusted_repair]) is None,
+          str(author_agent.budget_check({}, trusted_repair, [trusted_repair])))
+    check("research severity cannot impersonate a trusted repair",
+          not author_agent.is_priority_repair(dict(speculative, severity="breaking")))
+
+    author_agent.spend_today = lambda *a, **k: (0, 0.0)
+    author_agent.max_model_pass_cost = lambda *a, **k: 0.0
+    author_agent.questions.health = lambda *a, **k: {
+        "status": "fail", "reasons": ["aged high-priority questions"],
+    }
+    interlock = author_agent.budget_check({}, speculative, [speculative])
+    check("red learning governance blocks unrelated autonomous evolution",
+          interlock is not None and "learning governance interlock" in interlock,
+          str(interlock))
+    check("trusted reliability repair can proceed through a red learning backlog",
+          author_agent.budget_check({}, trusted_repair, [trusted_repair]) is None,
+          str(author_agent.budget_check({}, trusted_repair, [trusted_repair])))
+    learning_repair = {
+        "source": "research_agent", "kind": "strategy_hypothesis",
+        "files": ["experiments/bounded_probe.py"],
+        "provenance": {
+            "change_class": "research_probe", "hypothesis_id": "hyp-fixture",
+            "question_ids": ["q-aged"],
+        },
+    }
+    check("bounded question-linked probe work can drain the red backlog",
+          author_agent.budget_check({}, learning_repair, [learning_repair]) is None,
+          str(author_agent.budget_check({}, learning_repair, [learning_repair])))
+    mixed_repair = dict(
+        learning_repair,
+        files=["experiments/bounded_probe.py", "experiments/registry.py"],
+    )
+    mixed_reason = author_agent.budget_check({}, mixed_repair, [mixed_repair])
+    check("one editable file cannot hide a protected file in a mixed order",
+          mixed_reason is not None and "independent human approval" in mixed_reason,
+          str(mixed_reason))
+    author_agent.questions.health = lambda *a, **k: {"status": "pass", "reasons": []}
     author_agent.max_model_pass_cost = lambda *a, **k: 0.0
     author_agent.spend_today = lambda *a, **k: (0, 0.0)
 
@@ -1176,8 +1369,8 @@ try:
         {"last_authored_run": 50, "last_attempted_run": 100},
         runtime_compat_order, [runtime_compat_order],
     )
-    check("contained runtime compatibility repair cannot deadlock on full-run spacing",
-          reason is None, str(reason))
+    check("runtime compatibility repair waits for independent approval",
+          reason is not None and "independent human approval" in reason, str(reason))
     reason = author_agent.budget_check({"last_authored_run": 50})
     check("authoring is allowed once enough runs have passed",
           reason is None, str(reason))
@@ -1187,6 +1380,7 @@ finally:
     author_agent.max_model_pass_cost = saved_reserve
     canary.active = saved_active
     vcs.dirty_paths = saved_dirty
+    author_agent.questions.health = saved_question_health
 
 
 # -- model transport idempotency --------------------------------------------

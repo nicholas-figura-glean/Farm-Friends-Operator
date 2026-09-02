@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from farm import claims, control, governance, policy, questions, rules  # noqa: E402
+from farm import claims, control, gates, governance, policy, questions, rules  # noqa: E402
 
 
 class Suite:
@@ -40,6 +40,7 @@ def healthy_snapshot(run: int = 120) -> Dict[str, Any]:
         "history": history,
         "services": [dict(spec, loaded=True) for spec in control.SERVICES],
         "canary": {"armed": False, "status": "healthy", "revision": "rev-live"},
+        "release_gate_health": {"status": "pass", "revision": "rev-live", "failed": []},
         "compaction": [
             {"ledger": "tool_calls.ndjson", "active_bytes": 1024, "segments": 1},
         ],
@@ -68,6 +69,9 @@ def broken_snapshot(run: int = 120) -> Dict[str, Any]:
     value["canary"] = {
         "armed": True, "status": "watching", "revision": "rev-new",
         "verdict": {"runs_observed": rules.EFFICACY_MIN_RUNS * 2 + 1},
+    }
+    value["release_gate_health"] = {
+        "status": "fail", "revision": "rev-other", "failed": ["knowledge"],
     }
     value["compaction"] = [{
         "ledger": "tool_calls.ndjson", "active_bytes": governance.compaction.DEFAULT_MAX_BYTES * 3,
@@ -99,7 +103,7 @@ def main() -> int:
 
     print("== review contract")
     healthy = governance.assess(healthy_snapshot())
-    suite.check(len(healthy) == 10, "review covers ten autonomous operating contracts", healthy)
+    suite.check(len(healthy) == 11, "review covers eleven autonomous operating contracts", healthy)
     suite.check(all(row["status"] == governance.PASS for row in healthy),
                 "a healthy system passes every contract", healthy)
     suite.check({row["owner"] for row in healthy} >= {
@@ -110,7 +114,7 @@ def main() -> int:
     failed = {row["id"] for row in broken if row["status"] == governance.FAIL}
     for expected in (
         "execution.progress", "strategy.objective", "runtime.services",
-        "release.probation", "knowledge.policy", "observability.dashboard",
+        "release.probation", "release.gate_health", "knowledge.policy", "observability.dashboard",
         "learning.question_flow", "healing.repair_flow", "safety.lineage",
     ):
         suite.check(expected in failed, "broken fixture fails %s" % expected, sorted(failed))
@@ -126,6 +130,97 @@ def main() -> int:
                      if row["id"] == "release.probation")
     suite.check(probation["status"] == governance.FAIL,
                 "wall-clock age catches a canary with no completed runs", probation)
+
+    print("== release gate certification")
+    certified = {
+        "schema_version": gates.SCHEMA_VERSION,
+        "run": 120,
+        "revision": "rev-live",
+        "matrix_fingerprint": gates.fingerprint(),
+        "observed": gates.names(),
+        "complete": True,
+        "passed": True,
+        "failed": [],
+    }
+    suite.check(gates.assess("rev-live", 120, certified)["status"] == governance.PASS,
+                "complete current matrix certification passes")
+    suite.check(gates.assess("rev-live", 120, {})["status"] == governance.FAIL,
+                "missing historical certification fails closed")
+    suite.check(gates.assess("rev-other", 120, certified)["status"] == governance.FAIL,
+                "certification for another revision fails closed")
+    changed_matrix = dict(certified, matrix_fingerprint="old-matrix")
+    suite.check(gates.assess("rev-live", 120, changed_matrix)["status"] == governance.FAIL,
+                "a matrix change invalidates prior certification")
+    previous_env = dict(os.environ)
+    try:
+        with tempfile.TemporaryDirectory() as gate_tmp:
+            os.environ["FARM_STATE_DIR"] = gate_tmp
+            outcome = {
+                "passed": True,
+                "results": [{"gate": name, "ok": True} for name in gates.names()],
+                "failed": [],
+            }
+            gates.record(outcome, "rev-a", 100, "pol-a")
+            gates.record(outcome, "rev-b", 120, "pol-b")
+            suite.check(gates.assess("rev-a", 125)["status"] == governance.PASS,
+                        "rollback restores the archived certification for its revision")
+            inherited_rows = [
+                {"gate": name, "ok": None, "status": "inherited"}
+                if name in {"knowledge", "evidence"}
+                else {"gate": name, "ok": True, "status": "passed"}
+                for name in gates.names()
+            ]
+            inherited = gates.record(
+                {"passed": True, "results": inherited_rows, "failed": []},
+                "rev-compat", 120, "pol-b", inherited_from="rev-a",
+                waived=["knowledge", "evidence"], inherited_run=100,
+            )
+            suite.check(inherited["passed"]
+                        and gates.assess("rev-compat", 120)["status"] == governance.PASS,
+                        "compatibility certification marks inherited gates explicitly", inherited)
+            suite.check(gates.assess("rev-compat", 141)["status"] == governance.WARN,
+                        "compatibility release cannot refresh inherited evidence age")
+            fabricated = gates.record(
+                outcome, "rev-fabricated", 120, "pol-b", inherited_from="rev-a",
+                waived=["knowledge", "evidence"], inherited_run=100,
+            )
+            suite.check(not fabricated["passed"],
+                        "waived gates cannot be fabricated as fresh passing rows", fabricated)
+    finally:
+        os.environ.clear()
+        os.environ.update(previous_env)
+
+    print("== learning-flow boundaries")
+    managed = {
+        "id": "q-managed", "status": "open", "priority": "high",
+        "owner": "research", "next_step": "run bounded fixture probe",
+        "generation_opened_run": 81, "next_step_due_run": 121,
+    }
+    age_39 = questions.health(120, rows=[managed], event_rows=[])
+    suite.check(age_39["status"] != governance.FAIL,
+                "high-priority question remains inside the SLO at age 39", age_39)
+    age_40 = questions.health(121, rows=[managed], event_rows=[])
+    suite.check(age_40["status"] == governance.FAIL
+                and age_40["overdue_high_priority"] == ["q-managed"],
+                "high-priority question fails exactly at age 40", age_40)
+    missing = questions.health(120, rows=[{
+        "id": "q-missing", "status": "open", "priority": "critical",
+    }], event_rows=[])
+    suite.check(missing["status"] == governance.FAIL
+                and missing["high_missing_metadata"] == ["q-missing"],
+                "unknown age or ownership fails high-priority hygiene", missing)
+    probing = questions.health(120, rows=[
+        dict(managed, id="q-one", status="probing"),
+        dict(managed, id="q-two", status="probing"),
+    ], event_rows=[])
+    suite.check(probing["status"] == governance.FAIL and probing["probing"] == 2,
+                "probing WIP cannot exceed the single mutation boundary", probing)
+    updates_only = questions.health(120, rows=[], event_rows=[
+        {"event": "updated", "run": 119, "question_id": "q-managed"},
+    ])
+    suite.check(updates_only["current_flow"]["arrivals"] == 0
+                and updates_only["current_flow"]["closures"] == 0,
+                "question updates do not masquerade as arrival or closure flow", updates_only)
 
     print("== run cadence, persistence, and trend")
     previous_env = dict(os.environ)
@@ -168,14 +263,14 @@ def main() -> int:
                 160, force=True, snapshot=remediation_fixture, apply_remediation=True,
             )
             actions = {row.get("action") for row in routed.get("actions") or []}
-            suite.check("route_learning_review" in actions,
-                        "a stalled learning loop opens a bounded strategy question", routed.get("actions"))
+            suite.check("prioritize_learning_backlog" in actions,
+                        "a stalled learning loop prioritizes existing WIP", routed.get("actions"))
             suite.check("route_policy_review" in actions,
                         "unresolved policy drift enters the bounded research lifecycle", routed.get("actions"))
             opened = [row for row in questions.open_questions()
                       if row.get("subject") == "governance learning loop"]
-            suite.check(len(opened) == 1 and opened[0]["class"] == "strategy_stale",
-                        "governance remediation enters the existing probe lifecycle", opened)
+            suite.check(not opened,
+                        "governance does not worsen WIP with an umbrella question", opened)
             policy_questions = [row for row in questions.open_questions()
                                 if row.get("subject") == "semantic_contract"]
             suite.check(len(policy_questions) == 1
@@ -230,7 +325,8 @@ def main() -> int:
     run_source = (PROJECT / "run.py").read_text(encoding="utf-8")
     suite.check("deploy/test_governance.py" in release_source,
                 "governance tests gate manual releases")
-    suite.check("deploy/test_governance.py" in author_source,
+    suite.check("gates.commands()" in author_source
+                and any("deploy/test_governance.py" in command for _, command in gates.MATRIX),
                 "governance tests gate autonomous releases")
     suite.check("governance.run_review" in run_source and "--governance-status" in run_source,
                 "the supervisor and CLI expose the periodic review")

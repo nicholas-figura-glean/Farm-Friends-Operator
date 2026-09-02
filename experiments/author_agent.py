@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 RUNTIME_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RUNTIME_ROOT))
 
-from farm import canary, compatibility, control, ledger, llm, policy, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, compatibility, control, gates, ledger, llm, policy, questions, rules, sandbox as sandboxing, tokens, vcs, workorders  # noqa: E402
 
 # The process executes immutable code through release/, but edits and publishes from
 # the canonical checkout. The LaunchAgent injects FARM_PROJECT_ROOT; the fallback
@@ -214,6 +214,33 @@ def model_output_token_limit(order: Optional[Dict[str, Any]]) -> int:
     return MAX_MODEL_OUTPUT_TOKENS
 
 
+TRUSTED_REPAIR_SOURCES = {
+    "runtime_parse_drift", "contract_watch", "dashboard_agent", "governance", "release_canary",
+}
+
+
+def is_priority_repair(order: Optional[Dict[str, Any]]) -> bool:
+    """Only protected detector sources may draw from the repair cost reserve."""
+    if not order or str(order.get("source") or "") not in TRUSTED_REPAIR_SOURCES:
+        return False
+    return str(order.get("kind") or "") not in {"strategy_hypothesis", "capability_policy"}
+
+
+def is_learning_repair(order: Optional[Dict[str, Any]]) -> bool:
+    """A bounded probe implementation may drain a red learning backlog."""
+    lineage = (order or {}).get("provenance") or {}
+    files = list((order or {}).get("files") or [])
+    return bool(
+        order
+        and order.get("source") == "research_agent"
+        and lineage.get("change_class") == "research_probe"
+        and lineage.get("hypothesis_id")
+        and lineage.get("question_ids")
+        and files
+        and all(str(path).startswith("experiments/") and str(path).endswith(".py") for path in files)
+    )
+
+
 def budget_check(
     stored: Dict[str, Any],
     order: Optional[Dict[str, Any]] = None,
@@ -225,6 +252,10 @@ def budget_check(
     absolute. Safety checks below are intentionally independent of order priority.
     """
     passes, cost = spend_today()
+    requested_files = list((order or {}).get("files") or [])
+    if (order and requested_files and order.get("kind") != "arg_removed"
+            and not all(control.author_editable(path) for path in requested_files)):
+        return "independent human approval required for protected runtime/control change"
     if cost >= rules.AUTHOR_MAX_COST_USD_PER_DAY:
         return "daily cost ceiling reached ($%.2f/$%.2f)" % (cost, rules.AUTHOR_MAX_COST_USD_PER_DAY)
     reserved_cost = max_model_pass_cost(order, str(PROJECT)) if order else 0.0
@@ -232,11 +263,26 @@ def budget_check(
         return "insufficient model headroom ($%.2f spent + $%.2f reserved > $%.2f ceiling)" % (
             cost, reserved_cost, rules.AUTHOR_MAX_COST_USD_PER_DAY,
         )
+    exploration_ceiling = max(
+        0.0, rules.AUTHOR_MAX_COST_USD_PER_DAY - rules.AUTHOR_REPAIR_RESERVE_USD
+    )
+    if (reserved_cost and not is_priority_repair(order)
+            and cost + reserved_cost > exploration_ceiling):
+        return "exploration allocation spent ($%.2f + $%.2f reserved > $%.2f; $%.2f held for repair)" % (
+            cost, reserved_cost, exploration_ceiling, rules.AUTHOR_REPAIR_RESERVE_USD,
+        )
     pass_limit, capacity_reason = adaptive_pass_limit(order, open_queue)
     if passes >= pass_limit:
         return "daily pass capacity spent (%d/%d; %s)" % (
             passes, pass_limit, capacity_reason,
         )
+
+    if order and not (is_priority_repair(order) or is_learning_repair(order)):
+        learning = questions.health(canary.latest_run())
+        if learning.get("status") == "fail":
+            return "learning governance interlock: %s" % (
+                "; ".join(learning.get("reasons") or ["question flow failed"])[:320]
+            )
 
     # A worktree forks from main. If packaged source differs from main, that base is
     # stale and a successful repair would silently republish the pre-change system.
@@ -340,6 +386,22 @@ def editable(rel: str) -> Optional[str]:
     if control.author_editable(rel):
         return None
     return "%s is outside the editable set" % rel
+
+
+def _safe_stage_path(root: str, rel: str) -> Path:
+    """Resolve a candidate path without following worker-controlled symlinks."""
+    base = Path(root).resolve()
+    target = base / rel
+    current = base
+    for part in Path(rel).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("candidate path contains a symlink: %s" % rel)
+    try:
+        target.parent.resolve().relative_to(base)
+    except ValueError as exc:
+        raise ValueError("candidate path escapes the staging root: %s" % rel) from exc
+    return target
 
 
 # -- mechanical backend ------------------------------------------------------
@@ -587,9 +649,13 @@ def apply_edits(
         if refusal:
             problems.append("refused %s: %s" % (rel, refusal))
             continue
-        path = os.path.join(root, rel)
+        try:
+            path = _safe_stage_path(root, rel)
+        except ValueError as exc:
+            problems.append("refused %s: %s" % (rel, exc))
+            continue
         body = files.get(rel)
-        if body is None and not os.path.isfile(path):
+        if body is None and not path.is_file():
             # The path is explicitly offered and absent, so there is no existing
             # occurrence to match ambiguously. Models repeatedly put a harmless
             # placeholder in SEARCH despite the empty-SEARCH instruction; rejecting
@@ -605,7 +671,7 @@ def apply_edits(
             continue
         if body is None:
             try:
-                body = open(path, "r", encoding="utf-8").read()
+                body = path.read_text(encoding="utf-8")
             except OSError as exc:
                 problems.append("unreadable %s: %s" % (rel, exc.__class__.__name__))
                 continue
@@ -677,23 +743,9 @@ def model_patch(order: Dict[str, Any], root: str, feedback: str = "",
 
 # -- gates -------------------------------------------------------------------
 
-GATES = (
-    ("self-test", ["/usr/bin/python3", "run.py", "--self-test"]),
-    ("knowledge", ["/usr/bin/python3", "deploy/test_knowledge.py"]),
-    ("governance", ["/usr/bin/python3", "deploy/test_governance.py"]),
-    ("safety", ["/usr/bin/python3", "deploy/test_safety.py"]),
-    ("mechanics", ["/usr/bin/python3", "deploy/test_mechanics.py"]),
-    ("strategy", ["/usr/bin/python3", "deploy/test_strategy.py"]),
-    ("evidence", ["/usr/bin/python3", "deploy/test_evidence.py"]),
-    ("tool-trace", ["/usr/bin/python3", "deploy/test_tool_trace.py"]),
-    ("topology", ["/usr/bin/python3", "deploy/test_topology.py"]),
-    ("dashboard", ["/usr/bin/python3", "deploy/test_dashboard.py"]),
-    ("recovery-watch", ["/usr/bin/python3", "deploy/test_recovery_watch.py"]),
-    ("contract", ["/usr/bin/python3", "deploy/test_contract.py"]),
-    ("contract-watch", ["/usr/bin/python3", "deploy/test_contract_watch.py"]),
-    ("runtime-compat", ["/usr/bin/python3", "deploy/test_runtime_compat.py"]),
-    ("vcs", ["/usr/bin/python3", "deploy/test_vcs.py"]),
-)
+# One complete protected matrix is shared by autonomous authoring, manual release,
+# and governance certification.
+GATES = gates.commands()
 
 
 def compatibility_overlay_proof(source_root: str) -> Dict[str, Any]:
@@ -738,21 +790,49 @@ def compatibility_preexisting_allowed(
     )
 
 
-def run_gates(root: str) -> Dict[str, Any]:
-    """The release matrix, executed inside the staging copy.
+def _run_sandboxed(command: List[str], root: str, timeout: int = 600) -> subprocess.CompletedProcess:
+    """Execute untrusted candidate code with read-only source/state and no network."""
+    source = Path(root).resolve()
+    state = (source / "state").resolve()
+    canonical_state = (PROJECT / "state").resolve()
+    if state != canonical_state:
+        raise sandboxing.SandboxUnavailable(
+            "candidate state link does not resolve to canonical state"
+        )
+    with sandboxing.scratch_dir("farm-candidate-gate-") as scratch_name:
+        scratch = Path(scratch_name).resolve()
+        env = sandboxing.environment(
+            scratch,
+            state,
+            {"FARM_PROJECT_ROOT": str(PROJECT), sandboxing.ACTIVE_ENV: "1"},
+        )
+        wrapped = sandboxing.wrap(command, source, state, scratch, read_roots=[PROJECT])
+        return subprocess.run(
+            wrapped,
+            cwd=str(source),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
 
-    Running these before publishing (rather than relying on release.sh alone)
-    means a bad patch never reaches the live tree at all.
-    """
+
+def run_gates(
+    root: str,
+    record_health: bool = False,
+    revision: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run the complete candidate matrix inside the fail-closed sandbox."""
     results = []
     for name, command in GATES:
         script = command[1] if command[1].endswith(".py") else None
         if script and not os.path.isfile(os.path.join(root, script)):
+            results.append({"gate": name, "ok": False, "detail": "mandatory gate is missing: %s" % script})
             continue
         try:
-            proc = subprocess.run(command, cwd=root, capture_output=True, text=True,
-                                  timeout=600, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            proc = _run_sandboxed(command, root, timeout=600)
+        except (OSError, subprocess.TimeoutExpired, sandboxing.SandboxUnavailable) as exc:
             results.append({"gate": name, "ok": False, "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200])})
             continue
         ok = proc.returncode == 0
@@ -762,7 +842,15 @@ def run_gates(root: str) -> Dict[str, Any]:
             detail = tail[-1500:]
         results.append({"gate": name, "ok": ok, "detail": detail})
     failed = [r for r in results if not r["ok"]]
-    return {"passed": not failed, "results": results, "failed": failed}
+    outcome = {"passed": not failed, "results": results, "failed": failed}
+    if record_health:
+        gates.record(
+            outcome,
+            revision=revision or os.path.basename(os.path.realpath(root)),
+            run=canary.latest_run(),
+            policy_id=policy.runtime_context().get("policy_id"),
+        )
+    return outcome
 
 
 def gates_already_failing(root: str, gate_names: List[str]) -> List[str]:
@@ -791,8 +879,7 @@ def gates_already_failing(root: str, gate_names: List[str]) -> List[str]:
         try:
             # Run the live tree's copy of the suite against the live tree, which is
             # by definition unpatched.
-            proc = subprocess.run(command, cwd=str(PROJECT), capture_output=True,
-                                  text=True, timeout=600, check=False)
+            proc = _run_sandboxed(command, str(PROJECT), timeout=600)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if proc.returncode != 0:
@@ -801,13 +888,14 @@ def gates_already_failing(root: str, gate_names: List[str]) -> List[str]:
 
 
 def compile_check(files: Dict[str, str], root: str) -> Optional[str]:
-    """Syntax-check every edited file before spending minutes on the suites."""
+    """Parse edited Python without importing it or writing into its source tree."""
     for rel in files:
-        path = os.path.join(root, rel)
-        proc = subprocess.run(["/usr/bin/python3", "-m", "py_compile", path],
-                              capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            return "%s does not compile: %s" % (rel, (proc.stderr or "")[-600:])
+        path = Path(root) / rel
+        try:
+            source = path.read_text(encoding="utf-8")
+            compile(source, str(path), "exec", dont_inherit=True)
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            return "%s does not compile: %s" % (rel, str(exc)[-600:])
     return None
 
 
@@ -1009,10 +1097,18 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
 
         files = patch["files"]
         for rel, body in files.items():
-            target_path = os.path.join(root, rel)
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            with open(target_path, "w", encoding="utf-8") as target:
-                target.write(body)
+            try:
+                target_path = _safe_stage_path(root, rel)
+            except ValueError as exc:
+                attempt_notes.append("attempt %d: %s" % (attempt, exc))
+                feedback = str(exc)
+                restore(order, root, files, stage)
+                patch = None
+                break
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(body, encoding="utf-8")
+        if patch is None:
+            continue
 
         broken = compile_check(files, root)
         if broken:
@@ -1218,6 +1314,8 @@ def restore(order: Dict[str, Any], root: str, files: Dict[str, str],
     if stage and stage.get("vcs"):
         try:
             vcs._run(["checkout", "--", "."], cwd=root, check=False)
+            if files:
+                vcs._run(["clean", "-f", "--"] + sorted(files), cwd=root, check=False)
             return
         except (vcs.GitError, OSError):
             pass

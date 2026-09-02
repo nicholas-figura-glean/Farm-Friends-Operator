@@ -56,7 +56,9 @@ def build_repo(root: str) -> None:
     with open(os.path.join(root, "state", "history.ndjson"), "w") as fh:
         fh.write('{"run": 1}\n')
     with open(os.path.join(root, ".gitignore"), "w") as fh:
-        fh.write("/state\n/releases\n/release\n__pycache__/\n")
+        fh.write("/state\n/releases\n/release\n/farm-strategy-journal.md\n__pycache__/\n")
+    with open(os.path.join(root, "farm-strategy-journal.md"), "w") as fh:
+        fh.write("generated baseline\n")
     git(["init", "-q", "-b", "main"], root)
     git(["config", "user.name", "test"], root)
     git(["config", "user.email", "test@localhost"], root)
@@ -98,6 +100,13 @@ try:
     check(proof.get("synchronized") is True,
           "a clean HEAD already on origin/main has remote proof", str(proof))
     check(proof.get("sha") == base_sha, "remote proof names the exact local commit", str(proof))
+    with open(os.path.join(repo, "farm-strategy-journal.md"), "a") as fh:
+        fh.write("generated evidence churn\n")
+    check("farm-strategy-journal.md" not in vcs.dirty_paths(include_untracked=True),
+          "generated strategy journal never dirties release source")
+    journal_proof = vcs.require_remote_sync(expected_repository=remote)
+    check(journal_proof.get("synchronized") is True,
+          "generated journal churn cannot block remote release proof", str(journal_proof))
 
     section("worktree isolation")
     wt = vcs.worktree_add("order-1")

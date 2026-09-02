@@ -71,6 +71,16 @@ MODEL_HYPOTHESIS_INTERVAL_HOURS = 24
 IGNORED_CAPABILITIES = ("name_animal",)
 
 
+def proposal_capacity(order_rows: List[Dict[str, Any]]) -> int:
+    """Remaining research-order WIP slots; per-pass limits are only a burst cap."""
+    active = [
+        order for order in order_rows
+        if order.get("source") == "research_agent"
+        and order.get("status") in {"open", "claimed"}
+    ]
+    return min(MAX_PROPOSALS_PER_PASS, max(0, rules.MAX_RESEARCH_ORDER_WIP - len(active)))
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -197,22 +207,22 @@ def capability_proposal(entry: Dict[str, Any]) -> Dict[str, Any]:
     }
     intent = (
         "The server exposes `%s` (%s), but its objective effect is not directly "
-        "established. Add a bounded probe under experiments/, register it, and record "
-        "a causal result. Do not claim that queueing or defining the probe implements "
-        "the mechanic; a supported result must create a separate capability-policy order."
+        "established. Add a bounded non-autonomous probe candidate under experiments/ "
+        "with a literal PROPOSED_SPEC. Do not edit the protected registry or claim that "
+        "defining the probe implements the mechanic; independent review must register it."
         % (name, entry["description"][:160])
     )
     acceptance = [
-        "a probe for %s exists under experiments/ and is registered" % name,
-        "the probe declares a budget and its read_only/autonomous flags",
-        "farm/cycle.py is unchanged by this order",
-        "the probe records a durable supported/falsified result",
+        "a non-autonomous probe candidate for %s exists under experiments/" % name,
+        "the script carries a literal requested capability, argument, output, and budget spec",
+        "the protected registry and farm/cycle.py are unchanged by this order",
+        "registration and execution remain blocked pending independent review",
     ]
     return {
         "change": change,
         "intent": intent,
         "acceptance": acceptance,
-        "files": [_probe_path(name), "experiments/registry.py"],
+        "files": [_probe_path(name)],
         "evidence_spec": {
             "hypothesis": "A bounded use of %s improves the league-first objective." % name,
             "null_hypothesis": "%s produces no measurable objective benefit." % name,
@@ -399,6 +409,7 @@ Rules:
 
 * Reply with a JSON array only. No prose, no markdown fences.
 * Each element must be an object with exactly these keys:
+    "question_id" one ID from the supplied open_questions list
     "title"      short imperative name
     "hypothesis" what you believe is true, stated so it can be wrong
     "falsifier"  the observation that would disprove it
@@ -443,10 +454,15 @@ def model_hypotheses(context: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     if not isinstance(parsed, list):
         return []
-    required = ("title", "hypothesis", "falsifier", "probe", "metric")
+    required = ("question_id", "title", "hypothesis", "falsifier", "probe", "metric")
+    allowed_questions = {
+        str(item.get("id")) for item in context.get("open_questions") or [] if item.get("id")
+    }
     out = []
     for item in parsed[:3]:
-        if isinstance(item, dict) and all(isinstance(item.get(k), str) and item.get(k) for k in required):
+        if (isinstance(item, dict)
+                and all(isinstance(item.get(k), str) and item.get(k) for k in required)
+                and item.get("question_id") in allowed_questions):
             out.append({k: str(item.get(k) or "")[:800] for k in list(required) + ["risk"]})
     return out
 
@@ -465,21 +481,27 @@ def hypothesis_proposal(item: Dict[str, Any]) -> Dict[str, Any]:
         "detail": item,
     }
     intent = (
-        "Build a bounded probe to test this hypothesis. Do not change live strategy.\n\n"
-        "Hypothesis: %s\n\nFalsifier: %s\n\nProbe design: %s\n\nDeciding metric: %s\n\n"
-        "Implement it under experiments/ and register it in experiments/registry.py with "
-        "an explicit budget. The probe must record enough for a later pass to decide the "
-        "hypothesis without re-running it."
+        "Build a bounded non-autonomous probe candidate to test this hypothesis. Do not "
+        "change live strategy or the protected registry.\n\nHypothesis: %s\n\nFalsifier: %s"
+        "\n\nProbe design: %s\n\nDeciding metric: %s\n\nThe script must declare its "
+        "requested tools, arguments, outputs, and budget in a literal PROPOSED_SPEC value. "
+        "Independent review is required before that spec can be copied into the registry."
         % (item["hypothesis"], item["falsifier"], item["probe"], item["metric"])
     )
     acceptance = [
-        "a registered probe tests the stated hypothesis",
+        "a non-autonomous probe candidate tests the stated hypothesis",
         "the probe records the deciding metric (%s)" % item["metric"][:80],
-        "farm/cycle.py is unchanged by this order",
-        "the probe has an explicit budget",
+        "the protected registry and farm/cycle.py are unchanged by this order",
+        "the script carries a literal requested capability and budget specification",
     ]
-    return {"change": change, "intent": intent, "acceptance": acceptance,
-            "files": [_probe_path(key), "experiments/registry.py"]}
+    return {
+        "change": change,
+        "intent": intent,
+        "acceptance": acceptance,
+        "files": [_probe_path(key)],
+        "question_ids": [item["question_id"]],
+        "change_class": "research_probe",
+    }
 
 
 def file_supported_implementations(queue: str) -> List[Dict[str, Any]]:
@@ -666,6 +688,8 @@ def main() -> int:
     settled_superseded_questions = settle_superseded_questions()
     settled_capability_questions = settle_active_capability_questions()
     implementation_orders = file_supported_implementations(queue)
+    current_orders = list(workorders.current(queue).values())
+    proposal_limit = proposal_capacity(current_orders)
 
     runtime = policy.runtime_context()
     ledger.set_context(actor="research_agent", run=canary.latest_run(),
@@ -698,7 +722,13 @@ def main() -> int:
                 "strategy.unbacked_parameter",
                 "%s steers decisions (%d runs would differ at %s) but no claim justifies its value"
                 % (item["parameter"], item["changed_runs"], item["alternative"]),
+                item={"run": context.get("run"), "ts": utcnow()},
                 subject=item["parameter"],
+                owner="research",
+                next_step=(
+                    "Define the falsifier and bind a replay or holdout for %s before proposing a value change."
+                    % item["parameter"]
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             print("  could not open question for %s: %s" % (item["parameter"], str(exc)[:80]))
@@ -708,27 +738,27 @@ def main() -> int:
     # A measured server-regime change outranks speculative capability work because
     # it can invalidate the denominator of the live strategy.
     for proposal, key in dual_cap_strategy_proposals():
+        if len(proposals) >= proposal_limit:
+            break
         if key not in proposed:
             proposals.append((proposal, key))
-        if len(proposals) >= MAX_PROPOSALS_PER_PASS:
-            break
 
     # Cheapest source next: capabilities we have never tried. Directly documented
     # progression/crisis mechanics route to the literal implementation surface;
     # uncertain tools still earn a probe first.
     for entry in capabilities:
-        if len(proposals) >= MAX_PROPOSALS_PER_PASS:
+        if len(proposals) >= proposal_limit:
             break
         key = "capability:%s" % entry["capability"]
         if key in proposed:
             continue
         proposals.append((capability_proposal(entry), key))
-        if len(proposals) >= MAX_PROPOSALS_PER_PASS:
+        if len(proposals) >= proposal_limit:
             break
 
     # Only pay for model hypotheses when the free sources are exhausted, and at
     # most once a day.
-    if not proposals and _model_due(stored):
+    if proposal_limit > 0 and not proposals and _model_due(stored):
         availability = llm.availability()
         if availability.get("available"):
             payload = {
@@ -736,7 +766,10 @@ def main() -> int:
                 "unused_capabilities": capabilities,
                 "sensitive_parameters": sensitive[:8],
                 "open_questions": [
-                    {"class": q.get("class"), "question": str(q.get("question"))[:200]}
+                    {
+                        "id": q.get("id"), "class": q.get("class"),
+                        "subject": q.get("subject"), "question": str(q.get("alert"))[:200],
+                    }
                     for q in (questions.open_questions() or [])[:10]
                 ],
                 "guardrails": {
@@ -757,7 +790,7 @@ def main() -> int:
                     # duplicate or a legitimately re-opened hypothesis with new data.
                     proposals.append((hypothesis_proposal(item), key))
                     record_finding({"event": "hypothesis", "item": item})
-                    if len(proposals) >= MAX_PROPOSALS_PER_PASS:
+                    if len(proposals) >= proposal_limit:
                         break
                 stored["last_model_ts"] = utcnow()
             except llm.Dormant as exc:
@@ -772,10 +805,17 @@ def main() -> int:
         "history.ndjson#run=%s" % context.get("run"),
         "policy.json#%s" % runtime.get("policy_id"),
     ]
-    question_ids = [str(item.get("id")) for item in questions.open_questions() if item.get("id")]
     for proposal, key in proposals:
         change = proposal["change"]
         detail = change.get("detail") or {}
+        # Lineage must name only the question that originated this proposal. An
+        # earlier implementation attached every open question, letting one
+        # unrelated result appear to cover the entire backlog.
+        question_ids = sorted(set(
+            str(value) for value in (
+                proposal.get("question_ids") or detail.get("question_ids") or []
+            ) if value
+        ))
         if proposal.get("evidence_spec"):
             spec = dict(proposal["evidence_spec"])
         elif change.get("kind") == "strategy_hypothesis":
@@ -812,6 +852,7 @@ def main() -> int:
             spec,
             hypothesis_id=registered["id"],
             discovery_evidence=discovery_refs,
+            question_ids=question_ids,
             change_class=str(proposal.get("change_class") or "research_probe"),
             evidence_class="direct_mechanism" if change.get("kind") == "capability_policy" else None,
         )

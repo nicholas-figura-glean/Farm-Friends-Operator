@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import sys
 from datetime import datetime, timezone
@@ -23,11 +24,12 @@ sys.path.insert(0, str(ROOT))
 
 from farm import compaction, parse  # noqa: E402
 
-HISTORY = ROOT / "state" / "history.ndjson"
-RAW_FARM = ROOT / "state" / "raw" / "latest" / "list_farm_final.txt"
-OUT = ROOT / "state" / "dual_cap_audit.json"
-CROP_SCORE = ROOT / "state" / "crop_score_probe.json"
-EXPERIMENTS = ROOT / "state" / "experiments.ndjson"
+STATE = Path(os.environ.get("FARM_STATE_DIR", str(ROOT / "state"))).resolve()
+HISTORY = STATE / "history.ndjson"
+RAW_FARM = STATE / "raw" / "latest" / "list_farm_final.txt"
+OUT = STATE / "dual_cap_audit.json"
+CROP_SCORE = STATE / "crop_score_probe.json"
+EXPERIMENTS = STATE / "experiments.ndjson"
 MIN_WINDOWS = 5
 MIN_SLOT_RATIO = 1.10
 CAP_FRACTION = 0.90

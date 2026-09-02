@@ -40,7 +40,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from farm import mcp, parse  # noqa: E402
 
-STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state")
+STATE = os.path.realpath(os.environ.get(
+    "FARM_STATE_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state"),
+))
 LOG = os.path.join(STATE, "probe.ndjson")
 
 

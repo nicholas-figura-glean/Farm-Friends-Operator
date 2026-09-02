@@ -149,7 +149,16 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "page_on_open": True,
         "budget": {"coins": 0, "calls": 0, "wall_seconds": 120},
     },
+    "strategy.unbacked_parameter": {
+        "hypothesis": "A decision-sensitive constant lacks a current claim or invariant that justifies its selected value.",
+        "settle": "Name the competing values and falsifier, then bind the smallest safe replay or holdout that can justify a claim or a conservative fixed-policy rationale.",
+        "priority": "high",
+        "page_on_open": False,
+        "budget": {"coins": 0, "calls": 0, "wall_seconds": 120},
+    },
 }
+
+VALID_OWNERS = {"research", "supervisor", "author", "cycle", "human"}
 
 _PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
@@ -282,6 +291,12 @@ def _collapse_duplicates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
         winner["subject"] = key.split(":", 1)[1]
         winner["occurrences"] = sum(max(1, int(row.get("occurrences") or 1)) for row in members)
         winner["generation"] = max(int(row.get("generation") or 1) for row in members)
+        generation_runs = [
+            row.get("generation_opened_run") for row in members
+            if isinstance(row.get("generation_opened_run"), int)
+        ]
+        if generation_runs:
+            winner["generation_opened_run"] = max(generation_runs)
         winner["evidence_refs"] = sorted({
             str(ref) for row in members for ref in (row.get("evidence_refs") or []) if ref
         })
@@ -290,6 +305,13 @@ def _collapse_duplicates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
         active = [row for row in members if row.get("status") in {"open", "probing"}]
         if active:
             winner["status"] = "probing" if any(row.get("status") == "probing" for row in active) else "open"
+            active_latest = max(active, key=lambda row: (
+                row.get("last_seen_run") if isinstance(row.get("last_seen_run"), int) else -1,
+                str(row.get("last_seen_ts") or ""),
+            ))
+            for field in ("owner", "next_step", "next_step_due_run", "active_probe_id", "probe_started_run"):
+                if active_latest.get(field) is not None:
+                    winner[field] = active_latest.get(field)
             winner["answer"] = None
             winner["closed_run"] = None
             winner["closed_ts"] = None
@@ -304,6 +326,8 @@ def _collapse_duplicates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
         opened_times = [str(row.get("opened_ts")) for row in members if row.get("opened_ts")]
         winner["opened_run"] = min(opened_runs) if opened_runs else winner.get("opened_run")
         winner["opened_ts"] = min(opened_times) if opened_times else winner.get("opened_ts")
+        if not isinstance(winner.get("generation_opened_run"), int):
+            winner["generation_opened_run"] = winner.get("opened_run")
         collapsed.append(winner)
         if len(members) > 1 or removed or any(row.get("id") != qid for row in members):
             migrations.append({
@@ -366,6 +390,9 @@ def open_or_update(
     cost_bound: Optional[Dict[str, Any]] = None,
     decision_bundle: Optional[Dict[str, Any]] = None,
     evidence_refs: Optional[List[str]] = None,
+    owner: Optional[str] = None,
+    next_step: Optional[str] = None,
+    next_step_due_run: Optional[int] = None,
 ) -> Dict[str, Any]:
     row, item = row or {}, item or {}
     current_path, events_path, lock_path = _paths()
@@ -375,6 +402,18 @@ def open_or_update(
     defaults = template(alert_class)
     run = item.get("run") if isinstance(item.get("run"), int) else row.get("run")
     ts = item.get("ts") or row.get("ts") or _utcnow()
+    selected_owner = str(owner or "research")
+    if selected_owner not in VALID_OWNERS:
+        raise ValueError("invalid question owner: %s" % selected_owner)
+    selected_next_step = str(next_step or settle_measurement or defaults["settle"]).strip()
+    if not selected_next_step:
+        raise ValueError("question requires a next step")
+    due_run = next_step_due_run
+    if due_run is None and isinstance(run, int):
+        due_run = run + rules.QUESTION_MAX_AGE_RUNS
+    if due_run is not None and (not isinstance(due_run, int) or not isinstance(run, int)
+                                or due_run > run + rules.QUESTION_MAX_AGE_RUNS):
+        raise ValueError("question next step exceeds the learning SLO")
 
     with open(lock_path, "a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -405,6 +444,10 @@ def open_or_update(
                 "priority": defaults["priority"],
                 "opened_run": run,
                 "opened_ts": ts,
+                "generation_opened_run": run,
+                "owner": selected_owner,
+                "next_step": selected_next_step,
+                "next_step_due_run": due_run,
                 "last_seen_run": run,
                 "last_seen_ts": ts,
                 "occurrences": 1,
@@ -431,12 +474,23 @@ def open_or_update(
                 record["decision_bundle"] = decision_bundle
             if evidence_refs:
                 record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
+            # Deterministically migrate legacy active rows as they recur.
+            record["owner"] = selected_owner if owner or not record.get("owner") else record.get("owner")
+            record["next_step"] = selected_next_step if next_step or not record.get("next_step") else record.get("next_step")
+            if next_step_due_run is not None or not isinstance(record.get("next_step_due_run"), int):
+                record["next_step_due_run"] = due_run
+            if not isinstance(record.get("generation_opened_run"), int):
+                record["generation_opened_run"] = record.get("opened_run")
             candidate_priority = defaults["priority"]
             if _PRIORITY.get(candidate_priority, 0) > _PRIORITY.get(str(record.get("priority")), 0):
                 record["priority"] = candidate_priority
             if reopened:
                 record["status"] = "open"
                 record["generation"] = int(record.get("generation") or 1) + 1
+                record["generation_opened_run"] = run
+                record["owner"] = selected_owner
+                record["next_step"] = selected_next_step
+                record["next_step_due_run"] = due_run
                 record["answer"] = None
                 record["closed_run"] = None
                 record["closed_ts"] = None
@@ -461,7 +515,11 @@ def open_or_update(
                 "ts": _utcnow(),
                 "question_id": qid,
                 "run": run,
+                "generation": record.get("generation"),
                 "occurrences": record.get("occurrences"),
+                "owner": record.get("owner"),
+                "next_step": record.get("next_step"),
+                "next_step_due_run": record.get("next_step_due_run"),
                 "alert": alert,
             },
         )
@@ -502,11 +560,24 @@ def set_status(
         if status == "probing":
             record["active_probe_id"] = probe_id
             record["probe_started_run"] = run
+            record["owner"] = "research"
+            record["next_step"] = "Complete probe %s and adjudicate its falsifier." % (probe_id or "assigned")
+            record["next_step_due_run"] = (
+                run + rules.QUESTION_MAX_AGE_RUNS if isinstance(run, int) else record.get("next_step_due_run")
+            )
             record["closed_run"] = None
             record["closed_ts"] = None
         elif status == "open":
             record["active_probe_id"] = None
             record["probe_started_run"] = None
+            record["owner"] = record.get("owner") or "research"
+            record["next_step"] = (
+                "Review probe %s and bind a revised probe or explicit human decision."
+                % (probe_id or record.get("active_probe_id") or "result")
+            )
+            record["next_step_due_run"] = (
+                run + rules.QUESTION_MAX_AGE_RUNS if isinstance(run, int) else record.get("next_step_due_run")
+            )
             record["closed_run"] = None
             record["closed_ts"] = None
         elif status in {"answered", "abandoned"}:
@@ -525,6 +596,7 @@ def set_status(
                 "ts": _utcnow(),
                 "question_id": question_id,
                 "run": run,
+                "generation": record.get("generation"),
                 "answer": answer,
                 "evidence_refs": evidence_refs or [],
                 "probe_id": probe_id,
@@ -539,6 +611,185 @@ def open_questions() -> List[Dict[str, Any]]:
     return [row for row in load_all() if row.get("status") in {"open", "probing"}]
 
 
+def events() -> List[Dict[str, Any]]:
+    _, path, _ = _paths()
+    return _read_events(path)
+
+
+def _read_events(path: Path) -> List[Dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            out.append(value)
+    return out
+
+
+def backfill_metadata(run: Optional[int]) -> Dict[str, Any]:
+    """Migrate legacy active rows without inventing a newer opening run."""
+    current_path, events_path, lock_path = _paths()
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    changed: List[str] = []
+    with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        rows = load_all()
+        for record in rows:
+            if record.get("status") not in {"open", "probing"}:
+                continue
+            touched = False
+            defaults = template(str(record.get("class") or ""))
+            if _PRIORITY.get(str(defaults.get("priority") or "medium"), 1) > _PRIORITY.get(
+                str(record.get("priority") or "medium"), 1
+            ):
+                record["priority"] = defaults["priority"]
+                touched = True
+            if record.get("class") == "strategy.unbacked_parameter":
+                generic = "The alert reflects a durable strategic uncertainty"
+                if str(record.get("hypothesis") or "").startswith(generic):
+                    record["hypothesis"] = defaults["hypothesis"]
+                    record["settle_measurement"] = defaults["settle"]
+                    record["next_step"] = defaults["settle"]
+                    touched = True
+            if record.get("owner") not in VALID_OWNERS:
+                record["owner"] = "research"
+                touched = True
+            if not str(record.get("next_step") or "").strip():
+                record["next_step"] = str(record.get("settle_measurement") or defaults["settle"])
+                touched = True
+            if not isinstance(record.get("generation_opened_run"), int):
+                opened = record.get("opened_run")
+                record["generation_opened_run"] = opened if isinstance(opened, int) else 0
+                if not isinstance(opened, int):
+                    record["age_source"] = "unknown_conservative"
+                touched = True
+            generation_run = record.get("generation_opened_run")
+            if not isinstance(record.get("next_step_due_run"), int) and isinstance(generation_run, int):
+                record["next_step_due_run"] = generation_run + rules.QUESTION_MAX_AGE_RUNS
+                touched = True
+            if touched:
+                changed.append(str(record.get("id")))
+        if changed:
+            _write_current(current_path, rows)
+            _append_event(events_path, {
+                "schema_version": SCHEMA_VERSION,
+                "event": "metadata_backfilled",
+                "ts": _utcnow(),
+                "run": run,
+                "question_ids": sorted(changed),
+            })
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return {"changed": len(changed), "question_ids": sorted(changed)}
+
+
+def health(
+    current_run: Optional[int],
+    rows: Optional[List[Dict[str, Any]]] = None,
+    event_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Deterministic age, hygiene, WIP, and arrival/closure assessment."""
+    active = [
+        row for row in (rows if rows is not None else load_all())
+        if row.get("status") in {"open", "probing"}
+    ]
+    history = list(event_rows if event_rows is not None else events())
+    high_missing: List[str] = []
+    other_missing: List[str] = []
+    overdue_high: List[str] = []
+    overdue_other: List[str] = []
+    for row in active:
+        identity = str(row.get("id") or "unknown")
+        missing = (
+            row.get("owner") not in VALID_OWNERS
+            or not str(row.get("next_step") or "").strip()
+            or not isinstance(row.get("next_step_due_run"), int)
+            or not isinstance(row.get("generation_opened_run"), int)
+        )
+        high = row.get("priority") in {"high", "critical"}
+        if missing:
+            (high_missing if high else other_missing).append(identity)
+        generation_run = row.get("generation_opened_run")
+        due_run = row.get("next_step_due_run")
+        overdue = (
+            not isinstance(generation_run, int)
+            or not isinstance(current_run, int)
+            or current_run - generation_run >= rules.QUESTION_MAX_AGE_RUNS
+            or (isinstance(due_run, int) and isinstance(current_run, int) and current_run >= due_run)
+        )
+        if overdue:
+            (overdue_high if high else overdue_other).append(identity)
+
+    probing = [str(row.get("id")) for row in active if row.get("status") == "probing"]
+    window = rules.QUESTION_FLOW_WINDOW_RUNS
+
+    def flow(start: int, end: int) -> Dict[str, int]:
+        selected = [
+            row for row in history
+            if isinstance(row.get("run"), int) and start <= int(row["run"]) <= end
+        ]
+        arrivals = sum(row.get("event") in {"opened", "reopened"} for row in selected)
+        answered = sum(row.get("event") == "answered" for row in selected)
+        abandoned = sum(row.get("event") == "abandoned" for row in selected)
+        return {"arrivals": arrivals, "answered": answered, "abandoned": abandoned,
+                "closures": answered + abandoned}
+
+    if isinstance(current_run, int):
+        current_flow = flow(max(0, current_run - window + 1), current_run)
+        previous_flow = flow(max(0, current_run - 2 * window + 1), max(0, current_run - window))
+    else:
+        current_flow = {"arrivals": 0, "answered": 0, "abandoned": 0, "closures": 0}
+        previous_flow = dict(current_flow)
+
+    fail_reasons: List[str] = []
+    warn_reasons: List[str] = []
+    if high_missing:
+        fail_reasons.append("high-priority questions lack owner, next step, due run, or generation age")
+    if overdue_high:
+        fail_reasons.append("high-priority questions exceeded the 40-run SLO")
+    if len(probing) > rules.MAX_PROBING_QUESTIONS:
+        fail_reasons.append("probing WIP exceeds the single mutation boundary")
+    backlog_stalled = (
+        len(active) > rules.QUESTION_BACKLOG_WARN
+        and current_flow["closures"] <= current_flow["arrivals"]
+    )
+    if backlog_stalled:
+        fail_reasons.append("question backlog exceeds WIP warning with no net drain")
+    if (current_flow["arrivals"] > current_flow["closures"]
+            and previous_flow["arrivals"] > previous_flow["closures"]):
+        fail_reasons.append("arrivals exceeded closures for two consecutive windows")
+    elif current_flow["arrivals"] > current_flow["closures"]:
+        warn_reasons.append("question arrivals exceed closures in the current window")
+    if other_missing:
+        warn_reasons.append("lower-priority questions lack lifecycle metadata")
+    if overdue_other:
+        warn_reasons.append("lower-priority questions exceeded the 40-run SLO")
+    if active and not current_flow["arrivals"] and not current_flow["closures"]:
+        warn_reasons.append("nonempty question backlog has zero flow")
+
+    status = "fail" if fail_reasons else "warn" if warn_reasons else "pass"
+    return {
+        "status": status,
+        "reasons": fail_reasons + warn_reasons,
+        "open": len(active),
+        "probing": len(probing),
+        "probing_ids": probing,
+        "high_missing_metadata": high_missing,
+        "other_missing_metadata": other_missing,
+        "overdue_high_priority": overdue_high,
+        "overdue_other_priority": overdue_other,
+        "backlog_warn_threshold": rules.QUESTION_BACKLOG_WARN,
+        "max_age_runs": rules.QUESTION_MAX_AGE_RUNS,
+        "current_flow": current_flow,
+        "previous_flow": previous_flow,
+    }
+
+
 def summary() -> Dict[str, Any]:
     rows = load_all()
     open_rows = [row for row in rows if row.get("status") in {"open", "probing"}]
@@ -547,5 +798,6 @@ def summary() -> Dict[str, Any]:
         "total": len(rows),
         "open": len(open_rows),
         "critical": sum(1 for row in open_rows if row.get("priority") == "critical"),
+        "owned": sum(1 for row in open_rows if row.get("owner") in VALID_OWNERS),
         "questions": rows,
     }

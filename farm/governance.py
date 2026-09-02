@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import analysis, compaction, control, rules
+from . import analysis, compaction, control, gates, questions, rules
 
 SCHEMA_VERSION = 1
 PASS = "pass"
@@ -90,7 +90,7 @@ def _check(
 
 def collect_snapshot(run: int) -> Dict[str, Any]:
     """Read bounded local state only; no MCP or model calls."""
-    from . import canary, claims, evaluation, policy, provenance, questions, scheduler, workorders
+    from . import canary, claims, evaluation, policy, provenance, scheduler, workorders
 
     state = _state_dir()
     history = analysis.history_rows(limit=rules.GOVERNANCE_REVIEW_RUNS + 1)
@@ -116,9 +116,11 @@ def collect_snapshot(run: int) -> Dict[str, Any]:
         "compaction": compaction.state_status(state),
         "compaction_compatibility": compaction.compatibility(state),
         "live_revision": live_revision,
+        "release_gate_health": gates.assess(live_revision, run),
         "policy": policy.runtime_context(claims.load()),
         "dashboard": dashboard_rows[-1] if dashboard_rows else {},
         "questions": question_rows,
+        "question_health": questions.health(run, rows=question_rows),
         "experiments": experiments,
         "orders": [dict(order, age_seconds=_age_seconds(order.get("ts"))) for order in order_rows],
         "efficacy": evaluation.status(canary_store),
@@ -189,6 +191,22 @@ def assess(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         "supervisor",
     ))
 
+    release_health = snapshot.get("release_gate_health") or {
+        "status": WARN, "warnings": ["release gate certification not supplied"]
+    }
+    release_status = str(release_health.get("status") or FAIL)
+    if release_status not in {PASS, WARN, FAIL}:
+        release_status = FAIL
+    checks.append(_check(
+        "release.gate_health",
+        release_status,
+        "complete release matrix is certified" if release_status == PASS
+        else "release matrix certification is stale or incomplete" if release_status == WARN
+        else "release matrix certification failed or describes another revision",
+        dict(release_health),
+        "supervisor",
+    ))
+
     compaction_rows = snapshot.get("compaction") or []
     oversized = [
         row for row in compaction_rows
@@ -243,35 +261,19 @@ def assess(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
     ))
 
     question_rows = snapshot.get("questions") or []
-    active_questions = [row for row in question_rows if row.get("status") in {"open", "probing"}]
-    aged = [
-        row for row in active_questions
-        if isinstance(run, int) and isinstance(row.get("opened_run"), int)
-        and run - int(row["opened_run"]) >= rules.GOVERNANCE_REVIEW_RUNS * 2
-        and row.get("priority") in {"high", "critical"}
-    ]
-    recent_linked = [
-        row for row in snapshot.get("experiments") or []
-        if isinstance(run, int) and isinstance(row.get("run"), int)
-        and run - int(row["run"]) <= rules.GOVERNANCE_REVIEW_RUNS * 2
-        and row.get("status") == "passed" and row.get("question_ids")
-    ]
-    if aged and not recent_linked:
+    question_health = snapshot.get("question_health") or questions.health(run, rows=question_rows)
+    learning_status = str(question_health.get("status") or FAIL)
+    if learning_status not in {PASS, WARN, FAIL}:
         learning_status = FAIL
-        learning_summary = "high-priority questions are aging without linked probe results"
-    elif aged:
-        learning_status = WARN
-        learning_summary = "high-priority questions remain open while probes are producing linked results"
+    if learning_status == PASS:
+        learning_summary = "question ownership, age, WIP, and closure flow are healthy"
+    elif learning_status == WARN:
+        learning_summary = "question flow needs attention but remains inside hard limits"
     else:
-        learning_status = PASS
-        learning_summary = "question and probe flow has no aged high-priority backlog"
+        learning_summary = "question ownership, age, WIP, or closure flow violated its contract"
     checks.append(_check(
         "learning.question_flow", learning_status, learning_summary,
-        {
-            "open": len(active_questions), "probing": sum(row.get("status") == "probing" for row in active_questions),
-            "aged_high_priority": [row.get("id") for row in aged[:12]],
-            "recent_linked_probe_results": len(recent_linked),
-        },
+        dict(question_health),
         "research",
     ))
 
@@ -452,17 +454,24 @@ def remediate(snapshot: Dict[str, Any], checks: List[Dict[str, Any]]) -> List[Di
 
     learning = by_id.get("learning.question_flow") or {}
     if learning.get("status") == FAIL:
-        opened = questions.open_or_update(
-            "strategy_stale",
-            "STRATEGY STALE: governance review found high-priority questions aging without linked probe results",
-            item={"run": snapshot.get("run"), "ts": _utcnow()},
-            subject="governance learning loop",
-            decision_bundle=learning.get("evidence") or {},
-            evidence_refs=["governance_reviews.ndjson#run=%s" % snapshot.get("run")],
-        )
+        # Drain the existing portfolio instead of opening an umbrella question
+        # whose only effect is to increase the WIP violation it describes.
+        migrated = questions.backfill_metadata(snapshot.get("run"))
+        active = questions.open_questions()
+        priority = {"critical": 3, "high": 2, "medium": 1, "low": 0}
+        target = next(iter(sorted(
+            active,
+            key=lambda row: (
+                -priority.get(str(row.get("priority") or "medium"), 1),
+                row.get("generation_opened_run") if isinstance(row.get("generation_opened_run"), int) else -1,
+                str(row.get("id") or ""),
+            ),
+        )), None)
         actions.append({
-            "action": "route_learning_review", "question_id": opened["question"].get("id"),
-            "opened": bool(opened.get("opened") or opened.get("reopened")),
+            "action": "prioritize_learning_backlog",
+            "question_id": (target or {}).get("id"),
+            "backfilled": migrated.get("changed"),
+            "open": len(active),
         })
     return actions
 

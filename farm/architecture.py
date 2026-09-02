@@ -57,7 +57,7 @@ LEDGER = PROJECT / "state" / "architecture.ndjson"
 # files being scanned. Old immutable releases can inspect a new working tree with old
 # semantics, so recurrence is meaningful only within one signature version. Bump this
 # whenever signature inputs or their interpretation change; historical rows default to 1.
-SIGNATURE_VERSION = 2
+SIGNATURE_VERSION = 3
 
 # Layers, outermost first. The order is the story the diagram tells: the game is
 # outside our control, the loop plays it, and everything above the loop exists to keep
@@ -97,7 +97,8 @@ MODULE_LAYER: Dict[str, str] = {
     "llm": "decide", "research": "decide",
     "canary": "guard", "evaluation": "guard", "provenance": "guard", "governance": "guard",
     "workorders": "guard", "vcs": "guard", "heal": "guard", "notify": "guard",
-    "compatibility": "guard",
+    "compatibility": "guard", "gates": "guard", "probe_guard": "guard",
+    "sandbox": "guard", "staged_verify": "guard",
     "scheduler": "operate", "autonomy": "operate", "architecture": "operate",
     "progress": "operate", "release": "operate", "control": "guard",
     "run": "operate", "monitor": "operate", "expand": "play",

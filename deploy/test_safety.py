@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -252,10 +253,12 @@ def main() -> int:
                 "evidence_class": "holdout",
                 "command": ["unused"],
                 "read_only": True,
-                "autonomous": True,
-                "budget": {"coins": 0, "calls": 1, "wall_seconds": 10},
+                "autonomous": False,
+                "budget": {"coins": 0, "calls": 0, "wall_seconds": 10},
+                "tools": {},
+                "outputs": ["fixture_result.json", "provenance.ndjson"],
                 "stop_condition": "fixture",
-                "evidence_destination": "state/provenance.ndjson",
+                "evidence_destination": "state/fixture_result.json and state/provenance.ndjson",
             }
             try:
                 probes._registry = lambda: {"linked": dict(spec_probe)}
@@ -267,10 +270,13 @@ def main() -> int:
                             missing_result)
                 script.write_text(
                     "import os, sys\n"
+                    "from pathlib import Path\n"
                     "sys.path.insert(0, %r)\n" % str(PROJECT) +
                     "from farm import provenance\n"
+                    "result_path=Path(os.environ['FARM_STATE_DIR'])/'fixture_result.json'\n"
+                    "result_path.write_text('{\"effect\":0.04}\\n')\n"
                     "provenance.record_result(os.environ['FARM_HYPOTHESIS_ID'], 'supported', "
-                    "['experiment#cohort=81-90'], os.environ['FARM_EVIDENCE_CLASS'], {'effect': 0.04})\n",
+                    "['worker-supplied-ref-is-not-authoritative'], os.environ['FARM_EVIDENCE_CLASS'], {'effect': 0.04})\n",
                     encoding="utf-8",
                 )
                 opened = questions.open_or_update(
@@ -282,6 +288,17 @@ def main() -> int:
                 )
                 suite.check(durable_result["status"] == "passed",
                             "probe passes after writing a durable hypothesis result", durable_result)
+                admitted_result = provenance.latest_result(reopened["id"]) or {}
+                durable_hash = hashlib.sha256(
+                    (Path(tmp) / "fixture_result.json").read_bytes()
+                ).hexdigest()
+                suite.check(
+                    admitted_result.get("validation_evidence")
+                    == ["state/fixture_result.json#sha256=" + durable_hash]
+                    and "worker-supplied-ref-is-not-authoritative" not in str(admitted_result),
+                    "trusted parent hashes the exact admitted evidence bytes",
+                    admitted_result,
+                )
                 settled = next(row for row in questions.load_all() if row["id"] == opened["id"])
                 suite.check(
                     settled["status"] == "answered"
@@ -293,8 +310,9 @@ def main() -> int:
                 compaction.append_json(unrelated, {"probe_id": "background", "event": "tool.call"})
                 unlinked_spec = {
                     "hypothesis": "Pure replay settles a stale decision.",
-                    "command": ["unused"], "read_only": True, "autonomous": True,
+                    "command": ["unused"], "read_only": True, "autonomous": False,
                     "budget": {"coins": 0, "calls": 0, "wall_seconds": 10},
+                    "tools": {}, "outputs": [],
                     "stop_condition": "fixture", "evidence_destination": "state/audits.ndjson",
                 }
                 probes._registry = lambda: {"unlinked": dict(unlinked_spec)}

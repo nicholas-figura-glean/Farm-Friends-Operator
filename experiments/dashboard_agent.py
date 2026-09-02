@@ -44,7 +44,8 @@ sys.path.insert(0, str(PROJECT))
 
 from farm import analysis, architecture, autonomy, workorders  # noqa: E402
 
-LEDGER = PROJECT / "state" / "dashboard_health.ndjson"
+STATE = Path(os.environ.get("FARM_STATE_DIR", str(PROJECT / "state"))).resolve()
+LEDGER = Path(os.environ.get("FARM_DASHBOARD_HEALTH_LOG", str(STATE / "dashboard_health.ndjson")))
 DASHBOARD_URL = os.environ.get("FARM_DASHBOARD_URL", "http://127.0.0.1:8765").rstrip("/")
 
 # Each dashboard readout, how it is produced, and how stale it may be before that is

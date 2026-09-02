@@ -601,7 +601,10 @@ def refresh(
 
 
 def claim_map(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
-    value = registry or load()
+    # An explicitly supplied empty registry is evidence of absence, not permission
+    # to fall back to live state. Security and release callers use this distinction
+    # for failure-injection tests and fail-closed compatibility checks.
+    value = load() if registry is None else registry
     return {claim["id"]: claim for claim in value.get("claims") or [] if claim.get("id")}
 
 
@@ -610,7 +613,7 @@ def get(claim_id: str, registry: Optional[Dict[str, Any]] = None) -> Optional[Di
 
 
 def validate(registry: Optional[Dict[str, Any]] = None) -> List[str]:
-    value = registry or load()
+    value = load() if registry is None else registry
     errors: List[str] = []
     if value.get("schema_version") != SCHEMA_VERSION:
         errors.append("claim registry schema mismatch")
@@ -646,7 +649,7 @@ def validate(registry: Optional[Dict[str, Any]] = None) -> List[str]:
 
 
 def overdue(registry: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    value = registry or load()
+    value = load() if registry is None else registry
     return [
         claim for claim in value.get("claims") or []
         if (claim.get("refresh") or {}).get("state") == "overdue"

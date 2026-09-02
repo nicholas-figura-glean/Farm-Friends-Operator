@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from . import compaction, ledger
+from . import compaction, ledger, probe_guard
 
 DEFAULT_ENDPOINT_FILE = os.path.expanduser("~/.config/farm/endpoint")
 DEFAULT_TOOL_CALL_LOG = os.path.join("state", "tool_calls.ndjson")
@@ -135,7 +135,11 @@ class Client(object):
         timeout: int = TIMEOUT,
         retries: int = RETRIES,
     ):
-        self._endpoint = endpoint or _load_endpoint()
+        # Managed probes never receive the secret endpoint. Their client speaks
+        # over inherited pipes to a trusted parent that owns authorization,
+        # budgets, retries, and transport.
+        brokered = os.environ.get(probe_guard.ENFORCEMENT_ENV) == "1"
+        self._endpoint = "https://probe-broker.invalid" if brokered else (endpoint or _load_endpoint())
         self._timeout = max(1, int(timeout))
         self._retries = max(1, int(retries))
         self._id = 0
@@ -183,7 +187,16 @@ class Client(object):
     ) -> Dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         timeout_budget = self._timeout if timeout is None else max(1, int(timeout))
-        attempt_budget = self._retries if retries is None else max(1, int(retries))
+        brokered = os.environ.get(probe_guard.ENFORCEMENT_ENV) == "1"
+        # A managed probe receives exactly one transport attempt by default. This
+        # makes ambiguous mutation failures consume one reservation rather than
+        # silently repeating a side effect.
+        attempt_budget = (1 if brokered else self._retries) if retries is None else max(1, int(retries))
+        if brokered:
+            try:
+                return probe_guard.broker_post(payload, timeout_budget, attempt_budget)
+            except probe_guard.AuthorizationError as exc:
+                raise McpError("probe transport denied: %s" % str(exc)[:400]) from exc
         req = urllib.request.Request(
             self._endpoint,
             data=body,

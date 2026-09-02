@@ -145,7 +145,8 @@ def _policy_id(snapshot: Dict[str, Any]) -> str:
 
 
 def compile_snapshot(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    registry = registry or claims.load() or claims.build()
+    if registry is None:
+        registry = claims.load() or claims.build()
     mapping = claims.claim_map(registry)
     values = parameters()
     errors = list(claims.validate(registry))
@@ -298,41 +299,89 @@ def promote(
     return candidate
 
 
-def runtime_context(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    registry = registry or claims.load()
-    promoted = load()
-    compiled_fingerprint = rules_fingerprint()
-    current_claim_fingerprint = (
-        registry.get("policy_fingerprint") if registry else None
-    )
+def semantic_acceptance(
+    registry: Optional[Dict[str, Any]] = None,
+    promoted: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the single semantic go/no-go contract used by every surface.
+
+    Stored fingerprints are useful identities, but they are not proof that the
+    registry still validates or that every required claim remains accepted. This
+    function recompiles the policy from the supplied registry, validates the
+    promoted content address, and compares the complete semantic policy identity.
+    Explicit empty arguments remain empty and therefore fail closed.
+    """
+    current_registry = claims.load() if registry is None else registry
+    current_promoted = load() if promoted is None else promoted
     errors: List[str] = []
-    if not registry:
+    warnings: List[str] = []
+
+    if not current_registry:
         errors.append("no claim registry")
-    if not promoted:
+    candidate = compile_snapshot(current_registry)
+    candidate_audit = candidate.get("audit") or {}
+    errors.extend(candidate_audit.get("errors") or [])
+    warnings.extend(candidate_audit.get("warnings") or [])
+
+    mapping = claims.claim_map(current_registry)
+    failed_required = sorted(
+        claim_id for claim_id in candidate.get("required_claims") or []
+        if (mapping.get(claim_id) or {}).get("status") != "accepted"
+    )
+
+    if not current_promoted:
         errors.append("no promoted policy snapshot")
     else:
-        if promoted.get("status") != "promoted":
+        if current_promoted.get("status") != "promoted":
             errors.append("policy snapshot is not promoted")
-        if promoted.get("rules_fingerprint") != compiled_fingerprint:
-            errors.append("compiled rules differ from promoted policy")
-        if current_claim_fingerprint and promoted.get("claim_policy_fingerprint") != current_claim_fingerprint:
-            errors.append("claim decisions differ from promoted policy")
-        if promoted.get("policy_id") != _policy_id(promoted):
+        if current_promoted.get("policy_id") != _policy_id(current_promoted):
             errors.append("promoted policy content hash mismatch")
-    compatible = not errors
+        if current_promoted.get("rules_fingerprint") != candidate.get("rules_fingerprint"):
+            errors.append("compiled rules differ from promoted policy")
+        if current_promoted.get("claim_policy_fingerprint") != candidate.get("claim_policy_fingerprint"):
+            errors.append("claim decisions differ from promoted policy")
+        if current_promoted.get("policy_id") != candidate.get("policy_id"):
+            errors.append("compiled semantic policy differs from promoted policy")
+
+    unique_errors = sorted(set(str(error) for error in errors if error))
     return {
-        "policy_id": promoted.get("policy_id") if compatible else "compiled-" + compiled_fingerprint,
-        "promoted_policy_id": promoted.get("policy_id"),
+        "compatible": not unique_errors,
+        "errors": unique_errors,
+        "warnings": sorted(set(str(warning) for warning in warnings if warning)),
+        "candidate_policy_id": candidate.get("policy_id"),
+        "promoted_policy_id": current_promoted.get("policy_id") if current_promoted else None,
+        "required_claims": list(candidate.get("required_claims") or []),
+        "failed_required_claims": failed_required,
+        "rules_fingerprint": candidate.get("rules_fingerprint"),
+        "claim_registry_version": current_registry.get("registry_version") if current_registry else None,
+        "claim_semantic_fingerprint": current_registry.get("semantic_fingerprint") if current_registry else None,
+        "claim_policy_fingerprint": candidate.get("claim_policy_fingerprint"),
+    }
+
+
+def runtime_context(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    current_registry = claims.load() if registry is None else registry
+    acceptance = semantic_acceptance(current_registry)
+    compiled_fingerprint = str(acceptance.get("rules_fingerprint") or rules_fingerprint())
+    compatible = bool(acceptance.get("compatible"))
+    return {
+        "policy_id": acceptance.get("promoted_policy_id") if compatible else "compiled-" + compiled_fingerprint,
+        "promoted_policy_id": acceptance.get("promoted_policy_id"),
+        "candidate_policy_id": acceptance.get("candidate_policy_id"),
         "compatible": compatible,
-        "errors": errors,
+        "errors": list(acceptance.get("errors") or []),
+        "warnings": list(acceptance.get("warnings") or []),
+        "failed_required_claims": list(acceptance.get("failed_required_claims") or []),
+        "required_claims": list(acceptance.get("required_claims") or []),
         "rules_fingerprint": compiled_fingerprint,
-        "claim_registry_version": registry.get("registry_version") if registry else None,
-        "claim_policy_fingerprint": current_claim_fingerprint,
+        "claim_registry_version": acceptance.get("claim_registry_version"),
+        "claim_semantic_fingerprint": acceptance.get("claim_semantic_fingerprint"),
+        "claim_policy_fingerprint": acceptance.get("claim_policy_fingerprint"),
         "claim_validated_runs": {
             claim_id: claim.get("last_validated_run")
-            for claim_id, claim in claims.claim_map(registry).items()
+            for claim_id, claim in claims.claim_map(current_registry).items()
             if isinstance(claim.get("last_validated_run"), int)
-        } if registry else {},
+        } if current_registry else {},
         "parameters": parameters(),
     }
 

@@ -16,6 +16,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from farm import analysis, claims, cycle, heal, ledger, policy, probes, questions, research, rules  # noqa: E402
+from experiments import research_agent as scheduled_research  # noqa: E402
 
 
 class Suite:
@@ -77,6 +78,16 @@ def main() -> int:
             state = Path(tmp) / "state"
             state.mkdir()
             shutil.copy2(source_history, state / "history.ndjson")
+            # Preserve every production input that determines the current strategy
+            # and its required claims. A history-only fixture silently falls back to
+            # chicken/chicken and tests a policy unlike the deployed dual-cap one.
+            for name in (
+                "dual_cap_audit.json", "beehive_probe.json", "dual_cap_probe.json",
+                "crop_score_probe.json", "provenance.ndjson",
+            ):
+                source = PROJECT / "state" / name
+                if source.exists():
+                    shutil.copy2(source, state / name)
             os.environ["FARM_STATE_DIR"] = str(state)
             os.environ["FARM_TOOL_CALL_LOG"] = str(state / "tool_calls.ndjson")
             heal.STORE = str(state / "heal.json")
@@ -119,11 +130,8 @@ def main() -> int:
             # synthetic cohorts, and reads 1.159 on raw samples versus 1.129 on bucket
             # means, so bucket edges barely move it.
             suite.check(not model["saturating"],
-                        "herd growth is still paying (scaling exponent >= 0.95)",
-                        model["scaling"])
-            suite.check((model["scaling"].get("exponent") or 0) >= 0.95,
-                        "raw-sample scaling exponent is at least proportional",
-                        model["scaling"])
+                        "shared estimator finds no corroborated herd saturation",
+                        {"raw": model["scaling"], "bucketed": model["scaling_bucketed"]})
             suite.check((model["scaling"].get("r") or 0) > 0.8,
                         "the power-law form fits the healthy cohort well",
                         model["scaling"])
@@ -184,6 +192,14 @@ def main() -> int:
             candidate = policy.compile_snapshot(registry)
             suite.check(candidate["audit"]["ok"], "compatible candidate policy compiles", candidate["audit"])
             suite.check(
+                candidate["parameters"].get("capped_replacement_kind") == "beehive"
+                and {"strategy.chicken_engine", "strategy.capped_slot_efficiency"}.issubset(
+                    set(candidate.get("required_claims") or [])
+                ),
+                "hermetic policy fixture preserves the deployed dual-cap strategy",
+                {"parameters": candidate["parameters"], "required": candidate.get("required_claims")},
+            )
+            suite.check(
                 (candidate.get("objective") or {}).get("ordering") == "lexicographic"
                 and "league" in str((candidate.get("objective") or {}).get("metric")),
                 "compiled policy optimizes league before lifetime produce",
@@ -195,6 +211,38 @@ def main() -> int:
             runtime = policy.runtime_context(registry)
             suite.check(runtime["compatible"] and runtime["policy_id"] == promoted["policy_id"],
                         "promoted policy matches compiled rules and claim decisions", runtime)
+
+            stale_challenge = copy.deepcopy(registry)
+            for item in stale_challenge["claims"]:
+                if item["id"] == "mechanic.output_linear_with_herd":
+                    item["status"] = "challenged"
+            stale_runtime = policy.runtime_context(stale_challenge)
+            suite.check(
+                not stale_runtime["compatible"]
+                and "mechanic.output_linear_with_herd" in stale_runtime["failed_required_claims"],
+                "stale stored fingerprints cannot hide a challenged required claim",
+                stale_runtime,
+            )
+            empty_acceptance = policy.semantic_acceptance({}, promoted)
+            suite.check(
+                not empty_acceptance["compatible"] and "no claim registry" in empty_acceptance["errors"],
+                "an explicitly empty registry fails closed instead of loading live state",
+                empty_acceptance,
+            )
+
+            original_owners = policy.OWNERS
+            try:
+                policy.OWNERS = copy.deepcopy(policy.OWNERS)
+                policy.OWNERS["collect_every"]["invariants"].append("explicit_promotion")
+                owner_drift = policy.semantic_acceptance(registry, promoted)
+            finally:
+                policy.OWNERS = original_owners
+            suite.check(
+                not owner_drift["compatible"]
+                and "compiled semantic policy differs from promoted policy" in owner_drift["errors"],
+                "complete semantic policy identity catches ownership drift",
+                owner_drift,
+            )
 
             tampered = copy.deepcopy(promoted)
             tampered["parameters"]["collect_every"] = int(tampered["parameters"]["collect_every"]) + 1
@@ -362,8 +410,13 @@ def main() -> int:
                 "rival_wake", "RIVAL WAKE: John recent 2.000/min vs base 0.000/min",
                 row={"run": 268, "ts": "2026-08-22T02:00:00Z"},
             )
-            suite.check(reopened["reopened"] and reopened["question"]["generation"] == 2,
-                        "new evidence reopens an answered question as a new generation")
+            suite.check(
+                reopened["reopened"] and reopened["question"]["generation"] == 2
+                and reopened["question"]["generation_opened_run"] == 268
+                and reopened["question"]["next_step_due_run"] == 268 + rules.QUESTION_MAX_AGE_RUNS,
+                "new evidence reopens a question with a fresh bounded generation",
+                reopened["question"],
+            )
             suite.raises(ValueError, lambda: questions.set_status(q1["question"]["id"], "forgotten"),
                          "invalid question status is rejected")
 
@@ -423,7 +476,26 @@ def main() -> int:
             suite.check(len(questions.load_all()) == 1 and questions.load_all()[0]["occurrences"] == 2,
                         "question disposition leaves one current ledger row")
 
-            # Probe registry and budget enforcement.
+            # Probe registry, research WIP, and budget enforcement.
+            suite.check(
+                scheduled_research.proposal_capacity([
+                    {"source": "research_agent", "status": "open"},
+                    {"source": "research_agent", "status": "claimed"},
+                ]) == 0,
+                "two outstanding research orders stop new proposal intake",
+            )
+            suite.check(
+                scheduled_research.proposal_capacity([
+                    {"source": "research_agent", "status": "open"},
+                    {"source": "governance", "status": "open"},
+                ]) == 1,
+                "non-research repairs do not consume research WIP",
+            )
+            research_source = (PROJECT / "experiments" / "research_agent.py").read_text(encoding="utf-8")
+            suite.check(
+                "question_ids = [str(item.get(\"id\")) for item in questions.open_questions()" not in research_source,
+                "a proposal cannot claim every open question as its lineage",
+            )
             listed = {item["id"]: item for item in probes.list_probes()}
             suite.check(all((item.get("budget") or {}).get("wall_seconds") for item in listed.values()),
                         "every registered probe has a wall-time budget")

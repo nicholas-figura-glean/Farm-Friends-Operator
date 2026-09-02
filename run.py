@@ -798,7 +798,15 @@ def do_review(n: int) -> int:
 
 def do_questions(include_closed: bool = False) -> int:
     rows = questions.load_all() if include_closed else questions.open_questions()
-    print("QUESTIONS %d %s" % (len(rows), "total" if include_closed else "open"))
+    current_run = (cycle.last_history() or {}).get("run")
+    health = questions.health(current_run)
+    print("QUESTIONS %d %s | health=%s probing=%s overdue_high=%s flow=%s/%s"
+          % (
+              len(rows), "total" if include_closed else "open", health.get("status"),
+              health.get("probing"), len(health.get("overdue_high_priority") or []),
+              (health.get("current_flow") or {}).get("closures"),
+              (health.get("current_flow") or {}).get("arrivals"),
+          ))
     for item in rows:
         print(
             "%s %-8s %-18s seen=%s x%s %s"
@@ -809,6 +817,9 @@ def do_questions(include_closed: bool = False) -> int:
         )
         print("  hypothesis: %s" % item.get("hypothesis"))
         print("  settles: %s" % item.get("settle_measurement"))
+        print("  owner=%s due=%s next=%s" % (
+            item.get("owner"), item.get("next_step_due_run"), item.get("next_step"),
+        ))
     return 0
 
 
@@ -977,6 +988,12 @@ def do_self_test() -> int:
 
     checks = 0
     failures = []
+    # Failure-injection must not write raw snapshots or intents into operational
+    # state. Redirect the two cycle diagnostics for the entire self-test.
+    selftest_state = tempfile.TemporaryDirectory(prefix="farm-selftest-")
+    saved_raw_dir, saved_intents = cycle.RAW_DIR, cycle.INTENTS
+    cycle.RAW_DIR = os.path.join(selftest_state.name, "raw")
+    cycle.INTENTS = os.path.join(selftest_state.name, "intents.ndjson")
     fixtures = {
         "farm": [
             "fixtures/start_list_farm.json",
@@ -1152,7 +1169,10 @@ def do_self_test() -> int:
     stub = _StarvedClient()
     run_obj = cycle.Cycle(stub)
     try:
-        farm = run_obj.read_state("selftest")
+        # Parse the fixture directly: self-test must never write a diagnostic raw
+        # snapshot into operational state merely to exercise recovery ordering.
+        farm = parse.parse_farm(stub.call("list_farm"))
+        run_obj.coins = farm.coins
         farm = run_obj.ensure_feed_on_hand(farm)
         run_obj.feed_if_needed(farm, 1)
     except Exception as exc:  # noqa: BLE001
@@ -1189,7 +1209,7 @@ def do_self_test() -> int:
     gw = _GatewayFailClient()
     gw_run = cycle.Cycle(gw)
     try:
-        gw_run.feed_if_needed(gw_run.read_state("selftest"), 2)
+        gw_run.feed_if_needed(parse.parse_farm(gw.call("list_farm")), 2)
     except Exception as exc:  # noqa: BLE001
         failures.append("a 504 on bulk feed must not abort the run: %r" % exc)
 
@@ -2256,6 +2276,8 @@ def do_self_test() -> int:
     finally:
         _journal.ALERTS = _oap
 
+    cycle.RAW_DIR, cycle.INTENTS = saved_raw_dir, saved_intents
+    selftest_state.cleanup()
     print("self-test: %d checks, %d failures" % (checks, len(failures)))
     for f in failures:
         print("  FAIL", f)

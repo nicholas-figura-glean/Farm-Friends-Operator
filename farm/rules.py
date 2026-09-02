@@ -283,6 +283,17 @@ RESEARCH_AUDIT_RUNS = 10
 # Broad autonomous operating review; aligned with the journal/claim evidence window.
 GOVERNANCE_REVIEW_RUNS = JOURNAL_EVERY
 PROBE_MIN_INTERVAL_RUNS = 20
+# Learning-flow contracts. High-blast uncertainty must never sit unattended for
+# more than two governance windows, and one farm mutation lock means only one
+# probe can be active at a time.
+QUESTION_MAX_AGE_RUNS = 40
+QUESTION_FLOW_WINDOW_RUNS = 40
+QUESTION_BACKLOG_WARN = 12
+MAX_PROBING_QUESTIONS = 1
+MAX_RESEARCH_ORDER_WIP = 2
+# Preserve model budget for detector-confirmed reliability work. Exploration can
+# consume the first tranche; only protected producers may draw the reserve.
+AUTHOR_REPAIR_RESERVE_USD = 2.0
 # A repeated alert is not novel evidence immediately after its probe settled.
 QUESTION_REOPEN_RUNS = 20
 

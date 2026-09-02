@@ -29,8 +29,9 @@ __pycache__/
 *.tmp
 *.tmp.[0-9]*
 
-# Generated preview, rebuilt on demand.
+# Generated previews and operator evidence, rebuilt/appended locally.
 game-preview.html
+/farm-strategy-journal.md
 
 # Local scratch that must never reach a commit.
 .author-stage-*/

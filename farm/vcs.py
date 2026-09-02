@@ -59,6 +59,7 @@ PROJECT = control.project_root(Path(__file__).resolve().parent.parent)
 BRANCH_PREFIX = "author/"
 TAG_PREFIX = "release/"
 MAIN = "main"
+GENERATED_PATHS = {"farm-strategy-journal.md"}
 PUSH_REMOTE = "origin"
 # An unattended author must never trust whichever destination happens to be named
 # "origin". The repository identity is allowlisted so a local configuration mistake
@@ -127,9 +128,13 @@ def commit_live(message: str, paths: Optional[List[str]] = None) -> Optional[str
     """
     try:
         if paths:
-            _run(["add", "--"] + paths)
+            selected = [path for path in paths if path not in GENERATED_PATHS]
+            if not selected:
+                return None
+            _run(["add", "--"] + selected)
         else:
-            _run(["add", "-A"])
+            exclusions = [":(exclude)%s" % path for path in sorted(GENERATED_PATHS)]
+            _run(["add", "-A", "--", "."] + exclusions)
         if not _run(["diff", "--cached", "--name-only"]).stdout.strip():
             return None
         _run(["commit", "-q", "-m", message])
@@ -420,7 +425,8 @@ def require_remote_sync(remote: str = PUSH_REMOTE,
     local = head()
     if not local:
         raise GitError("local %s does not resolve to a commit" % MAIN)
-    dirty = dirty_paths(include_untracked=True)
+    all_dirty = dirty_paths(include_untracked=True)
+    dirty = [path for path in all_dirty if control.is_release_source(path)]
     if require_clean and dirty:
         raise GitError(
             "release source has %d uncommitted path(s): %s"
@@ -433,7 +439,8 @@ def require_remote_sync(remote: str = PUSH_REMOTE,
             % (MAIN, short(local), remote, MAIN, short(observed))
         )
     return {"remote": remote, "url": url, "branch": MAIN, "sha": local,
-            "clean": not dirty, "synchronized": True}
+            "clean": not dirty, "non_release_dirty": sorted(set(all_dirty) - set(dirty)),
+            "synchronized": True}
 
 
 # -- release identity and revert --------------------------------------------

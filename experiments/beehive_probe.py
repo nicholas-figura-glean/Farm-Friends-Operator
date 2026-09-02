@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT))
 from farm import ledger, mcp, parse, policy, rules  # noqa: E402
 from farm.mcp import McpError, ToolError  # noqa: E402
 
-STATE = ROOT / "state"
+STATE = Path(os.environ.get("FARM_STATE_DIR", str(ROOT / "state"))).resolve()
 HISTORY = STATE / "history.ndjson"
 EXPERIMENTS = STATE / "experiments.ndjson"
 PROBE_STATE = STATE / "beehive_probe.json"

@@ -261,7 +261,8 @@ def semantic_audit(
     promoted: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     history = list(rows) if rows is not None else analysis.history_rows()
-    registry = registry or claims.load() or claims.build(history)
+    if registry is None:
+        registry = claims.load() or claims.build(history)
     promoted = promoted if promoted is not None else policy.load()
     errors = list(claims.validate(registry))
     warnings: List[str] = []
@@ -282,9 +283,9 @@ def semantic_audit(
     errors.extend(candidate.get("audit", {}).get("errors") or [])
     warnings.extend(candidate.get("audit", {}).get("warnings") or [])
     if promoted:
-        runtime = policy.runtime_context(registry)
-        if not runtime.get("compatible"):
-            warnings.extend(runtime.get("errors") or [])
+        acceptance = policy.semantic_acceptance(registry, promoted)
+        errors.extend(acceptance.get("errors") or [])
+        warnings.extend(acceptance.get("warnings") or [])
     else:
         warnings.append("no promoted policy snapshot")
 

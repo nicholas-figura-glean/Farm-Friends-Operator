@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 from farm import ledger, parse, policy, rules  # noqa: E402
 from farm.mcp import Client  # noqa: E402
 
-STATE = ROOT / "state"
+STATE = Path(os.environ.get("FARM_STATE_DIR", str(ROOT / "state"))).resolve()
 PROBE = STATE / "crop_score_probe.json"
 TOOL_CALLS = STATE / "tool_calls.ndjson"
 EXPERIMENTS = STATE / "experiments.ndjson"

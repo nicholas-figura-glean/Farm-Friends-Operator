@@ -107,8 +107,28 @@ def _write_manifest(path: Path, manifest: Dict[str, Any]) -> None:
     _atomic_json(_manifest_path(path), manifest)
 
 
-def _open_lock(path: Path):
+def _state_read_only(path: Path) -> bool:
+    if os.environ.get("FARM_STATE_READ_ONLY") != "1":
+        return False
+    scratch = os.environ.get("FARM_SANDBOX_SCRATCH")
+    if scratch:
+        try:
+            path.resolve().relative_to(Path(scratch).resolve())
+            return False
+        except ValueError:
+            pass
+    return True
+
+
+def _open_lock(path: Path, read_only: bool = False):
     lock = _lock_path(path)
+    if read_only or _state_read_only(path):
+        # Sandboxed readers may coordinate on a projected lock but must never
+        # create, recover, or mutate live ledger sidecars.
+        try:
+            return open(lock, "rb")
+        except FileNotFoundError as exc:
+            raise CompactionError("read-only ledger lock is missing: %s" % lock) from exc
     lock.parent.mkdir(parents=True, exist_ok=True)
     return open(lock, "a+b")
 
@@ -339,9 +359,12 @@ def read_rows(path: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     # serialising behind it creates a lock convoy even when the hot tail suffices.
     # If a compactor races this check, its exclusive lock completes the atomic
     # swap before our shared lock is granted.
+    read_only = _state_read_only(ledger)
     if _transaction_path(ledger).exists():
+        if read_only:
+            raise CompactionError("read-only ledger has a pending recovery transaction: %s" % ledger)
         recover(ledger)
-    with _open_lock(ledger) as lock:
+    with _open_lock(ledger, read_only=read_only) as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
         try:
             manifest = _manifest(ledger)
