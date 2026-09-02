@@ -967,6 +967,53 @@ check("a falling lifetime counter is treated as outside loss",
       == "negative produce delta")
 check("an ordinary run is not excluded", canary._exogenous_loss(_ok) is None)
 
+# Live reproduction from release 20260902T081108Z: alien-tagged rows happened to
+# be the positive half of the alternating score burst. Excluding only those rows
+# retained their paired zeros and manufactured a 40% regression in unchanged
+# strategy code. The whole event/burst pair must be non-evidence.
+phase_dir = pathlib.Path(tempfile.mkdtemp())
+phase_store = str(phase_dir / "canary.json")
+phase_history = str(phase_dir / "canary.ndjson")
+phase_runs = str(phase_dir / "history.ndjson")
+phase_baseline = [
+    {
+        "run": run, "animals": 100,
+        "produce_per_min": 200.0 if run % 2 else 0.0,
+        "interval_min": 5.0, "verified": True, "collected": 1,
+    }
+    for run in range(1, 21)
+]
+with open(phase_runs, "w", encoding="utf-8") as handle:
+    for row in phase_baseline:
+        handle.write(json.dumps(row) + "\n")
+canary.arm(
+    "rev-phase", "rev-base", store=phase_store, history=phase_history,
+    run_history=phase_runs,
+)
+phase_candidate = [
+    {"run": 21, "animals": 100, "produce_per_min": 200.0, "interval_min": 5.0,
+     "verified": True, "collected": 1, "risk_event_counts": {"aliens": 1}},
+    {"run": 22, "animals": 100, "produce_per_min": 0.0, "interval_min": 5.0,
+     "verified": True, "collected": 0},
+    {"run": 23, "animals": 100, "produce_per_min": 200.0, "interval_min": 5.0,
+     "verified": True, "collected": 1},
+    {"run": 24, "animals": 100, "produce_per_min": 0.0, "interval_min": 5.0,
+     "verified": True, "collected": 0},
+    {"run": 25, "animals": 100, "produce_per_min": 200.0, "interval_min": 5.0,
+     "verified": True, "collected": 1, "risk_event_counts": {"aliens": 1}},
+    {"run": 26, "animals": 100, "produce_per_min": 0.0, "interval_min": 5.0,
+     "verified": True, "collected": 0},
+]
+with open(phase_runs, "a", encoding="utf-8") as handle:
+    for row in phase_candidate:
+        handle.write(json.dumps(row) + "\n")
+phase_verdict = canary.evaluate(phase_store, phase_runs)
+check("outside-loss exclusion preserves the complete score-burst pair",
+      phase_verdict["status"] == canary.WATCHING
+      and phase_verdict.get("excluded_runs") == [21, 22, 25, 26]
+      and abs(float(phase_verdict.get("observed_per_animal") or 0) - 1.0) < 1e-6,
+      str(phase_verdict))
+
 # Herd normalisation. Same per-animal productivity, herd 13% smaller: absolute rate
 # looks like a 13% regression, per-animal correctly looks like none.
 _big = {"run": 903, "animals": 256_163, "produce_per_min": 0.40 * 256_163}

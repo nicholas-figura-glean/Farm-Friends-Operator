@@ -154,6 +154,26 @@ def _exogenous_loss(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _exogenous_transition_runs(rows: List[Dict[str, Any]]) -> set[int]:
+    """Exclude an outside-loss interval together with its score-burst partner.
+
+    Lifetime score is reported in alternating bursts. Removing only an alien-event
+    row can systematically remove the positive half while retaining the following
+    zero, manufacturing a release regression. Pairing the event row with the next
+    interval preserves phase balance without treating either as candidate evidence.
+    """
+    excluded: set[int] = set()
+    for index, row in enumerate(rows):
+        if not _exogenous_loss(row):
+            continue
+        run = row.get("run")
+        if isinstance(run, int):
+            excluded.add(run)
+        if index + 1 < len(rows) and isinstance(rows[index + 1].get("run"), int):
+            excluded.add(int(rows[index + 1]["run"]))
+    return excluded
+
+
 def _per_animal(row: Dict[str, Any]) -> Optional[float]:
     """Produce rate divided by herd size.
 
@@ -468,6 +488,7 @@ def arm(
     runs = _runs(run_history)
     evaluation.ensure_champion(store, previous, run=latest_run(runs))
     transition_exclusions = _progression_transition_runs(runs)
+    exogenous_exclusions = _exogenous_transition_runs(runs)
     latest_progression_run = _latest_progression_run(runs)
     current_run = latest_run(runs)
     progression_recovery = bool(
@@ -476,7 +497,8 @@ def arm(
         and current_run - latest_progression_run <= rules.CANARY_PROGRESSION_RECOVERY_RUNS
     )
     comparable_runs = [
-        row for row in runs if int(row.get("run") or -1) not in transition_exclusions
+        row for row in runs
+        if int(row.get("run") or -1) not in transition_exclusions | exogenous_exclusions
     ]
     efficacy_baseline = evaluation.baseline_samples(comparable_runs)
     baseline_stall_rows = _baseline_stall_rows(comparable_runs)
@@ -514,6 +536,7 @@ def arm(
         "baseline_rate": baseline_rate(comparable_runs),
         "baseline_per_animal": baseline_per_animal(comparable_runs),
         "baseline_transition_excluded_runs": sorted(transition_exclusions),
+        "baseline_exogenous_excluded_runs": sorted(exogenous_exclusions),
         "preexisting_progression_recovery": progression_recovery,
         "preexisting_progression_run": latest_progression_run,
         "baseline_runs": rules.CANARY_BASELINE_RUNS,
@@ -567,9 +590,10 @@ def evaluate(
     # evidence either way. They are still counted as observed so a long invasion
     # cannot hold a canary open forever.
     transition_exclusions = _progression_transition_runs(after)
+    exogenous_exclusions = _exogenous_transition_runs(after)
+    excluded_runs = transition_exclusions | exogenous_exclusions
     contaminated = [
-        row for row in after
-        if _exogenous_loss(row) or int(row.get("run") or -1) in transition_exclusions
+        row for row in after if int(row.get("run") or -1) in excluded_runs
     ]
     usable = [row for row in after if row not in contaminated]
 
@@ -824,7 +848,7 @@ def evaluate(
     if contaminated:
         verdict["excluded_runs"] = [int(r.get("run") or 0) for r in contaminated]
         verdict["excluded_reason"] = (
-            _exogenous_loss(contaminated[0])
+            next((_exogenous_loss(row) for row in contaminated if _exogenous_loss(row)), None)
             or "progression transition and first lagging score interval"
         )
 
