@@ -23,12 +23,12 @@ done
 echo "=== mechanics ==="
 mech="$(osascript -l JavaScript game/test_mechanics.js 2>&1)" || { echo "  FAIL mechanics suite errored"; fail=1; }
 echo "$mech"
-grep -q "FAIL" <<<"$mech" && fail=1
+printf '%s\n' "$mech" | grep -q "FAIL" && fail=1
 
 echo "=== ui ==="
 uiout="$(osascript -l JavaScript game/test_ui.js 2>&1)" || { echo "  FAIL ui suite errored"; fail=1; }
 echo "$uiout"
-grep -q "FAIL" <<<"$uiout" && fail=1
+printf '%s\n' "$uiout" | grep -q "FAIL" && fail=1
 
 if [[ "${1:-}" == "--balance" ]]; then
   echo "=== balance (6h simulated) ==="
