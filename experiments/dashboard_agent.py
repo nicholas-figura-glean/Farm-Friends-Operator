@@ -46,6 +46,7 @@ from farm import analysis, architecture, autonomy, workorders  # noqa: E402
 
 STATE = Path(os.environ.get("FARM_STATE_DIR", str(PROJECT / "state"))).resolve()
 LEDGER = Path(os.environ.get("FARM_DASHBOARD_HEALTH_LOG", str(STATE / "dashboard_health.ndjson")))
+WORKORDER_QUEUE = os.environ.get("FARM_WORKORDER_QUEUE", str(STATE / "workorders.ndjson"))
 DASHBOARD_URL = os.environ.get("FARM_DASHBOARD_URL", "http://127.0.0.1:8765").rstrip("/")
 
 # Each dashboard readout, how it is produced, and how stale it may be before that is
@@ -365,12 +366,13 @@ def _staleness() -> Dict[str, Any]:
 def _resolve_healthy_orders(
     results: List[Dict[str, Any]],
     problems: List[Dict[str, Any]],
-    path: str = workorders.QUEUE,
+    path: Optional[str] = None,
     healthy_sources: Optional[List[str]] = None,
 ) -> List[str]:
     """Close readout repairs whose exact source is healthy again."""
+    queue = path or WORKORDER_QUEUE
     unhealthy = {str(problem.get("source") or "") for problem in problems}
-    current = workorders.current(path)
+    current = workorders.current(queue)
     resolved: List[str] = []
     healthy = {
         str(result.get("source") or "")
@@ -389,7 +391,7 @@ def _resolve_healthy_orders(
         workorders.resolve(
             order_id, workorders.SUPERSEDED,
             note="readout is healthy again; periodic verifier closed stale repair",
-            path=path,
+            path=queue,
         )
         resolved.append(order_id)
     return resolved
@@ -511,8 +513,16 @@ def main() -> int:
     # Architecture versioning. Recorded after the probes so that a snapshot which
     # cannot even be computed is reported as a broken readout first.
     arch_result: Dict[str, Any] = {}
+    read_only = os.environ.get("FARM_STATE_READ_ONLY") == "1"
     try:
-        arch_result = architecture.record(trigger="dashboard agent scan")
+        if read_only:
+            snapshot = architecture.snapshot()
+            arch_result = {
+                "recorded": False, "reason": "release-gate read-only scan",
+                "short": snapshot.get("short"),
+            }
+        else:
+            arch_result = architecture.record(trigger="dashboard agent scan")
     except Exception as exc:  # noqa: BLE001
         arch_result = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
         problems.append({"severity": "degraded",
@@ -539,8 +549,10 @@ def main() -> int:
     # Healthy verification is also a transition. Without closing stale repairs, an
     # already-recovered readout permanently poisons repair-flow reviews and consumes
     # future author budget.
-    resolved = _resolve_healthy_orders(
-        results, problems, healthy_sources=healthy_staleness,
+    resolved = (
+        [] if read_only else _resolve_healthy_orders(
+            results, problems, path=WORKORDER_QUEUE, healthy_sources=healthy_staleness,
+        )
     )
 
     # One order per distinct broken readout. The change id is derived from the source
@@ -562,6 +574,8 @@ def main() -> int:
                 if str(problem["source"]).endswith("_age")
                 else ["farm/autonomy.py", "farm/architecture.py", "monitor.py"]
             )
+            if read_only:
+                continue
             submitted = workorders.submit(
                 change,
                 source="dashboard_agent",
@@ -572,6 +586,7 @@ def main() -> int:
                     "the readout builds in under 4000ms",
                 ],
                 files=repair_files,
+                path=WORKORDER_QUEUE,
             )
             if submitted:
                 filed += 1

@@ -854,7 +854,11 @@ check("dashboard agent requires all backing generation tokens",
 
 with tempfile.TemporaryDirectory(prefix="dashboard-agent-health-") as health_tmp:
     ledger = Path(health_tmp) / "dashboard_health.ndjson"
-    agent_env = dict(os.environ, FARM_DASHBOARD_HEALTH_LOG=str(ledger))
+    agent_env = dict(
+        os.environ,
+        FARM_DASHBOARD_HEALTH_LOG=str(ledger),
+        FARM_WORKORDER_QUEUE=str(Path(health_tmp) / "workorders.ndjson"),
+    )
     result = subprocess.run([sys.executable, str(agent_path)], env=agent_env,
                             capture_output=True, text=True, timeout=300)
     check("the agent runs cleanly", result.returncode == 0,
