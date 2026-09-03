@@ -1830,6 +1830,9 @@ def do_self_test() -> int:
     if throughput_class != "throughput":
         failures.append("new all-animal throughput alerts must retain their lifecycle class")
     checks += 1
+    if _heal.classify("animal count 16873 below expected 16875")[0] != "count_mismatch":
+        failures.append("below-expected animal verification must use the count-mismatch lifecycle")
+    checks += 1
     wild = {
         "rate_ceiling": 999,
         "adopt_cap": 10 ** 6,
