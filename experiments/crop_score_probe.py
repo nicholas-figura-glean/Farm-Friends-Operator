@@ -219,6 +219,11 @@ def analyze() -> Dict[str, Any]:
         return result
     cutoff = harvest["time"] + timedelta(minutes=6)
     relevant_lifetime = [value for ts, value, _ in lifetime_samples if ts <= cutoff]
+    relevant_runs = [
+        int(row.get("run")) for row in rows
+        if isinstance(row.get("run"), int)
+        and parse_ts(row.get("ts")) and parse_ts(row.get("ts")) <= cutoff
+    ]
     latest_lifetime = max(relevant_lifetime, default=baseline)
     relevant_events = [
         event for event in animal_events.values()
@@ -254,6 +259,7 @@ def analyze() -> Dict[str, Any]:
         "baseline_lifetime_produce": baseline,
         "latest_lifetime_produce": latest_lifetime,
         "lifetime_delta": lifetime_delta,
+        "evidence_run_to": max(relevant_runs, default=harvest.get("run")),
         "animal_production_events": sorted(relevant_events, key=lambda item: item["ts"]),
         "animal_collection_calls": relevant_collections,
         "animal_production_units": animal_units,

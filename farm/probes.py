@@ -336,6 +336,7 @@ def _trusted_adjudication(
                 key: value for key, value in baseline_value.items()
                 if key not in {"result", "completed_ts"}
             }
+            start_material["status"] = "observing"
             canonical = (
                 json.dumps(start_material, indent=2, sort_keys=True, allow_nan=False) + "\n"
             ).encode("utf-8")
@@ -537,7 +538,11 @@ def _trusted_adjudication(
         return {
             "settled": complete,
             "status": "falsified" if crop_adds_score else "supported" if complete else "inconclusive",
-            "evidence_cutoff_run": int(harvest["run"]) if complete else result.get("baseline_run"),
+            "evidence_cutoff_run": (
+                int(result.get("evidence_run_to"))
+                if complete and isinstance(result.get("evidence_run_to"), int)
+                else int(harvest["run"]) if complete else result.get("baseline_run")
+            ),
             "question_classes": ["knob_age", "model_drift", "strategy_stale", "idle_capital"],
             "subjects": ["strategy.food_crop_score"],
             "answer": (
