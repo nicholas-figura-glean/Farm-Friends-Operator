@@ -75,6 +75,18 @@ def append_experiment(row: Dict[str, Any]) -> None:
 
 
 def start(qty: int) -> Dict[str, Any]:
+    try:
+        prior_state = json.loads(PROBE.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        prior_state = {}
+    prior_result = (
+        prior_state.get("result")
+        if isinstance(prior_state.get("result"), dict)
+        and prior_state.get("result", {}).get("status") == "complete"
+        else prior_state.get("prior_result")
+        if isinstance(prior_state.get("prior_result"), dict)
+        else None
+    )
     if qty < 100 or qty > MAX_QTY:
         raise ValueError("qty must be between 100 and %d" % MAX_QTY)
     handle = LOCK.open("a+", encoding="utf-8")
@@ -127,6 +139,7 @@ def start(qty: int) -> Dict[str, Any]:
                 "plot_counts": after.counts_by_crop,
             },
             "falsifier": "harvested wheat creates no lifetime-produce residual above same-window animal production",
+            "prior_result": prior_result,
         }
         PROBE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         append_experiment(dict(state, event="crop_score_holdout.started"))

@@ -62,6 +62,18 @@ def _latest_run() -> int:
 
 
 def start() -> Dict[str, Any]:
+    try:
+        prior_state = json.loads(PROBE.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        prior_state = {}
+    prior_result = (
+        prior_state.get("result")
+        if isinstance(prior_state.get("result"), dict)
+        and prior_state.get("result", {}).get("status") == "complete"
+        else prior_state.get("prior_result")
+        if isinstance(prior_state.get("prior_result"), dict)
+        else None
+    )
     handle = LOCK.open("a+", encoding="utf-8")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     try:
@@ -93,7 +105,7 @@ def start() -> Dict[str, Any]:
             "status": "observing",
             "started_ts": utcnow(),
             "baseline_run": _latest_run(),
-            "budget": {"coins": cost, "calls": 3, "plots": 3, "wall_seconds": 2400},
+            "budget": {"coins": cost, "calls": 5, "plots": 3, "wall_seconds": 2400},
             "before": {"coins": before.coins, "plots": before.plot_count, "lifetime_produce": before.lifetime_produce},
             "after": {
                 "coins": after.coins,
@@ -104,6 +116,7 @@ def start() -> Dict[str, Any]:
             "responses": responses,
             "intervention_id": intervention,
             "falsifier": "any crop advances and harvests inside its current declared timer window",
+            "prior_result": prior_result,
         }
         PROBE.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _append(dict(row, event="dual_cap_crop_timer.started"))

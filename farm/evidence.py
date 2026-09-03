@@ -544,7 +544,7 @@ def report() -> Dict[str, Any]:
     persisted_registry = claims.load()
     registry = claims.refresh(rows, persist=False)
     semantic = research.semantic_audit(rows, registry=registry)
-    sweep = research.counterfactual_sweep(rows)
+    sweep = research.counterfactual_view(rows)
     history_cost = cost_history()
     cost = cost_model(rows)
     cost["now"]["estimated_exception_cost"] = (history_cost.get("stats") or {}).get("actual_cost", 0.0)

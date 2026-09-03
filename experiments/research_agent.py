@@ -312,6 +312,7 @@ def sensitive_parameters() -> List[Dict[str, Any]]:
     """Constants whose alternatives would have changed real decisions."""
     try:
         sweep = research.counterfactual_sweep()
+        write_json(STATE / "counterfactual_sweep.json", sweep)
     except Exception:  # noqa: BLE001
         return []
     out = []

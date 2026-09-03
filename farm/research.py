@@ -274,6 +274,44 @@ def counterfactual_sweep(
     }
 
 
+def counterfactual_view(
+    rows: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Use a freshness-tagged research cache without weakening full replay.
+
+    The hourly research service computes the exact same pure sweep. Dashboard
+    rendering may reuse it for at most one question-flow window; a missing,
+    malformed, future, or stale cache falls back to a full immutable replay.
+    """
+    history = list(rows) if rows is not None else analysis.history_rows()
+    latest_run = history[-1].get("run") if history else None
+    path = _state_dir() / "counterfactual_sweep.json"
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        cached = {}
+    cached_run = cached.get("run_to") if isinstance(cached, dict) else None
+    valid = bool(
+        cached.get("schema_version") == SCHEMA_VERSION
+        and cached.get("mcp_calls") == 0
+        and isinstance(cached.get("dimensions"), list)
+        and isinstance(cached_run, int)
+        and isinstance(latest_run, int)
+        and 0 <= latest_run - cached_run <= rules.QUESTION_FLOW_WINDOW_RUNS
+    )
+    if valid:
+        return dict(
+            cached,
+            cache_source="research_agent",
+            cache_age_runs=latest_run - cached_run,
+        )
+    return dict(
+        counterfactual_sweep(history),
+        cache_source="synchronous_replay",
+        cache_age_runs=0,
+    )
+
+
 def model_drift(rows: Optional[Sequence[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     history = list(rows) if rows is not None else analysis.history_rows()
     samples = analysis.rate_samples(history, healthy_only=True)

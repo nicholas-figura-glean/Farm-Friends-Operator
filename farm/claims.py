@@ -111,6 +111,14 @@ def _claim(
 def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
     history = list(rows) if rows is not None else analysis.history_rows()
     current_run = max([row.get("run") for row in history if isinstance(row.get("run"), int)], default=None)
+    try:
+        persisted_registry = json.loads((_state_dir() / "claims.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        persisted_registry = {}
+    persisted_claims = {
+        str(claim.get("id")): claim
+        for claim in persisted_registry.get("claims") or [] if claim.get("id")
+    }
     output = analysis.output_model(history)
     species = analysis.species_model(history)
     output_shape = output.get("shape")
@@ -139,7 +147,26 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         crop_timer_state = json.loads((_state_dir() / "dual_cap_probe.json").read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError):
         crop_timer_state = {}
-    crop_timer = crop_timer_state.get("result") if isinstance(crop_timer_state.get("result"), dict) else {}
+    crop_timer_candidate = (
+        crop_timer_state.get("result")
+        if isinstance(crop_timer_state.get("result"), dict) else {}
+    )
+    crop_timer = (
+        crop_timer_candidate
+        if crop_timer_candidate.get("status") == "complete"
+        else crop_timer_state.get("prior_result")
+        if isinstance(crop_timer_state.get("prior_result"), dict)
+        else {}
+    )
+    if not crop_timer and crop_timer_state.get("status") == "observing":
+        prior_claim = persisted_claims.get("mechanic.crop_timers_active") or {}
+        prior_value = prior_claim.get("value") if isinstance(prior_claim.get("value"), dict) else {}
+        if prior_claim.get("status") == "accepted" and prior_value:
+            crop_timer = dict(
+                prior_value,
+                status="complete",
+                budget=(prior_claim.get("estimator") or {}).get("budget"),
+            )
     crop_timer_supported = bool(crop_timer.get("all_timers_supported"))
     crop_timer_runs = [
         int(item.get("run"))
@@ -151,7 +178,27 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         crop_score_state = json.loads((_state_dir() / "crop_score_probe.json").read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError):
         crop_score_state = {}
-    crop_score = crop_score_state.get("result") if isinstance(crop_score_state.get("result"), dict) else {}
+    crop_score_candidate = (
+        crop_score_state.get("result")
+        if isinstance(crop_score_state.get("result"), dict) else {}
+    )
+    crop_score = (
+        crop_score_candidate
+        if crop_score_candidate.get("status") == "complete"
+        else crop_score_state.get("prior_result")
+        if isinstance(crop_score_state.get("prior_result"), dict)
+        else {}
+    )
+    if not crop_score and crop_score_state.get("status") == "observing":
+        prior_claim = persisted_claims.get("strategy.food_crop_score") or {}
+        prior_value = prior_claim.get("value") if isinstance(prior_claim.get("value"), dict) else {}
+        if prior_claim.get("status") == "accepted" and prior_value:
+            crop_score = dict(
+                prior_value,
+                status="complete",
+                supported=bool(prior_value.get("crop_score_residual", 0) > 0),
+                budget=(prior_claim.get("estimator") or {}).get("budget"),
+            )
     crop_score_complete = crop_score.get("status") == "complete"
     crop_score_supported = bool(crop_score.get("supported"))
     capped_slot_supported = bool(

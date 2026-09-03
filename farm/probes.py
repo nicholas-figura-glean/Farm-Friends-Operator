@@ -332,8 +332,12 @@ def _trusted_adjudication(
             raise sandbox.ResultValidationError("probe analysis has no trusted baseline: %s" % filename)
         try:
             baseline_value = json.loads(baseline.read_text(encoding="utf-8"))
+            start_material = {
+                key: value for key, value in baseline_value.items()
+                if key not in {"result", "completed_ts"}
+            }
             canonical = (
-                json.dumps(baseline_value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+                json.dumps(start_material, indent=2, sort_keys=True, allow_nan=False) + "\n"
             ).encode("utf-8")
         except (OSError, TypeError, ValueError) as exc:
             raise sandbox.ResultValidationError("probe analysis baseline is invalid") from exc
