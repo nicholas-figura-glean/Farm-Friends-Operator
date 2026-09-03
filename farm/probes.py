@@ -783,11 +783,15 @@ def run_probe(
 
         with sandbox.scratch_dir("farm-probe-%s-" % probe_id) as scratch_name:
             scratch = Path(scratch_name).resolve()
-            writable = set(declared_outputs) | {"tool_calls.ndjson"}
+            writable = set(declared_outputs)
+            fresh_names = set()
+            if int(budget.get("calls") or 0) > 0:
+                writable.add("tool_calls.ndjson")
+                fresh_names.add("tool_calls.ndjson")
             if hypothesis_id:
                 writable.add("provenance.ndjson")
             projection = sandbox.project_state(
-                live_state, scratch, writable, fresh_names={"tool_calls.ndjson"},
+                live_state, scratch, writable, fresh_names=fresh_names,
             )
             state_view = Path(projection["root"])
 
