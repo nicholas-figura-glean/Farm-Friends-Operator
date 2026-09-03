@@ -553,6 +553,49 @@ def _trusted_adjudication(
             "retry_runs": 2,
         }
 
+    if probe_id == "rival_regime_replay":
+        value = load("rival_regime_probe.json")
+        from experiments import rival_regime_probe
+        expected = rival_regime_probe.build(
+            analysis.read_ndjson(live_state / "history.ndjson", limit=240)
+        )
+        require_equal(value, expected)
+        cutoff = value.get("run_to") if isinstance(value.get("run_to"), int) else None
+        rivals = value.get("rivals") if isinstance(value.get("rivals"), dict) else {}
+        subject_adjudications = {}
+        for subject, measurement in rivals.items():
+            if not isinstance(measurement, dict):
+                continue
+            settled = bool(measurement.get("settled_non_material"))
+            subject_adjudications[str(subject)] = {
+                "settled": settled,
+                "status": "supported" if settled else "inconclusive",
+                "evidence_cutoff_run": cutoff,
+                "answer": (
+                    "Current replay shows %s gained %.0f score versus our %.0f, with herd change %.0f; the episode is no longer decision-material."
+                    % (
+                        subject,
+                        float(measurement.get("rival_score_gain") or 0.0),
+                        float(measurement.get("our_score_gain") or 0.0),
+                        float(measurement.get("rival_herd_gain") or 0.0),
+                    )
+                    if settled else
+                    "Current replay cannot yet rule out a decision-material %s regime." % subject
+                ),
+            }
+        any_settled = any(item.get("settled") for item in subject_adjudications.values())
+        return {
+            "settled": any_settled,
+            "status": "supported" if any_settled else "inconclusive",
+            "evidence_cutoff_run": cutoff,
+            "question_classes": ["rival_wake", "rival_growing", "threat"],
+            "subjects": sorted(subject_adjudications),
+            "subject_adjudications": subject_adjudications,
+            "answer": "Current rival regime replay completed.",
+            "residual_uncertainty": "a renewed material score or herd gain reopens the subject",
+            "retry_runs": rules.PROBE_MIN_INTERVAL_RUNS,
+        }
+
     if probe_id == "endgame_replay":
         value = load("endgame_replay.json")
         from experiments import endgame

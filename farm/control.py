@@ -193,6 +193,7 @@ TRUSTED_PATHS = frozenset(
         "experiments/registry.py",
         "experiments/rescue_feed.py",
         "experiments/research_agent.py",
+        "experiments/rival_regime_probe.py",
         "experiments/strategy_policy.py",
         "deploy/install.sh",
         "deploy/prepare_activation.py",

@@ -708,6 +708,13 @@ def main() -> int:
                         "every registered probe has a wall-time budget")
             suite.check(not listed["species_mix"]["autonomous"] and not listed["species_mix"]["read_only"],
                         "mutating species probe can never be autonomous")
+            suite.check(
+                listed["rival_regime_replay"]["autonomous"]
+                and listed["rival_regime_replay"]["read_only"]
+                and (listed["rival_regime_replay"].get("budget") or {}).get("calls") == 0,
+                "rival questions have a pinned zero-call headless replay",
+                listed["rival_regime_replay"],
+            )
             suite.raises(ValueError, lambda: probes.run_probe("species_mix", explicit=False, run=500),
                          "scheduler refuses a mutating probe")
             probe = probes.run_probe("counterfactual_sweep", explicit=True, run=500)

@@ -61,6 +61,7 @@ PINNED_AUTONOMOUS = {
     "crop_timer_analysis": "f375b3d046b34b6a",
     "dual_cap_audit": "83184f936ff4fa02",
     "endgame_replay": "7e2ea94be1ae2e38",
+    "rival_regime_replay": "56fda551fb102ee0",
 }
 
 
