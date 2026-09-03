@@ -236,7 +236,7 @@ CLASSES: List[Tuple[str, str, Optional[Remedy]]] = [
     ("production", r"^PRODUCTION:", None),
     ("collection_backlog", r"^collection backlog remained", None),
     ("animals_fell", r"animal count fell", None),
-    ("count_mismatch", r"animal count \d+ (?:!=|below) expected", None),
+    ("count_mismatch", r"animal count \d+ != expected", None),
     ("trade_policy_breach", r"^TRADE POLICY BREACH:", None),
     ("trades_in", r"incoming trade\(s\) pending review", None),
     ("stale_loop", r"primary loop stale", _heal_stale),

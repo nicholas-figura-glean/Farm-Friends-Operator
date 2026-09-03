@@ -142,11 +142,7 @@ def submit(
 
     with _queue_lock(path):
         existing = current(path).get(order_id)
-        if (
-            existing
-            and existing.get("status") not in TERMINAL
-            and existing.get("status") != FAILED
-        ):
+        if existing and existing.get("status") not in TERMINAL:
             return None
         if existing and existing.get("status") == PUBLISHED:
             # Already fixed and shipped. If the watcher still sees it, the fix did
@@ -198,7 +194,6 @@ def claim(order_id: str, actor: str, run: Optional[int] = None, path: str = QUEU
         if (
             not order
             or order.get("status") not in {OPEN, FAILED}
-            or (order.get("status") == FAILED and order.get("retryable") is not True)
             or int(order.get("attempts") or 0) >= MAX_ATTEMPTS
         ):
             return None
@@ -319,10 +314,7 @@ def open_orders(path: str = QUEUE) -> List[Dict[str, Any]]:
     """
     out = [
         order for order in current(path).values()
-        if (
-            order.get("status") == OPEN
-            or (order.get("status") == FAILED and order.get("retryable") is True)
-        )
+        if order.get("status") in {OPEN, FAILED}
         and int(order.get("attempts") or 0) < MAX_ATTEMPTS
     ]
     out.sort(key=lambda o: (_severity_rank(o), o.get("created_ts") or o.get("ts") or ""))

@@ -279,10 +279,7 @@ def assess(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     pending_repairs = [
         row for row in snapshot.get("orders") or []
-        if (
-            row.get("status") in {"open", "claimed"}
-            or (row.get("status") == "failed" and row.get("retryable") is True)
-        )
+        if row.get("status") in {"open", "claimed", "failed"}
         and row.get("severity") in {"breaking", "shape", "degraded"}
     ]
     stalled_repairs = [

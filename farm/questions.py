@@ -1122,11 +1122,7 @@ def reconcile(
                 )
                 continue
 
-        animal_count_episode = (
-            qclass in {"operational_animals_fell", "operational_count_mismatch"}
-            or (qclass == "operational_unknown" and alert.startswith("animal count "))
-        )
-        if animal_count_episode:
+        if qclass == "operational_animals_fell":
             if current_at_cap and not latest.get("active_crisis") and score_health.get("status") == "healthy":
                 close(
                     question,
