@@ -159,7 +159,10 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         else {}
     )
     if not crop_timer and crop_timer_state.get("status") == "observing":
-        prior_claim = persisted_claims.get("mechanic.crop_timers_active") or {}
+        prior_claim = (
+            persisted_claims.get("mechanic.crop_timers_delayed")
+            or persisted_claims.get("mechanic.crop_timers_active") or {}
+        )
         prior_value = prior_claim.get("value") if isinstance(prior_claim.get("value"), dict) else {}
         if prior_claim.get("status") == "accepted" and prior_value:
             crop_timer = dict(
@@ -168,6 +171,23 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
                 budget=(prior_claim.get("estimator") or {}).get("budget"),
             )
     crop_timer_supported = bool(crop_timer.get("all_timers_supported"))
+    crop_timer_observations = (
+        crop_timer.get("observations")
+        if isinstance(crop_timer.get("observations"), dict) else {}
+    )
+    crop_timer_complete = (
+        crop_timer.get("status") == "complete"
+        and set(crop_timer_observations) == {"wheat", "corn", "pumpkin"}
+    )
+    crop_timer_mechanically_active = bool(
+        crop_timer_complete
+        and all(int(item.get("yield") or 0) > 0 for item in crop_timer_observations.values())
+    )
+    crop_timer_delayed = crop_timer_mechanically_active and not crop_timer_supported
+    crop_timer_claim_id = (
+        "mechanic.crop_timers_delayed" if crop_timer_delayed
+        else "mechanic.crop_timers_active"
+    )
     crop_timer_runs = [
         int(item.get("run"))
         for item in (crop_timer.get("observations") or {}).values()
@@ -415,9 +435,9 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         ),
         _claim(
             "mechanic.crop_timers_stalled",
-            "The run-50 stalled crop timers were specific to an obsolete server regime and are falsified by the current timer intervention.",
+            "The run-50 fully stalled crop regime is superseded whenever a current bounded cohort produces positive harvests.",
             "mechanic",
-            "superseded" if crop_timer_supported else (
+            "superseded" if crop_timer_mechanically_active else (
                 "accepted" if current_run is not None and current_run - 50 <= 200 else "challenged"
             ),
             {"run": 50, "server_regime": "2026-08-20", "crops": ["wheat", "corn", "pumpkin"]},
@@ -425,42 +445,71 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             {"kind": "bounded_negative_probe", "elapsed_minutes": 27},
             {"advanced": False, "plots": 3},
             ["experiments/species_probe.py#crop-probe", "history.ndjson#run=50"],
-            _confidence(0.2 if crop_timer_supported else 0.78, "A later current-regime intervention directly tests the same timers."),
+            _confidence(0.2 if crop_timer_mechanically_active else 0.78, "A later current-regime intervention directly tests whether crops harvest at all."),
             50,
             50,
             200,
             current_run,
             "Any planted food crop advances above 0% or becomes harvestable under a current bounded re-probe.",
             ["evidence.crops"],
-            {"food_crops_banned": not crop_timer_supported},
-            superseded_by="mechanic.crop_timers_active" if crop_timer_supported else None,
+            {"food_crops_banned": not crop_timer_mechanically_active},
+            superseded_by=crop_timer_claim_id if crop_timer_mechanically_active else None,
         ),
         _claim(
             "mechanic.crop_timers_active",
-            "Wheat, corn, and pumpkin advance and harvest inside their current declared timer windows; food crops are no longer mechanically banned.",
+            "Wheat, corn, and pumpkin harvest within their declared timer plus six-minute scheduling tolerance.",
             "mechanic",
-            "accepted" if crop_timer_supported else "challenged",
+            "accepted" if crop_timer_supported else "superseded" if crop_timer_delayed else "challenged",
             {"server_regime": "league-and-plot-cap", "crops": ["wheat", "corn", "pumpkin"]},
             "harvested units and elapsed wall minutes per planted plot",
             {"kind": "bounded_current_regime_intervention", "budget": crop_timer.get("budget")},
             {
                 "all_timers_supported": crop_timer_supported,
-                "observations": crop_timer.get("observations"),
+                "observations": crop_timer_observations,
                 "best_observed_crop": crop_timer.get("best_observed_crop"),
             },
             [
                 "state/dual_cap_probe.json#completed-current-regime",
-                "state/tool_calls.ndjson#harvest-runs=1387,1388,1390",
+                "state/tool_calls.ndjson#harvest-runs=%s" % ",".join(str(value) for value in crop_timer_runs),
             ],
-            _confidence(0.99 if crop_timer_supported else 0.3, "Three distinct crops independently matured and harvested inside their declared timer plus bounded scheduling tolerance."),
+            _confidence(0.99 if crop_timer_supported else 0.95 if crop_timer_delayed else 0.3, "The current three-crop cohort directly tests the declared timer windows."),
             min(crop_timer_runs) if crop_timer_runs else None,
             crop_timer_last_run,
             300,
             current_run,
             "Any current crop misses its declared timer plus six minutes or fails to yield.",
-            ["policy.food_crops_banned", "evidence.crops", "strategy.food_crop_engine"],
+            ["evidence.crops"],
             {"food_crops_banned": False},
             supersedes=["mechanic.crop_timers_stalled"] if crop_timer_supported else [],
+            superseded_by="mechanic.crop_timers_delayed" if crop_timer_delayed else None,
+        ),
+        _claim(
+            "mechanic.crop_timers_delayed",
+            "Food crops remain mechanically active and yield positive harvests, but the current cohort exceeds the server's declared timer plus six-minute tolerance.",
+            "mechanic",
+            "accepted" if crop_timer_delayed else "superseded" if crop_timer_supported else "challenged",
+            {"server_regime": "league-and-plot-cap", "crops": ["wheat", "corn", "pumpkin"]},
+            "positive yield and elapsed wall minutes per planted plot",
+            {"kind": "bounded_current_regime_intervention", "budget": crop_timer.get("budget")},
+            {
+                "mechanically_active": crop_timer_mechanically_active,
+                "declared_timers_supported": crop_timer_supported,
+                "observations": crop_timer_observations,
+            },
+            [
+                "state/dual_cap_probe.json#completed-current-regime",
+                "state/tool_calls.ndjson#harvest-runs=%s" % ",".join(str(value) for value in crop_timer_runs),
+            ],
+            _confidence(0.99 if crop_timer_delayed else 0.3, "All three current crops produced positive yield; each elapsed timer is directly observed."),
+            min(crop_timer_runs) if crop_timer_runs else None,
+            crop_timer_last_run,
+            300,
+            current_run,
+            "All three crops return inside their declared timer plus six minutes, or any crop fails to produce a positive harvest.",
+            ["policy.food_crops_banned", "evidence.crops", "strategy.food_crop_engine"],
+            {"food_crops_banned": False},
+            supersedes=["mechanic.crop_timers_stalled"] if crop_timer_delayed else [],
+            superseded_by="mechanic.crop_timers_active" if crop_timer_supported else None,
         ),
         _claim(
             "strategy.food_crop_score",
@@ -489,7 +538,7 @@ def build(rows: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
             "A replicated bounded crop cohort produces a positive lifetime residual above independently observed animal production.",
             ["policy.food_crop_kind", "policy.food_crop_target_fraction", "cycle.plant"],
             {"food_crop_kind": None, "food_crop_target_fraction": 0.0, "max_plant_per_cycle": 0},
-            dependencies=["objective.league_first", "objective.lifetime_produce", "mechanic.crop_timers_active"],
+            dependencies=["objective.league_first", "objective.lifetime_produce", crop_timer_claim_id],
         ),
         _claim(
             "safety.bulk_husbandry",

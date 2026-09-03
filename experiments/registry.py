@@ -88,7 +88,7 @@ PROBES = {
     "crop_timer_analysis": {
         "hypothesis": "The current bounded crop cohort settles whether declared food-crop timers still hold.",
         "question_classes": ["knob_age", "model_drift", "strategy_stale"],
-        "subject_patterns": ["mechanic.crop_timers_active"],
+        "subject_patterns": ["mechanic.crop_timers_active", "mechanic.crop_timers_delayed"],
         "command": ["experiments/crop_timer_probe.py", "--analyze"],
         "read_only": True,
         "autonomous": True,

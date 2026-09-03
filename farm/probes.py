@@ -486,12 +486,32 @@ def _trusted_adjudication(
         ]
         complete = result.get("status") == "complete" and set(observations) == {"wheat", "corn", "pumpkin"}
         supported = complete and bool(result.get("all_timers_supported"))
+        mechanically_active = complete and all(
+            int(item.get("yield") or 0) > 0 for item in observations.values()
+        )
+        delayed = mechanically_active and not supported
         return {
             "settled": complete,
-            "status": "supported" if supported else "falsified" if complete else "inconclusive",
+            "status": "supported" if mechanically_active else "falsified" if complete else "inconclusive",
             "evidence_cutoff_run": max(runs) if runs else result.get("baseline_run"),
             "question_classes": ["knob_age", "model_drift", "strategy_stale"],
-            "subjects": ["mechanic.crop_timers_active"],
+            "subjects": ["mechanic.crop_timers_active", "mechanic.crop_timers_delayed"],
+            "subject_adjudications": {
+                "mechanic.crop_timers_active": {
+                    "settled": complete,
+                    "status": "supported" if supported else "falsified" if complete else "inconclusive",
+                    "evidence_cutoff_run": max(runs) if runs else result.get("baseline_run"),
+                    "answer": "The bounded three-crop cohort %s the declared timer contract."
+                              % ("supports" if supported else "falsifies" if complete else "is still observing"),
+                },
+                "mechanic.crop_timers_delayed": {
+                    "settled": complete,
+                    "status": "supported" if delayed else "falsified" if complete else "inconclusive",
+                    "evidence_cutoff_run": max(runs) if runs else result.get("baseline_run"),
+                    "answer": "The bounded three-crop cohort %s the delayed-but-active mechanic claim."
+                              % ("supports" if delayed else "falsifies" if complete else "is still observing"),
+                },
+            },
             "answer": (
                 "The bounded three-crop cohort %s the declared timer contract."
                 % ("supports" if supported else "falsifies" if complete else "is still observing")
@@ -513,16 +533,16 @@ def _trusted_adjudication(
         result = value.get("result") if isinstance(value.get("result"), dict) else value
         harvest = result.get("harvest") if isinstance(result.get("harvest"), dict) else {}
         complete = result.get("status") == "complete" and isinstance(harvest.get("run"), int)
-        supported = complete and bool(result.get("supported"))
+        crop_adds_score = complete and bool(result.get("supported"))
         return {
             "settled": complete,
-            "status": "supported" if supported else "falsified" if complete else "inconclusive",
+            "status": "falsified" if crop_adds_score else "supported" if complete else "inconclusive",
             "evidence_cutoff_run": int(harvest["run"]) if complete else result.get("baseline_run"),
             "question_classes": ["knob_age", "model_drift", "strategy_stale", "idle_capital"],
             "subjects": ["strategy.food_crop_score"],
             "answer": (
-                "The bounded wheat holdout %s a positive lifetime-score residual beyond animal production."
-                % ("supports" if supported else "falsifies" if complete else "is still observing")
+                "The bounded wheat holdout %s the existing zero-score-residual claim."
+                % ("falsifies" if crop_adds_score else "supports" if complete else "is still observing")
             ),
             "residual_uncertainty": "coin profitability is separate from the league-score objective",
             "retry_runs": 2,
@@ -633,6 +653,13 @@ def _finish_questions(
         )
         if not isinstance(scoped_adjudication, dict):
             scoped_adjudication = {}
+        subject_adjudications = (
+            adjudication.get("subject_adjudications")
+            if isinstance(adjudication.get("subject_adjudications"), dict) else {}
+        )
+        subject_specific = subject_adjudications.get(str(question.get("subject") or ""))
+        if isinstance(subject_specific, dict):
+            scoped_adjudication = dict(scoped_adjudication, **subject_specific)
         result_status = str(
             ((hypothesis_result or {}).get("status")
              or scoped_adjudication.get("status") or status)
@@ -1033,6 +1060,14 @@ def run_probe(
                 current_coverage = 0
                 for binding in question_bindings.values():
                     scoped = coverage.get(str(binding.get("class") or "")) if coverage else adjudication
+                    if isinstance(scoped, dict):
+                        subject_map = (
+                            adjudication.get("subject_adjudications")
+                            if isinstance(adjudication.get("subject_adjudications"), dict) else {}
+                        )
+                        subject_specific = subject_map.get(str(binding.get("subject") or ""))
+                        if isinstance(subject_specific, dict):
+                            scoped = dict(scoped, **subject_specific)
                     if not isinstance(scoped, dict) or not scoped.get("settled"):
                         continue
                     allowed_classes = set(adjudication.get("question_classes") or [])

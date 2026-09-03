@@ -34,7 +34,7 @@ INVARIANTS: Dict[str, str] = {
 # Every parameter has a claim and/or invariant owner. This is itself validated.
 OWNERS: Dict[str, Dict[str, List[str]]] = {
     "primary_kind": {"claims": ["strategy.chicken_engine"], "invariants": ["bounded_mutation"]},
-    "food_crops_banned": {"claims": ["mechanic.crop_timers_active"], "invariants": ["bounded_mutation"]},
+    "food_crops_banned": {"claims": ["mechanic.crop_timers_delayed"], "invariants": ["bounded_mutation"]},
     "growth_min_marginal_gain": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
     "growth_recent_band": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
     "growth_smaller_low": {"claims": ["mechanic.output_linear_with_herd"], "invariants": ["explicit_promotion"]},
@@ -62,7 +62,7 @@ OWNERS: Dict[str, Dict[str, List[str]]] = {
     "capped_replacement_kind": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
     "replacement_at_capacity_fraction": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
     "minimum_wildflowers": {"claims": ["strategy.capped_slot_efficiency"], "invariants": ["bounded_mutation"]},
-    "food_crop_kind": {"claims": ["mechanic.crop_timers_active", "strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
+    "food_crop_kind": {"claims": ["mechanic.crop_timers_delayed", "strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
     "food_crop_target_fraction": {"claims": ["strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
     "max_plant_per_cycle": {"claims": ["strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
 }
@@ -185,7 +185,7 @@ def compile_snapshot(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     if values.get("capped_replacement_kind") != values.get("growth_kind"):
         required_claims.update({"strategy.chicken_engine", "strategy.capped_slot_efficiency"})
     if values.get("food_crop_kind"):
-        required_claims.update({"mechanic.crop_timers_active", "strategy.food_crop_score"})
+        required_claims.update({"mechanic.crop_timers_delayed", "strategy.food_crop_score"})
 
     for required in sorted(required_claims):
         claim = mapping.get(required)

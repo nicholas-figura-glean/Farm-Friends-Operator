@@ -58,7 +58,7 @@ CROP_COST = {"wheat": 4, "corn": 5, "pumpkin": 8, "wildflowers": 10}
 PINNED_AUTONOMOUS = {
     "activity_replay": "4f0e38f4930db7b2",
     "crop_score_analysis": "b484a768d4915416",
-    "crop_timer_analysis": "38d6af52a54e1864",
+    "crop_timer_analysis": "f375b3d046b34b6a",
     "dual_cap_audit": "83184f936ff4fa02",
     "endgame_replay": "7e2ea94be1ae2e38",
 }

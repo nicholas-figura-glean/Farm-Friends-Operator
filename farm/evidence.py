@@ -155,12 +155,19 @@ def species(rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
 
 
 def crops() -> Dict[str, Any]:
-    """A recorded negative result: the timers never advance.
-
-    Cannot be derived from history, because the finding is that nothing ever
-    entered it. `plant()` will happily create unlimited plots, so a coin sink that
-    never yields would have scaled badly.
-    """
+    """Historical stalled regime plus the latest bounded current cohort."""
+    try:
+        state = json.loads((PROJECT / "state" / "dual_cap_probe.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        state = {}
+    result = state.get("result") if isinstance(state.get("result"), dict) else {}
+    observations = result.get("observations") if isinstance(result.get("observations"), dict) else {}
+    delayed = bool(
+        result.get("status") == "complete"
+        and observations
+        and not result.get("all_timers_supported")
+        and all(int(item.get("yield") or 0) > 0 for item in observations.values())
+    )
     return {
         "run": 50,
         "waited_minutes": 27,
@@ -169,9 +176,22 @@ def crops() -> Dict[str, Any]:
             {"crop": "corn", "reading": "0% grown, about 20 min left"},
             {"crop": "pumpkin", "reading": "0% grown, about 30 min left"},
         ],
-        "claim_id": "mechanic.crop_timers_stalled",
-        "claim": "In the run-50 server regime, all three plots remained at 0% after "
-                 "27 minutes. The negative result is scoped and overdue for a bounded re-probe.",
+        "historical_claim_id": "mechanic.crop_timers_stalled",
+        "current": {
+            "status": result.get("status"),
+            "started_ts": result.get("started_ts"),
+            "observations": observations,
+            "declared_timers_supported": result.get("all_timers_supported"),
+            "mechanically_active": bool(observations) and all(
+                int(item.get("yield") or 0) > 0 for item in observations.values()
+            ),
+        },
+        "claim_id": "mechanic.crop_timers_delayed" if delayed else "mechanic.crop_timers_active",
+        "claim": (
+            "The current three-crop cohort harvested positive yield but exceeded the declared timer plus six-minute tolerance."
+            if delayed else
+            "The historical run-50 stall remains scoped; current timer evidence is shown separately."
+        ),
     }
 
 

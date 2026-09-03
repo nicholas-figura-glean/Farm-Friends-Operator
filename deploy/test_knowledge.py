@@ -170,6 +170,15 @@ def main() -> int:
                         "false plateau is superseded")
             suite.check((claims.get("mechanic.crop_timers_stalled", registry) or {}).get("refresh", {}).get("state") == "overdue",
                         "old negative crop result becomes overdue instead of immortal")
+            delayed_timer = claims.get("mechanic.crop_timers_delayed", registry) or {}
+            exact_timer = claims.get("mechanic.crop_timers_active", registry) or {}
+            suite.check(
+                delayed_timer.get("status") == "accepted"
+                and exact_timer.get("status") == "superseded"
+                and (delayed_timer.get("decision") or {}).get("food_crops_banned") is False,
+                "positive delayed harvests supersede exact timer accuracy without pretending crops are inert",
+                {"delayed": delayed_timer, "exact": exact_timer},
+            )
             version = registry["registry_version"]
             same = claims.refresh(rows)
             suite.check(same["registry_version"] == version,
