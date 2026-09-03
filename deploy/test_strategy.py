@@ -189,10 +189,12 @@ def main() -> int:
                 {"last_validated_run": capped_claim.get("last_validated_run"),
                  "samples": len(capped_samples), "minimum": capped_claim.get("value", {}).get("minimum_beehive_vs_chicken")})
     suite.check(by_id["mechanic.crop_timers_stalled"]["status"] == "superseded"
-                and by_id["mechanic.crop_timers_active"]["status"] == "accepted",
-                "current timer intervention supersedes the stale run-50 claim")
+                and by_id["mechanic.crop_timers_active"]["status"] == "superseded"
+                and by_id["mechanic.crop_timers_delayed"]["status"] == "accepted",
+                "current delayed-positive timer intervention supersedes both stale and exact-timer claims")
+    crop_value = by_id["strategy.food_crop_score"]["value"]
     suite.check(by_id["strategy.food_crop_score"]["status"] == "accepted"
-                and by_id["strategy.food_crop_score"]["value"]["crop_score_residual"] == 0
+                and crop_value["crop_score_residual"] < crop_value["minimum_supported_residual"]
                 and by_id["strategy.food_crop_score"]["decision"]["food_crop_kind"] is None,
                 "scaled wheat holdout disables crops for the league-score objective",
                 by_id["strategy.food_crop_score"])
