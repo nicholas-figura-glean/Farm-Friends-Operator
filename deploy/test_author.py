@@ -1050,7 +1050,7 @@ with tempfile.TemporaryDirectory() as queue_race_root:
     )
     first_claim = workorders.claim(retry_id, "author", path=race_queue)
     workorders.resolve(
-        retry_id, workorders.FAILED, note="transient",
+        retry_id, workorders.FAILED, note="transient", retryable=True,
         path=race_queue, expected_status=workorders.CLAIMED,
         expected_claim_token=first_claim.get("claim_token"),
     )
