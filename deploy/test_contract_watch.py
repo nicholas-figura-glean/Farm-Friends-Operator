@@ -122,6 +122,7 @@ for _ in range(workorders.MAX_ATTEMPTS):
     failed_claim = workorders.claim("abc123", "author_agent", path=queue3)
     workorders.resolve(
         "abc123", workorders.FAILED, note="gate failed", path=queue3,
+        retryable=True,
         expected_status=workorders.CLAIMED,
         expected_claim_token=(failed_claim or {}).get("claim_token"),
     )
@@ -129,6 +130,20 @@ check(
     "an order that keeps failing stops being refiled",
     workorders.submit(change, "contract_watch", "i", [], [], path=queue3) is None,
 )
+legacy_failed_queue = os.path.join(tmp, "legacy-failed.ndjson")
+with open(legacy_failed_queue, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "id": "abc123", "status": workorders.FAILED, "attempts": 1,
+        "severity": "breaking", "ts": "2020-01-01T00:00:00Z",
+    }) + "\n")
+check("legacy failures are historical until a current detector reopens them",
+      workorders.open_orders(legacy_failed_queue) == [])
+reopened_failure = workorders.submit(
+    change, "contract_watch", "still observed", [], [], path=legacy_failed_queue,
+)
+check("current evidence reopens a bounded historical failure",
+      reopened_failure and reopened_failure["status"] == workorders.OPEN
+      and reopened_failure["attempts"] == 1, str(reopened_failure))
 
 section("abandoned claims return to the queue")
 

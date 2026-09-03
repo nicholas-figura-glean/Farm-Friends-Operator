@@ -76,7 +76,10 @@ def proposal_capacity(order_rows: List[Dict[str, Any]]) -> int:
     active = [
         order for order in order_rows
         if order.get("source") == "research_agent"
-        and order.get("status") in {"open", "claimed", "failed"}
+        and (
+            order.get("status") in {"open", "claimed"}
+            or (order.get("status") == "failed" and order.get("retryable") is True)
+        )
         and int(order.get("attempts") or 0) < workorders.MAX_ATTEMPTS
     ]
     return min(MAX_PROPOSALS_PER_PASS, max(0, rules.MAX_RESEARCH_ORDER_WIP - len(active)))

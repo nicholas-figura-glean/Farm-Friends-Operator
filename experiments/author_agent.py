@@ -971,6 +971,10 @@ def _resolve_claim(
     queue: str,
     **extra: Any,
 ) -> Optional[Dict[str, Any]]:
+    if status == workorders.FAILED:
+        extra.setdefault(
+            "retryable", int(order.get("attempts") or 0) < workorders.MAX_ATTEMPTS
+        )
     return workorders.resolve(
         str(order.get("id")),
         status,
