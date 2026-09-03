@@ -213,11 +213,9 @@ def detectors() -> Dict[str, Any]:
     return [
         {
             "name": "throughput",
-            "was": "units/chicken/min below a fixed band",
-            "why_wrong": "collected inventory is cadence- and transport-limited while the "
-                         "herd denominator grows; lifetime score can remain healthy", 
-            "fix": "consult the backlog: a low reading is only an incident if produce is "
-                   "piling up",
+            "was": "all-species collection units divided by chicken count, with either side of a fixed band treated as failure",
+            "why_wrong": "mixed herds made the denominator invalid, and above-band output is positive evidence rather than an operational fault",
+            "fix": "divide by all producing animals; suppress a low reading when the barn is drained or score is healthy, and route high output only to periodic model calibration",
             "evidence": "runs 27-29 collected 62-760 units but ended with only 666-3,303 "
                         "ready - the herd was drained, not broken",
         },
@@ -233,13 +231,9 @@ def detectors() -> Dict[str, Any]:
         {
             "name": "production stall",
             "was": "one low produce/min window",
-            "why_wrong": "produce arrives in bursts; replaying all 56 runs of history, runs "
-                         "40, 46 and 55 each read 105-246/min immediately before a "
-                         "1,600-2,000/min window",
-            "fix": "require two consecutive low windows, scaled per animal",
-            "evidence": "one window would have woken a model three times for nothing; two "
-                        "windows fires on none of them and still catches a real stall one "
-                        "cycle (~4 min) later",
+            "why_wrong": "leaderboard score now arrives in multi-run bursts; healthy history contains five adjacent zero windows over 26 minutes",
+            "fix": "judge cumulative lifetime-score endpoints across a shared 30-35 minute wall-clock window, with hunger remaining immediate",
+            "evidence": "runs 2310-2584 have no sub-floor 35-minute healthy window, while the real run-708 outage is detected after about 37 minutes",
         },
     ]
 

@@ -593,6 +593,19 @@ def do_supervise(cadence: int = 300) -> int:
     healed = result["healed"]
     routed = result.get("routed") or []
     questioned = result.get("questions") or []
+    reconciled_questions = []
+    try:
+        released_probes = questions.release_stale_probes(last.get("run"))
+        if released_probes:
+            notes.append("released %d interrupted probe lease(s)" % len(released_probes))
+        migration = questions.reconcile_duplicates(last.get("run"))
+        if migration.get("removed") or migration.get("merged_groups"):
+            notes.append(
+                "canonicalized %d question identity group(s)" % migration.get("merged_groups", 0)
+            )
+        reconciled_questions = questions.reconcile(last.get("run"))
+    except Exception as exc:  # noqa: BLE001
+        notes.append("question reconciliation failed: %s" % str(exc)[:100])
     probe_result = None
     try:
         migrated = provenance.reconcile_workorders()
@@ -643,6 +656,8 @@ def do_supervise(cadence: int = 300) -> int:
             "  question %s %s occurrences=%s opened=%s"
             % (item["class"], item["question_id"], item["occurrences"], item["opened"])
         )
+    if reconciled_questions:
+        print("  reconciled %d evidence-settled question(s)" % len(reconciled_questions))
     if probe_result:
         print("  probe %s: %s" % (probe_result.get("probe_id"), probe_result.get("status")))
     if governance_result and governance_result.get("recorded"):
@@ -825,7 +840,15 @@ def do_questions(include_closed: bool = False) -> int:
 
 def do_sweep() -> int:
     import json
-    print(json.dumps(research.counterfactual_sweep(), indent=2, sort_keys=True, allow_nan=False))
+    result = research.counterfactual_sweep()
+    if os.environ.get("FARM_PROBE_ID"):
+        state = Path(os.environ.get("FARM_STATE_DIR", str(Path("state").resolve())))
+        destination = state / "counterfactual_sweep.json"
+        destination.write_text(
+            json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+    print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 
@@ -1314,9 +1337,10 @@ def do_self_test() -> int:
     if "trades" not in _persisted["blocked_domains"]:
         failures.append("novelty hold evaporated before question/probe settlement")
     _settled_question = {
-        "class": "activity_novelty_trade", "status": "answered",
-        "closed_run": 3, "probe_result_status": "passed",
+        "class": "activity_novelty_trade", "subject": "trade-60", "status": "answered",
+        "closed_run": 3, "evidence_cutoff_run": 3, "probe_result_status": "passed",
         "evidence_refs": ["state/activity_probe.json"],
+        "generation_evidence_refs": ["state/activity_probe.json#sha256=fixture"],
     }
     _released = _novelty.assess(
         {
@@ -1334,6 +1358,21 @@ def do_self_test() -> int:
     checks += 1
     if "trades" in _released["blocked_domains"]:
         failures.append("evidence-linked answered question did not release its domain")
+    _same_trade = _novelty.assess(
+        {
+            "run": 5, "tools": ["list_farm", "leaderboard"],
+            "trades": [{"id": 60, "sender": "John", "recipient": "Nick",
+                        "offer_item": "feed", "offer_qty": 400_000,
+                        "want_item": "coin", "want_qty": 400_000, "outgoing": False}],
+            "rival_herds": {"John": 100_000}, "rival_coins": {"John": 0},
+            "risk_kinds": [],
+        },
+        {"rival_herds": {"John": 100_000}, "rival_coins": {"John": 0}},
+        state=_released["state"], question_rows=[_settled_question],
+    )
+    checks += 1
+    if "trades" in _same_trade["blocked_domains"] or _same_trade["signals"]:
+        failures.append("a settled held trade recreated its own novelty block")
     _rival_novelty = _novelty.assess(
         {
             "run": 2,
@@ -1349,6 +1388,24 @@ def do_self_test() -> int:
     checks += 1
     if not any(item.get("class") == "activity_novelty_rival" for item in _rival_novelty["signals"]):
         failures.append("material rival herd/cash acceleration was treated as routine")
+    _alice = _novelty.assess(
+        {"run": 2, "tools": ["list_farm", "leaderboard"], "trades": [],
+         "rival_herds": {"John": 100_000, "Alice": 100},
+         "rival_coins": {"John": 0, "Alice": 0}, "risk_kinds": []},
+        {"rival_herds": {"John": 100_000}, "rival_coins": {"John": 0}},
+        state=_baseline["state"],
+    )
+    _bob = _novelty.assess(
+        {"run": 3, "tools": ["list_farm", "leaderboard"], "trades": [],
+         "rival_herds": {"John": 100_000, "Alice": 100, "Bob": 100},
+         "rival_coins": {"John": 0, "Alice": 0, "Bob": 0}, "risk_kinds": []},
+        {"rival_herds": {"John": 100_000, "Alice": 100},
+         "rival_coins": {"John": 0, "Alice": 0}},
+        state=_alice["state"],
+    )
+    checks += 1
+    if len([b for b in _bob["active_blocks"] if b.get("class") == "activity_novelty_rival"]) != 2:
+        failures.append("a later rival novelty condition overwrote an unresolved earlier rival")
     _tool_novelty = _novelty.assess(
         {
             "run": 2,
@@ -1362,6 +1419,29 @@ def do_self_test() -> int:
     checks += 1
     if set(_tool_novelty["blocked_domains"]) != {"adopt", "offers", "trades"}:
         failures.append("tool-surface novelty did not hold every strategic mutation domain")
+    _removed_tool = _novelty.assess(
+        {"run": 2, "tools": ["list_farm"], "trades": [],
+         "rival_herds": {"John": 100_000}, "rival_coins": {"John": 0}, "risk_kinds": []},
+        None, state=_baseline["state"],
+    )
+    _added_after_removal = _novelty.assess(
+        {"run": 3, "tools": ["list_farm", "new_tool"], "trades": [],
+         "rival_herds": {"John": 100_000}, "rival_coins": {"John": 0}, "risk_kinds": []},
+        None, state=_removed_tool["state"],
+    )
+    _handled_addition = _novelty.assess(
+        {"run": 4, "tools": ["list_farm", "new_tool"], "trades": [],
+         "rival_herds": {"John": 100_000}, "rival_coins": {"John": 0}, "risk_kinds": []},
+        None, state=_added_after_removal["state"], handled_tools=["new_tool"],
+    )
+    checks += 1
+    if not any(
+        block.get("class") == "activity_novelty_tools"
+        and "removed:" in _novelty._block_subject(block)
+        and "leaderboard" in _novelty._block_subject(block)
+        for block in _handled_addition["active_blocks"]
+    ):
+        failures.append("handling an added tool erased an independent unresolved removal")
     _risk_novelty = _novelty.assess(
         {
             "run": 2, "tools": ["list_farm", "leaderboard"], "trades": [],
@@ -1428,6 +1508,18 @@ def do_self_test() -> int:
     checks += 1
     if _probe["accepted_coin_outflow"] != 400_000 or not _probe["material_counterparty_growth"]:
         failures.append("activity probe missed coin transfer followed by counterparty acceleration")
+    _held_trade_probe = _activity_probe.build([{
+        "run": 12,
+        "novelty": {"active_blocks": [{
+            "class": "activity_novelty_trade",
+            "evidence": {"trade_ids": [60], "requested_coin_outflow": 400_000,
+                         "profiles": ["feed:coin"], "material_values": [400_000]},
+        }]},
+        "trade_decisions": [],
+    }])
+    checks += 1
+    if _held_trade_probe.get("trade_ids") != [60] or not _held_trade_probe.get("settled"):
+        failures.append("held trade evidence could not be researched without acting on the trade")
     _rival_probe = _activity_probe.build([
         {
             "run": 20, "rival_herds": {"John": 1_073_100},
@@ -1613,12 +1705,66 @@ def do_self_test() -> int:
     if needs or any("PRODUCTION" in a for a in alerts):
         failures.append("one low window must not escalate: %s" % alerts)
     checks += 1
-    # Two consecutive low windows is a real stall (hunger 70, or a server change)
-    # and must escalate, even though collection looks ordinary.
-    prev_low = dict(banked_prev, produce_per_min=50.0)
-    alerts, needs = watch.evaluate(dict(stalled), prev_low)
+    # Current leaderboard score arrives in bursts. Five adjacent zero windows
+    # over ~25 minutes are healthy when the burst-spanning rate remains sound.
+    burst_rows = []
+    for n, score in enumerate([100_000] * 6 + [130_000]):
+        burst_rows.append(dict(
+            banked_prev,
+            run=100 + n,
+            ts="2026-08-21T03:%02d:00Z" % (n * 5),
+            produce=score,
+            verified=True,
+        ))
+    alerts, needs = watch.evaluate(
+        dict(burst_rows[-2]), burst_rows[-3], history=burst_rows[:-2]
+    )
+    if needs or any("PRODUCTION" in a for a in alerts):
+        failures.append("five healthy zero-score windows must not escalate: %s" % alerts)
+    alerts, needs = watch.evaluate(
+        dict(burst_rows[-1]), burst_rows[-2], history=burst_rows[:-1]
+    )
+    if needs or any("PRODUCTION" in a for a in alerts):
+        failures.append("the normal score burst must remain healthy: %s" % alerts)
+    checks += 1
+    blocked_collection = dict(
+        burst_rows[-1], units_collected=0, units_per_animal_min=0.0,
+        ready_units=50_000, zero_streak=rules.ZERO_COLLECT_RUNS_TO_ALARM,
+    )
+    alerts, needs = watch.evaluate(
+        blocked_collection, burst_rows[-2], history=burst_rows[:-1]
+    )
+    if not needs or not any("collection backlog" in alert for alert in alerts):
+        failures.append("a material backlog after empty collections must alert even while score is healthy")
+    checks += 1
+    # A wall-clock-flat score spanning the calibrated burst horizon is a real
+    # halt and must still fail closed.
+    flat_rows = [
+        dict(
+            banked_prev,
+            run=200 + n,
+            ts="2026-08-21T04:%02d:00Z" % (n * 5),
+            produce=400_000,
+            verified=True,
+        )
+        for n in range(8)
+    ]
+    alerts, needs = watch.evaluate(
+        dict(flat_rows[-1]), flat_rows[-2], history=flat_rows[:-1]
+    )
     if not needs or not any("PRODUCTION" in a for a in alerts):
-        failures.append("a sustained collapsed score rate must escalate: %s" % alerts)
+        failures.append("a burst-spanning collapsed score must escalate: %s" % alerts)
+    checks += 1
+    sparse_flat = [
+        dict(banked_prev, run=300 + n, ts="2026-08-21T%02d:%02d:00Z" % (5 + (n * 25) // 60, (n * 25) % 60),
+             produce=400_000, verified=True)
+        for n in range(3)
+    ]
+    alerts, needs = watch.evaluate(
+        dict(sparse_flat[-1]), sparse_flat[-2], history=sparse_flat[:-1]
+    )
+    if not needs or not any("PRODUCTION" in alert for alert in alerts):
+        failures.append("20-30 minute schedule gaps must not create a silent production blind zone")
     checks += 1
     if rules.produce_rate_trouble(100, 1.0, 11869) is not None:
         failures.append("a window shorter than the minimum must not be judged")
@@ -1677,6 +1823,12 @@ def do_self_test() -> int:
     checks += 1
     if _heal.classify("3 transport retries across 200 calls")[1] is None:
         failures.append("transport retries should be healable")
+    checks += 1
+    throughput_class, _ = _heal.classify(
+        "throughput 0.050 units/animal/min below band 0.10-1.00 over 5.0 min"
+    )
+    if throughput_class != "throughput":
+        failures.append("new all-animal throughput alerts must retain their lifecycle class")
     checks += 1
     wild = {
         "rate_ceiling": 999,
@@ -1804,29 +1956,48 @@ def do_self_test() -> int:
         failures.append("a confirmed production halt must pause every adoption")
     checks += 1
     stall_rows = [
-        {"ts": "2026-08-25T00:00:00Z", "produce": 100, "verified": True, "max_hunger": 0},
-        {"ts": "2026-08-25T00:05:00Z", "produce": 100, "verified": True, "max_hunger": 0},
-        {"ts": "2026-08-25T00:10:00Z", "produce": 100, "verified": True, "max_hunger": 0},
+        {
+            "run": n + 1,
+            "ts": "2026-08-25T00:%02d:00Z" % (n * 5),
+            "produce": 100,
+            "animals": 10_000,
+            "verified": True,
+            "max_hunger": 0,
+        }
+        for n in range(8)
     ]
-    if growth.production_stall_windows(stall_rows) != 2:
-        failures.append("two healthy flat score windows must be recognized as a production halt")
+    if growth.production_stall_windows(stall_rows) < 7:
+        failures.append("a 35-minute flat score must be recognized as a production halt")
     interrupted_rows = stall_rows + [
-        {"ts": "2026-08-25T00:15:00Z", "produce": 100, "verified": False, "max_hunger": 0}
+        {"run": 9, "ts": "2026-08-25T00:40:00Z", "produce": 100,
+         "animals": 10_000, "verified": False, "max_hunger": 0}
     ]
     active, _ = growth.production_stall_active(
-        interrupted_rows, {"production_stalled": True, "production_stall_windows": 2}
+        interrupted_rows,
+        {"production_stalled": True, "production_stall_windows": 7,
+         "production_stall_schema": rules.SCORE_HEALTH_SCHEMA},
     )
     if not active:
         failures.append("an unrelated unverified row must not release a confirmed production halt")
     checks += 1
     resumed_rows = interrupted_rows + [
-        {"ts": "2026-08-25T00:20:00Z", "produce": 101, "verified": True, "max_hunger": 0}
+        {"run": 10, "ts": "2026-08-25T00:45:00Z", "produce": 30_100,
+         "animals": 10_000, "verified": True, "max_hunger": 0}
     ]
     active, _ = growth.production_stall_active(
-        resumed_rows, {"production_stalled": True, "production_stall_windows": 2}
+        resumed_rows,
+        {"production_stalled": True, "production_stall_windows": 7,
+         "production_stall_schema": rules.SCORE_HEALTH_SCHEMA},
     )
     if active:
         failures.append("a positive score window must release the production-halt latch")
+    checks += 1
+    legacy_active, _ = growth.production_stall_active(
+        burst_rows,
+        {"production_stalled": True, "production_stall_windows": 2},
+    )
+    if legacy_active:
+        failures.append("the retired two-zero detector must not pin the new growth brake")
     checks += 1
     climbing = [(6000, 1500.0)] * 5 + [(4800, 900.0)] * 5
     v = rules.growth_verdict(climbing, 6000, {})

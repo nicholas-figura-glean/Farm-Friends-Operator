@@ -174,6 +174,31 @@ def main() -> int:
             same = claims.refresh(rows)
             suite.check(same["registry_version"] == version,
                         "identical evidence does not churn the registry version")
+            stale_refresh = claims.refresh(rows[:-100])
+            persisted_after_stale = claims.load()
+            suite.check(
+                stale_refresh.get("current_run") == registry.get("current_run")
+                and persisted_after_stale.get("current_run") == registry.get("current_run")
+                and persisted_after_stale.get("registry_version") == version,
+                "an older concurrent claim candidate cannot overwrite newer evidence",
+                persisted_after_stale,
+            )
+            conflicting = copy.deepcopy(registry)
+            conflicting["claims"][0]["statement"] += " conflicting same-run rewrite"
+            conflicting["semantic_fingerprint"] = claims.semantic_fingerprint(conflicting)
+            conflicting["policy_fingerprint"] = claims.policy_fingerprint(conflicting)
+            saved_build = claims.build
+            try:
+                claims.build = lambda unused=None: copy.deepcopy(conflicting)
+                same_run_conflict = claims.refresh(rows)
+            finally:
+                claims.build = saved_build
+            suite.check(
+                same_run_conflict.get("semantic_fingerprint") == registry.get("semantic_fingerprint")
+                and claims.load().get("semantic_fingerprint") == registry.get("semantic_fingerprint"),
+                "equal-freshness same-run claim conflicts fail closed",
+                same_run_conflict,
+            )
             claim_events = read_rows(state / "claim_events.ndjson")
             suite.check(len(claim_events) == len(registry["claims"]),
                         "first refresh writes one creation event per claim", len(claim_events))
@@ -399,23 +424,106 @@ def main() -> int:
                         "re-alert updates one current question row")
             suite.check(not q1["page_on_open"] and not q2["page_on_open"],
                         "rival wake opens research without paging")
+            monotonic = questions.open_or_update(
+                "rival_wake", "RIVAL WAKE: Moe recent 0.5/min vs base 0",
+                row={"run": 100, "ts": "2026-08-22T10:00:00Z"}, subject="Moe",
+            )["question"]
+            questions.open_or_update(
+                "rival_wake", "RIVAL WAKE: Moe delayed fixture",
+                row={"run": 2, "ts": "2026-08-20T00:00:00Z"}, subject="Moe",
+            )
+            monotonic_after = next(
+                row for row in questions.load_all() if row["id"] == monotonic["id"]
+            )
+            suite.check(
+                monotonic_after["last_seen_run"] == 100,
+                "delayed alerts cannot move a question evidence watermark backward",
+                monotonic_after,
+            )
             questions.set_status(q1["question"]["id"], "answered", "rival resumed feeding", ["history#241"], 243)
             repeated = questions.open_or_update(
                 "rival_wake", "RIVAL WAKE: John recent 0.800/min vs base 0.100/min",
                 row={"run": 244, "ts": "2026-08-22T00:10:00Z"},
             )
-            suite.check(not repeated["reopened"] and repeated["question"]["status"] == "answered",
-                        "an immediate repeated alert does not erase a probe answer")
+            suite.check(
+                repeated["reopened"] and repeated["question"]["status"] == "open"
+                and repeated["question"]["generation"] == 2,
+                "newer evidence immediately reopens an answered question",
+                repeated["question"],
+            )
+            questions.set_status(
+                q1["question"]["id"], "answered", "second result", ["history#245"], 245,
+                expected_generation=2, expected_status="open", evidence_cutoff_run=245,
+            )
             reopened = questions.open_or_update(
                 "rival_wake", "RIVAL WAKE: John recent 2.000/min vs base 0.000/min",
                 row={"run": 268, "ts": "2026-08-22T02:00:00Z"},
             )
             suite.check(
-                reopened["reopened"] and reopened["question"]["generation"] == 2
+                reopened["reopened"] and reopened["question"]["generation"] == 3
                 and reopened["question"]["generation_opened_run"] == 268
-                and reopened["question"]["next_step_due_run"] == 268 + rules.QUESTION_MAX_AGE_RUNS,
-                "new evidence reopens a question with a fresh bounded generation",
+                and reopened["question"]["next_step_due_run"] == 268 + rules.QUESTION_MAX_AGE_RUNS
+                and reopened["question"].get("probe_result_status") is None
+                and not reopened["question"].get("generation_evidence_refs"),
+                "new evidence reopens a question with a clean bounded generation",
                 reopened["question"],
+            )
+            stale_close = questions.set_status(
+                q1["question"]["id"], "answered", "stale result", ["history#243"], 268,
+                expected_generation=1, evidence_cutoff_run=268,
+            )
+            current_generation = next(
+                row for row in questions.load_all() if row["id"] == q1["question"]["id"]
+            )
+            suite.check(
+                stale_close is None and current_generation["status"] == "open"
+                and current_generation["generation"] == 3,
+                "a delayed probe cannot close a newer question generation",
+                current_generation,
+            )
+            suite.raises(
+                ValueError,
+                lambda: questions.set_status(
+                    q1["question"]["id"], "answered", "unsupported", [], 269,
+                    expected_generation=3, evidence_cutoff_run=269,
+                ),
+                "terminal closure requires durable evidence",
+            )
+            questions.set_status(
+                q1["question"]["id"], "answered", "current result", ["history#269"], 269,
+                expected_generation=3, expected_status="open", evidence_cutoff_run=269,
+            )
+            stale_probe = questions.set_status(
+                q1["question"]["id"], "probing", run=269, probe_id="late-probe",
+                expected_generation=3, expected_status="open",
+            )
+            after_stale_probe = next(
+                row for row in questions.load_all() if row["id"] == q1["question"]["id"]
+            )
+            suite.check(
+                stale_probe is None and after_stale_probe["status"] == "answered",
+                "a stale scheduler cannot move an answered generation back to probing",
+                after_stale_probe,
+            )
+            stranded = questions.open_or_update(
+                "model_drift", "MODEL DRIFT: stranded probe", row={"run": 300},
+                subject="stranded-probe",
+            )["question"]
+            questions.set_status(
+                stranded["id"], "probing", run=300, probe_id="fixture-probe",
+                expected_generation=stranded["generation"], expected_status="open",
+            )
+            early_release = questions.release_stale_probes(301)
+            due_release = questions.release_stale_probes(302)
+            stranded_after = next(
+                row for row in questions.load_all() if row["id"] == stranded["id"]
+            )
+            suite.check(
+                not early_release and len(due_release) == 1
+                and stranded_after["status"] == "open"
+                and stranded_after.get("probe_result_status") == "interrupted",
+                "a killed probe lease returns to the bounded scheduler",
+                stranded_after,
             )
             suite.raises(ValueError, lambda: questions.set_status(q1["question"]["id"], "forgotten"),
                          "invalid question status is rejected")
@@ -448,6 +556,96 @@ def main() -> int:
                         "legacy changing-age identities reconcile into one durable row", reconciled)
             suite.check(knob_rows[0]["occurrences"] == 6,
                         "reconciliation preserves accumulated occurrences", knob_rows[0])
+
+            drift_question = questions.open_or_update(
+                "model_drift", "MODEL DRIFT: output_yield recent 0.4 vs prior 0.2",
+                row={"run": 100, "ts": "2026-08-22T00:00:00Z"},
+                subject="output_yield",
+            )["question"]
+            unresolved_value = questions.open_or_update(
+                "strategy.unbacked_parameter",
+                "GROWTH_MIN_MARGINAL_GAIN steers decisions but lacks exact support",
+                row={"run": 100, "ts": "2026-08-22T00:00:00Z"},
+                subject="GROWTH_MIN_MARGINAL_GAIN",
+            )["question"]
+            stale_hunger = questions.open_or_update(
+                "model_drift", "MODEL DRIFT: hunger_wall residual changed",
+                row={"run": 100, "ts": "2026-08-22T00:00:00Z"},
+                subject="hunger_wall",
+            )["question"]
+            reconcile_rows = [
+                {
+                    "run": 101 + n,
+                    "ts": "2026-08-22T04:%02d:00Z" % (n * 5),
+                    "produce": 100_000 + n * 5_000,
+                    "animals": 1_000,
+                    "animal_capacity": 2_000,
+                    "rank": 1,
+                    "verified": True,
+                    "max_hunger": 0,
+                    "rivals": {"John": 10_000},
+                    "rival_herds": {"John": 100},
+                }
+                for n in range(8)
+            ]
+            reconciled_questions = questions.reconcile(
+                108,
+                rows=reconcile_rows,
+                registry={"claims": [
+                    {
+                        "id": "mechanic.output_linear_with_herd",
+                        "status": "accepted",
+                        "last_validated_run": 108,
+                        "evidence_refs": ["fixture#cohort"],
+                    },
+                    {
+                        "id": "safety.bulk_husbandry",
+                        "status": "accepted",
+                        "last_validated_run": 1,
+                        "refresh": {"state": "overdue"},
+                    },
+                ]},
+            )
+            current_questions = {row["id"]: row for row in questions.load_all()}
+            suite.check(
+                current_questions[drift_question["id"]]["status"] == "answered"
+                and current_questions[drift_question["id"]].get("resolution_kind") == "superseded",
+                "current scoped claim evidence reconciles its stale drift question",
+                reconciled_questions,
+            )
+            suite.check(
+                current_questions[unresolved_value["id"]]["status"] == "open",
+                "directional ownership does not erase exact-value uncertainty",
+                current_questions[unresolved_value["id"]],
+            )
+            suite.check(
+                current_questions[stale_hunger["id"]]["status"] == "open",
+                "an accepted but stale claim cannot launder a newer drift question",
+                current_questions[stale_hunger["id"]],
+            )
+            advancing_rival = questions.open_or_update(
+                "threat", "THREAT: John gained while our score was flat",
+                row={"run": 160, "ts": "2026-08-22T00:00:00Z"}, subject="John",
+            )["question"]
+            flat_score_rows = [
+                {
+                    "run": 201 + n, "ts": "2026-08-22T05:%02d:00Z" % (n * 5),
+                    "produce": 100_000, "animals": 1_000, "animal_capacity": 2_000,
+                    "rank": 1, "verified": True, "max_hunger": 0,
+                    "rivals": {"John": 10_000 + n * 1_000},
+                    "rival_herds": {"John": 100},
+                }
+                for n in range(8)
+            ]
+            questions.reconcile(208, rows=flat_score_rows, registry={"claims": []})
+            current_advancing = next(
+                row for row in questions.load_all() if row["id"] == advancing_rival["id"]
+            )
+            suite.check(
+                current_advancing["status"] == "open",
+                "rank 1 cannot close a rival threat while our score is flat and theirs advances",
+                current_advancing,
+            )
 
             # Healing's third disposition: durable agent-owned question, no page.
             shutil.rmtree(state)
@@ -503,8 +701,8 @@ def main() -> int:
                         "mutating species probe can never be autonomous")
             suite.raises(ValueError, lambda: probes.run_probe("species_mix", explicit=False, run=500),
                          "scheduler refuses a mutating probe")
-            probe = probes.run_probe("counterfactual_sweep", explicit=False, run=500)
-            suite.check(probe["status"] == "passed", "autonomous pure replay probe passes", probe)
+            probe = probes.run_probe("counterfactual_sweep", explicit=True, run=500)
+            suite.check(probe["status"] == "passed", "explicit pure replay probe passes", probe)
             suite.check((probe.get("budget") or {}).get("calls") == 0,
                         "pure replay probe declares a zero-call budget")
             suite.check(not (state / "tool_calls.ndjson").exists(),

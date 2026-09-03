@@ -350,6 +350,8 @@ def reconcile_orders(observed: List[Dict[str, Any]], actionable: List[Dict[str, 
                 workorders.SUPERSEDED,
                 note="current response sample is accepted by its runtime consumer",
                 path=queue_path,
+                expected_status=workorders.OPEN,
+                expected_ts=str(order.get("ts") or ""),
             )
             if resolved:
                 retired.append(resolved)
@@ -365,8 +367,10 @@ def reconcile_orders(observed: List[Dict[str, Any]], actionable: List[Dict[str, 
             # A variant is visible but has not met the confirmation streak. Keep the
             # existing order until the replacement is itself trustworthy.
             continue
-        resolved = workorders.resolve(order_id, workorders.SUPERSEDED,
-                                      note=reason, path=queue_path)
+        resolved = workorders.resolve(
+            order_id, workorders.SUPERSEDED, note=reason, path=queue_path,
+            expected_status=workorders.OPEN, expected_ts=str(order.get("ts") or ""),
+        )
         if resolved:
             retired.append(resolved)
     return retired

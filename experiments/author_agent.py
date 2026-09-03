@@ -40,6 +40,7 @@ itself broke and launchd will retry it.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -47,6 +48,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -937,6 +940,10 @@ def publish(source_root: str, order: Dict[str, Any], summary: str,
         "FARM_CANARY_HYPOTHESIS_ID": str(lineage.get("hypothesis_id") or "")[:120],
         "FARM_CANARY_POLICY_ID": str(lineage.get("policy_id") or runtime_policy or "")[:120],
         "FARM_CANARY_EXPECTED_IMPROVEMENT": str(lineage.get("expected_improvement") or 0),
+        "FARM_WORKORDER_ID": str(order.get("id") or ""),
+        "FARM_WORKORDER_CLAIM_TOKEN_SHA256": hashlib.sha256(
+            str(order.get("claim_token") or "").encode("utf-8")
+        ).hexdigest(),
     })
     proc = subprocess.run(["/bin/bash", str(script)], cwd=str(source_root), env=env,
                           capture_output=True, text=True, timeout=1800, check=False)
@@ -956,6 +963,51 @@ def publish(source_root: str, order: Dict[str, Any], summary: str,
 
 
 # -- main --------------------------------------------------------------------
+
+
+def _resolve_claim(
+    order: Dict[str, Any],
+    status: str,
+    queue: str,
+    **extra: Any,
+) -> Optional[Dict[str, Any]]:
+    return workorders.resolve(
+        str(order.get("id")),
+        status,
+        path=queue,
+        expected_status=workorders.CLAIMED,
+        expected_claim_token=str(order.get("claim_token") or ""),
+        **extra,
+    )
+
+
+def _renew_claim(order: Dict[str, Any], queue: str) -> Optional[Dict[str, Any]]:
+    return workorders.renew_claim(
+        str(order.get("id")), str(order.get("claim_token") or ""), path=queue
+    )
+
+
+@contextmanager
+def _lease_heartbeat(order: Dict[str, Any], queue: str):
+    """Keep the claim live through gates and consequential publication."""
+    stop = threading.Event()
+    lost = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(30):
+            if _renew_claim(order, queue) is None:
+                lost.set()
+                return
+
+    if _renew_claim(order, queue) is None:
+        lost.set()
+    thread = threading.Thread(target=beat, name="author-lease-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield lost
+    finally:
+        stop.set()
+        thread.join(timeout=2)
 
 
 def main() -> int:
@@ -987,9 +1039,12 @@ def main() -> int:
 
     blocked = [f for f in (order.get("files") or []) if editable(control.normalize_path(str(f)))]
     if blocked and not candidate_files(order, str(PROJECT)):
-        workorders.resolve(order["id"], workorders.ABANDONED,
-                           note="requires protected or non-editable files: %s" % ", ".join(blocked[:4]),
-                           path=queue)
+        workorders.resolve(
+            order["id"], workorders.ABANDONED,
+            note="requires protected or non-editable files: %s" % ", ".join(blocked[:4]),
+            path=queue, expected_status={workorders.OPEN, workorders.FAILED},
+            expected_ts=str(order.get("ts") or ""),
+        )
         print("AUTHOR contained %s: %s is protected; last verified release remains active"
               % (order["id"], blocked[:2]))
         log({"event": "contained", "order": order["id"], "blocked": blocked})
@@ -1002,7 +1057,11 @@ def main() -> int:
                        step="author_change")
 
     attempted_run = canary.latest_run()
-    workorders.claim(order["id"], "author_agent", run=attempted_run, path=queue)
+    claimed = workorders.claim(order["id"], "author_agent", run=attempted_run, path=queue)
+    if claimed is None:
+        print("AUTHOR standing down: work order lease was claimed or resolved concurrently")
+        return 0
+    order = claimed
     stored.update(last_attempted_run=attempted_run, last_order=order["id"])
     write_json(STORE, stored)
     tokens.record("author_pass", attempted_run, note="order=%s %s" % (
@@ -1017,11 +1076,16 @@ def main() -> int:
         print("  staged in a git worktree on %s at %s"
               % (stage["vcs"]["branch"], vcs.short(stage["vcs"]["base_sha"])))
     try:
-        return author_pass(order, root, queue, stored, stage)
+        with _lease_heartbeat(order, queue) as lease_lost:
+            if lease_lost.is_set():
+                print("AUTHOR standing down: work-order lease could not be renewed")
+                return 0
+            return author_pass(order, root, queue, stored, stage, lease_lost=lease_lost)
     except Exception as exc:  # noqa: BLE001 - a bug here must not wedge the queue
-        workorders.resolve(order["id"], workorders.FAILED,
-                           note="author agent raised %s: %s" % (type(exc).__name__, str(exc)[:300]),
-                           path=queue)
+        _resolve_claim(
+            order, workorders.FAILED, queue,
+            note="author agent raised %s: %s" % (type(exc).__name__, str(exc)[:300]),
+        )
         log({"event": "crashed", "order": order["id"], "error": "%s: %s" % (type(exc).__name__, str(exc)[:400])})
         print("AUTHOR failed on %s: %s: %s" % (order["id"], type(exc).__name__, str(exc)[:200]))
         return 4
@@ -1030,7 +1094,8 @@ def main() -> int:
 
 
 def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, Any],
-                stage: Optional[Dict[str, Any]] = None) -> int:
+                stage: Optional[Dict[str, Any]] = None,
+                lease_lost: Optional[threading.Event] = None) -> int:
     """Patch, gate and publish one order inside the staging tree."""
     attempt_notes: List[str] = []
     patch: Optional[Dict[str, Any]] = None
@@ -1046,9 +1111,11 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
         if not availability.get("available"):
             # Dormancy is a normal state. Leave the order open, say why, and do not
             # charge an attempt for work that never started.
-            workorders.resolve(order["id"], workorders.OPEN,
-                               note="model dormant: %s" % availability.get("reason", ""),
-                               path=queue, attempts=int(order.get("attempts") or 0))
+            _resolve_claim(
+                order, workorders.OPEN, queue,
+                note="model dormant: %s" % availability.get("reason", ""),
+                attempts=max(0, int(order.get("attempts") or 1) - 1),
+            )
             print("  no mechanical fix and the model is dormant: %s" % availability.get("reason"))
             log({"event": "dormant", "order": order["id"], "reason": availability.get("reason")})
             return 0
@@ -1065,10 +1132,10 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
                 _, current_cost = spend_today()
                 if (reservation["cost_usd"]
                         and current_cost + reservation["cost_usd"] > rules.AUTHOR_MAX_COST_USD_PER_DAY):
-                    workorders.resolve(
-                        order["id"], workorders.OPEN,
+                    _resolve_claim(
+                        order, workorders.OPEN, queue,
                         note="mechanical fallback waiting for model budget headroom",
-                        path=queue, attempts=int(order.get("attempts") or 0),
+                        attempts=max(0, int(order.get("attempts") or 1) - 1),
                     )
                     print("  model fallback deferred: daily cost ceiling has no safe headroom")
                     return 0
@@ -1076,14 +1143,17 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             try:
                 patch = model_patch(order, root, feedback, reservation_id=reservation_id)
             except llm.Dormant as exc:
-                workorders.resolve(order["id"], workorders.OPEN,
-                                   note="model became dormant: %s" % exc, path=queue,
-                                   attempts=int(order.get("attempts") or 0))
+                _resolve_claim(
+                    order, workorders.OPEN, queue,
+                    note="model became dormant: %s" % exc,
+                    attempts=max(0, int(order.get("attempts") or 1) - 1),
+                )
                 print("  model went dormant mid-pass: %s" % exc)
                 return 0
             except llm.GatewayError as exc:
-                workorders.resolve(order["id"], workorders.FAILED,
-                                   note="gateway error: %s" % exc, path=queue)
+                _resolve_claim(
+                    order, workorders.FAILED, queue, note="gateway error: %s" % exc
+                )
                 print("  gateway error contained; a later scheduled pass may retry: %s" % exc)
                 return 0
 
@@ -1139,16 +1209,13 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
                     "order": order["id"], "gates": pre_existing,
                 })
             elif pre_existing and not genuinely_ours:
-                workorders.resolve(
-                    order["id"], workorders.OPEN,
+                _resolve_claim(
+                    order, workorders.OPEN, queue,
                     note="blocked: %s already failing before this patch; "
                          "not attributable to the change" % ", ".join(pre_existing),
-                    path=queue,
                     # Give the attempt back. Claiming incremented the counter, but
-                    # nothing about this order was actually tried, and three such
-                    # passes would otherwise abandon a perfectly good order for a
-                    # failure that was never its fault.
-                    attempts=int(order.get("attempts") or 0),
+                    # nothing about this order was actually tried.
+                    attempts=max(0, int(order.get("attempts") or 1) - 1),
                 )
                 print("  standing down: %s already red on the unpatched tree"
                       % ", ".join(pre_existing))
@@ -1175,9 +1242,17 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
         # commit is present on the allowlisted remote. This is deliberately fail-closed:
         # a locally successful patch with no durable upstream record is not a release.
         summary = patch.get("summary") or "work order %s" % order["id"]
+        if lease_lost is not None and lease_lost.is_set():
+            print("  publish safely contained: work-order lease was lost before commit")
+            return 0
+        renewed = _renew_claim(order, queue)
+        if renewed is None:
+            print("  publish safely contained: work-order lease was lost before commit")
+            return 0
+        order = renewed
         if not (stage and stage.get("vcs")):
             note = "version control unavailable; remote synchronization is required"
-            workorders.resolve(order["id"], workorders.FAILED, note=note, path=queue)
+            _resolve_claim(order, workorders.FAILED, queue, note=note)
             log({"event": "remote_sync_failed", "order": order["id"], "error": note})
             ledger.record("author.remote_sync_failed", {"order": order["id"], "error": note})
             print("  publish safely contained: %s" % note)
@@ -1187,17 +1262,26 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
             commit_info = commit_change(stage["vcs"], order, patch, summary)
         except (vcs.GitError, OSError) as exc:
             note = "version control or remote synchronization failed: %s" % str(exc)[:320]
-            workorders.resolve(order["id"], workorders.FAILED, note=note, path=queue)
+            _resolve_claim(order, workorders.FAILED, queue, note=note)
             log({"event": "remote_sync_failed", "order": order["id"], "error": str(exc)[:300]})
             ledger.record("author.remote_sync_failed", {"order": order["id"],
                                                          "error": str(exc)[:300]})
             print("  publish safely contained: %s" % note[:300])
             return 0
 
+        if (
+            (lease_lost is not None and lease_lost.is_set())
+            or not workorders.lease_owned(
+                str(order.get("id")), str(order.get("claim_token") or ""), path=queue
+            )
+        ):
+            print("  publish safely contained: work-order lease was lost after remote commit")
+            return 0
         result = publish(root, order, summary, commit=commit_info.get("sha"))
         if not result.get("published"):
-            workorders.resolve(order["id"], workorders.FAILED,
-                               note=str(result.get("error"))[:400], path=queue)
+            _resolve_claim(
+                order, workorders.FAILED, queue, note=str(result.get("error"))[:400]
+            )
             print("  publish safely contained: %s" % str(result.get("error"))[:300])
             log({"event": "publish_refused", "order": order["id"], "error": result.get("error")})
             return 0
@@ -1209,13 +1293,17 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
         audit_note = "%s | pushed %s to %s" % (
             summary, vcs.short(commit_info.get("sha")), remote_ref,
         )
-        workorders.resolve(order["id"], workorders.PUBLISHED,
-                           note=audit_note, release=result["revision"], path=queue,
-                           backend=patch.get("backend"),
-                           commit=commit_info.get("sha"),
-                           remote=remote_ref,
-                           remote_commit=push.get("sha"),
-                           diff=commit_info.get("stat"))
+        published_order = _resolve_claim(
+            order, workorders.PUBLISHED, queue,
+            note=audit_note, release=result["revision"],
+            backend=patch.get("backend"),
+            commit=commit_info.get("sha"),
+            remote=remote_ref,
+            remote_commit=push.get("sha"),
+            diff=commit_info.get("stat"),
+        )
+        if published_order is None:
+            raise RuntimeError("release published but work-order lease was lost before audit closure")
         write_json(STORE, dict(stored, last_authored_run=canary.latest_run(),
                                last_order=order["id"], last_revision=result["revision"],
                                last_commit=commit_info.get("sha"),
@@ -1237,8 +1325,9 @@ def author_pass(order: Dict[str, Any], root: str, queue: str, stored: Dict[str, 
               % (vcs.short(commit_info["sha"]), remote_ref))
         return 0
 
-    workorders.resolve(order["id"], workorders.FAILED,
-                       note=" | ".join(attempt_notes)[:500], path=queue)
+    _resolve_claim(
+        order, workorders.FAILED, queue, note=" | ".join(attempt_notes)[:500]
+    )
     log({"event": "exhausted", "order": order["id"], "notes": attempt_notes})
     print("AUTHOR contained %s after %d bounded attempt(s); verified release unchanged"
           % (order["id"], rules.AUTHOR_MAX_ATTEMPTS_PER_ORDER))

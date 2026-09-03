@@ -279,7 +279,7 @@ def assess(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     pending_repairs = [
         row for row in snapshot.get("orders") or []
-        if row.get("status") in {"open", "claimed"}
+        if row.get("status") in {"open", "claimed", "failed"}
         and row.get("severity") in {"breaking", "shape", "degraded"}
     ]
     stalled_repairs = [
@@ -361,6 +361,12 @@ def remediate(snapshot: Dict[str, Any], checks: List[Dict[str, Any]]) -> List[Di
     released = workorders.release_stale(max_age_seconds=3600)
     if released:
         actions.append({"action": "release_stale_claims", "count": len(released)})
+    reconciled_regressions = canary.reconcile_regression_orders()
+    if reconciled_regressions:
+        actions.append({
+            "action": "reconcile_verified_canary_repairs",
+            "orders": [row.get("id") for row in reconciled_regressions],
+        })
 
     storage = by_id.get("evidence.compaction") or {}
     canary_state = snapshot.get("canary") or {}
@@ -496,6 +502,12 @@ def run_review(
                 "recorded": False, "run": run, "last_run": previous.get("run"),
                 "next_run": (previous.get("run") or run) + rules.GOVERNANCE_REVIEW_RUNS,
             }
+        if snapshot is None:
+            try:
+                from . import canary
+                canary.reconcile_regression_orders()
+            except Exception:  # noqa: BLE001 - review still records the unresolved proof gap
+                pass
         current = snapshot if snapshot is not None else collect_snapshot(run)
         checks = assess(current)
         actions = remediate(current, checks) if apply_remediation else []

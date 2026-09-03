@@ -124,6 +124,8 @@ def register_hypothesis(
     discovery_evidence: Iterable[str],
     context_policy_id: Optional[str] = None,
     question_ids: Optional[Iterable[str]] = None,
+    question_generations: Optional[Dict[str, int]] = None,
+    question_last_seen_runs: Optional[Dict[str, Optional[int]]] = None,
 ) -> Dict[str, Any]:
     """Pre-register a hypothesis before a probe or validation cohort is observed."""
     value = dict(spec)
@@ -184,6 +186,14 @@ def register_hypothesis(
         "expected_improvement": value.get("expected_improvement"),
         "discovery_evidence": evidence,
         "question_ids": sorted(set(str(item) for item in (question_ids or []) if str(item).strip())),
+        "question_generations": {
+            str(key): int(value) for key, value in (question_generations or {}).items()
+            if str(key).strip() and isinstance(value, int)
+        },
+        "question_last_seen_runs": {
+            str(key): value for key, value in (question_last_seen_runs or {}).items()
+            if str(key).strip() and (value is None or isinstance(value, int))
+        },
         # Context is intentionally not a parent edge. A hypothesis may be discovered
         # while policy A is live without claiming that policy A proves the hypothesis.
         "context_policy_id": context_policy_id,
@@ -208,6 +218,10 @@ def record_result(
         raise ProvenanceError("validation result requires evidence references")
     if identity not in _latest_by_node():
         raise ProvenanceError("unknown hypothesis: %s" % identity)
+    registration = next((
+        row for row in reversed(events())
+        if row.get("event") == "hypothesis.registered" and row.get("node") == identity
+    ), {})
     node = "result-" + hashlib.sha256(
         (identity + "\n" + "\n".join(refs)).encode("utf-8")
     ).hexdigest()[:16]
@@ -221,6 +235,9 @@ def record_result(
         "status": status,
         "evidence_class": evidence_class,
         "validation_evidence": refs,
+        "question_ids": list(registration.get("question_ids") or []),
+        "question_generations": dict(registration.get("question_generations") or {}),
+        "question_last_seen_runs": dict(registration.get("question_last_seen_runs") or {}),
         "effect": _bounded(effect or {}),
         "parents": [identity] + ["evidence:" + item for item in refs],
     }
@@ -356,15 +373,35 @@ def validate_promotion_contract(
     if identity and not registered:
         errors.append("promotion hypothesis was not pre-registered: %s" % identity)
     elif registered:
-        registered_discovery = set(registered[-1].get("discovery_evidence") or [])
+        registration = registered[-1]
+        registered_discovery = set(registration.get("discovery_evidence") or [])
         if discovery != registered_discovery:
             errors.append("promotion discovery cohort differs from pre-registration")
+        registered_questions = list(registration.get("question_ids") or [])
+        registered_generations = dict(registration.get("question_generations") or {})
+        contract_generations = dict(value.get("question_generations") or {})
+        if registered_questions and (
+            set(registered_generations) != set(registered_questions)
+            or contract_generations != registered_generations
+        ):
+            errors.append("promotion is not bound to the registered question generation")
+        if registered_questions:
+            from . import questions
+            current_questions = {str(row.get("id")): row for row in questions.load_all()}
+            if any(
+                identity not in current_questions
+                or int((current_questions.get(identity) or {}).get("generation") or 0)
+                    != int(registered_generations.get(identity) or 0)
+                for identity in registered_questions
+            ):
+                errors.append("promotion question generation advanced or disappeared")
         supporting_results = [
             row for row in events()
             if row.get("event") == "hypothesis.result"
             and row.get("hypothesis_id") == identity
             and row.get("status") in {"supported", "accepted", "passed"}
             and row.get("evidence_class") == evidence_class
+            and dict(row.get("question_generations") or {}) == registered_generations
             and set(str(item) for item in row.get("validation_evidence") or []) == validation
         ]
         if not supporting_results:
@@ -390,6 +427,7 @@ def record_policy_promotion(
         "hypothesis_id": value.get("hypothesis_id"),
         "evidence_class": value.get("evidence_class"),
         "validation_evidence": validation,
+        "question_generations": dict(value.get("question_generations") or {}),
         "parents": ([str(value["hypothesis_id"])] if value.get("hypothesis_id") else [])
         + ["evidence:" + item for item in validation],
     }
@@ -444,8 +482,8 @@ def reconcile_workorders(path: Optional[str] = None) -> Dict[str, Any]:
                 "question_ids": [],
                 "migration": "pre-lineage work order",
             })
-            workorders.attach_provenance(str(order.get("id")), contract, queue)
-            migrated += 1
+            if workorders.attach_provenance(str(order.get("id")), contract, queue):
+                migrated += 1
         except Exception as exc:  # noqa: BLE001 - one legacy row must not block others
             errors.append("%s: %s" % (order.get("id"), str(exc)[:160]))
     return {"migrated": migrated, "probe_paths_enriched": enriched, "errors": errors}

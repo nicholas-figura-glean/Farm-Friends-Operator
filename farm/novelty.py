@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 from . import rules
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TRADE_ID_JUMP = 5
 MATERIAL_TRADE_VALUE = 10_000
 RIVAL_COIN_INFLOW_ALARM = 10_000
@@ -148,17 +148,62 @@ def _handled_risk(block: Dict[str, Any], handled_risks: Set[str]) -> bool:
     return bool(kinds) and kinds.issubset(handled_risks)
 
 
+def _block_subject(block: Dict[str, Any]) -> str:
+    evidence = block.get("evidence") or {}
+    if block.get("class") == "activity_novelty_tools":
+        before = set(str(value).lower() for value in evidence.get("before") or [])
+        after = set(str(value).lower() for value in evidence.get("after") or [])
+        added, removed = sorted(after - before), sorted(before - after)
+        if added or removed:
+            return "added:%s;removed:%s" % (",".join(added), ",".join(removed))
+    if block.get("class") == "activity_novelty_rival":
+        names = set(str(value).strip().lower() for value in evidence.get("new_players") or [] if value)
+        names.update(
+            str(item.get("player") or "").strip().lower()
+            for item in evidence.get("accelerations") or []
+            if isinstance(item, dict) and item.get("player")
+        )
+        if names:
+            return ",".join(sorted(names))
+    if block.get("class") == "activity_novelty_trade":
+        ids = sorted(set(int(value) for value in evidence.get("trade_ids") or [] if isinstance(value, int)))
+        if ids:
+            return "trade-" + ",".join(str(value) for value in ids)
+    if block.get("class") == "activity_novelty_risk":
+        names = set(str(value).strip().lower() for value in evidence.get("new") or [] if value)
+        for signature in evidence.get("new_signatures") or []:
+            found = re.match(r"unknown:([a-z_]+)", str(signature), re.I)
+            if found:
+                names.add(found.group(1).lower())
+        if names:
+            return ",".join(sorted(names))
+    return str(block.get("subject") or "").strip().lower()
+
+
+def _block_key(block: Dict[str, Any]) -> str:
+    subject = _block_subject(block) or "farm"
+    safe = re.sub(r"[^a-z0-9._,-]+", "-", subject.lower()).strip("-") or "farm"
+    return "%s:%s" % (block.get("class") or "unknown", safe[:160])
+
+
 def _settled(block: Dict[str, Any], questions: Iterable[Dict[str, Any]]) -> bool:
     first_run = block.get("first_run")
+    last_run = block.get("last_run")
+    subject = _block_subject(block).lower()
     for question in questions:
         if question.get("class") != block.get("class") or question.get("status") != "answered":
+            continue
+        if subject and str(question.get("subject") or "").strip().lower() != subject:
             continue
         closed_run = question.get("closed_run")
         if isinstance(first_run, int) and isinstance(closed_run, int) and closed_run < first_run:
             continue
+        cutoff = question.get("evidence_cutoff_run")
+        if isinstance(last_run, int) and (not isinstance(cutoff, int) or cutoff < last_run):
+            continue
         if question.get("probe_result_status") not in SETTLED_RESULTS:
             continue
-        if not question.get("evidence_refs"):
+        if not question.get("generation_evidence_refs"):
             continue
         return True
     return False
@@ -200,6 +245,10 @@ def assess(
     current.update(dict(state or {}))
     current["schema_version"] = SCHEMA_VERSION
     current.setdefault("blocks", {})
+    settled_trade_ids = set(
+        int(value) for value in current.get("settled_trade_ids") or []
+        if isinstance(value, int)
+    )
     questions = list(question_rows or [])
     tools_with_policy = set(str(value) for value in (handled_tools or []))
     risks_with_policy = set(str(value) for value in (handled_risks or []))
@@ -210,17 +259,29 @@ def assess(
     # now deterministically proven to be routine flavor text.
     blocks: Dict[str, Dict[str, Any]] = {}
     resolved_blocks: List[Dict[str, Any]] = []
-    for key, value in (current.get("blocks") or {}).items():
+    for _, value in (current.get("blocks") or {}).items():
         block = dict(value)
+        key = _block_key(block)
         if _settled(block, questions):
-            resolved_blocks.append({"class": key, "reason": "evidence-linked question settled"})
+            if block.get("class") == "activity_novelty_trade":
+                settled_trade_ids.update(
+                    int(value) for value in (block.get("evidence") or {}).get("trade_ids") or []
+                    if isinstance(value, int)
+                )
+            resolved_blocks.append({"class": block.get("class"), "key": key, "reason": "evidence-linked question settled"})
         elif _handled_tool_change(block, tools_with_policy):
-            resolved_blocks.append({"class": key, "reason": "added tools now have validated capability policies"})
+            resolved_blocks.append({"class": block.get("class"), "key": key, "reason": "added tools now have validated capability policies"})
         elif _handled_risk(block, risks_with_policy):
-            resolved_blocks.append({"class": key, "reason": "risk kind now has a validated bounded policy"})
+            resolved_blocks.append({"class": block.get("class"), "key": key, "reason": "risk kind now has a validated bounded policy"})
         elif _reclassified_routine(block):
-            resolved_blocks.append({"class": key, "reason": "captured event reclassified as routine"})
+            resolved_blocks.append({"class": block.get("class"), "key": key, "reason": "captured event reclassified as routine"})
         else:
+            existing = blocks.get(key)
+            if existing:
+                block["first_run"] = min(
+                    int(existing.get("first_run") or block.get("first_run") or 0),
+                    int(block.get("first_run") or existing.get("first_run") or 0),
+                )
             blocks[key] = block
     current["blocks"] = blocks
     signals: List[Dict[str, Any]] = []
@@ -245,19 +306,24 @@ def assess(
 
     trades = [dict(value) for value in (snapshot.get("trades") or [])]
     incoming = [trade for trade in trades if not trade.get("outgoing")]
+    unsettled_incoming = [
+        trade for trade in incoming
+        if int(trade.get("id") or 0) not in settled_trade_ids
+    ]
     seen_profiles = set(str(value) for value in (current.get("trade_profiles") or []))
     incoming_profiles = {_trade_profile(trade) for trade in incoming}
-    new_profiles = sorted(incoming_profiles - seen_profiles)
+    unsettled_profiles = {_trade_profile(trade) for trade in unsettled_incoming}
+    new_profiles = sorted(unsettled_profiles - seen_profiles)
     old_max = int(current.get("max_trade_id") or 0)
     observed_ids = [int(trade.get("id") or 0) for trade in trades]
     new_max = max([old_max] + observed_ids)
     id_jump = old_max > 0 and new_max - old_max >= TRADE_ID_JUMP
-    material = [trade for trade in incoming if _trade_value(trade) >= MATERIAL_TRADE_VALUE]
-    if incoming and (not current.get("initialized") or new_profiles or id_jump or material):
-        ids = sorted(int(trade.get("id") or 0) for trade in incoming)
+    material = [trade for trade in unsettled_incoming if _trade_value(trade) >= MATERIAL_TRADE_VALUE]
+    if unsettled_incoming and (not current.get("initialized") or new_profiles or id_jump or material):
+        ids = sorted(int(trade.get("id") or 0) for trade in unsettled_incoming)
         requested_coins = sum(
             int(trade.get("want_qty") or 0)
-            for trade in incoming
+            for trade in unsettled_incoming
             if trade.get("want_item") == "coin"
         )
         reasons = []
@@ -285,6 +351,7 @@ def assess(
         ))
     current["max_trade_id"] = new_max
     current["trade_profiles"] = sorted((seen_profiles | incoming_profiles))[-200:]
+    current["settled_trade_ids"] = sorted(settled_trade_ids)[-500:]
 
     rival_herds = dict(snapshot.get("rival_herds") or {})
     rival_coins = dict(snapshot.get("rival_coins") or {})
@@ -361,14 +428,15 @@ def assess(
         ))
     current["event_signatures"] = sorted(known_signatures | signatures)[-200:]
 
-    # One persistent block per question class keeps repeated events bounded while
-    # retaining the newest evidence and all affected domains.
+    # One persistent block per concrete condition keeps repeated events bounded
+    # without allowing a later Bob event to overwrite an unresolved Alice event.
     for signal in signals:
-        key = str(signal["class"])
+        block_class = str(signal["class"])
+        key = _block_key(signal)
         existing = dict(blocks.get(key) or {})
         blocks[key] = {
-            "class": key,
-            "subject": signal["subject"],
+            "class": block_class,
+            "subject": _block_subject(signal) or signal["subject"],
             "domains": sorted(set(existing.get("domains") or []) | set(signal["domains"])),
             "first_run": existing.get("first_run", run),
             "last_run": run,
@@ -378,9 +446,14 @@ def assess(
 
     # If routing broke, periodically re-emit the original alert rather than
     # silently retaining a hold no autonomous worker can see.
-    questioned_classes = {str(row.get("class")) for row in questions}
+    questioned_conditions = {
+        (str(row.get("class")), str(row.get("subject") or "").strip().lower())
+        for row in questions
+    }
+    signaled_keys = {_block_key(signal) for signal in signals}
     for key, block in sorted(blocks.items()):
-        if key in questioned_classes or any(signal["class"] == key for signal in signals):
+        condition = (str(block.get("class")), _block_subject(block))
+        if condition in questioned_conditions or key in signaled_keys:
             continue
         first_run = block.get("first_run")
         if isinstance(first_run, int) and run - first_run >= REMINDER_RUNS and (run - first_run) % REMINDER_RUNS == 0:

@@ -237,6 +237,38 @@ def _normalize_subject(alert_class: str, value: str) -> str:
 
 
 def _subject(alert_class: str, alert: str, explicit: Optional[str] = None) -> str:
+    if explicit and _normalize_subject(alert_class, explicit) != "farm":
+        return _normalize_subject(alert_class, explicit)
+    if alert_class == "activity_novelty_tools":
+        found = re.search(r"added=\[([^\]]*)\]\s+removed=\[([^\]]*)\]", alert or "", re.I)
+        if found:
+            added = sorted(value.lower() for value in re.findall(r"['\"]([^'\"]+)['\"]", found.group(1)))
+            removed = sorted(value.lower() for value in re.findall(r"['\"]([^'\"]+)['\"]", found.group(2)))
+            return "added:%s;removed:%s" % (",".join(added), ",".join(removed))
+        return "server capability surface"
+    if alert_class == "activity_novelty_rival":
+        names: List[str] = []
+        for label in ("new players", "material rival changes"):
+            found = re.search(r"%s=\[([^\]]*)\]" % re.escape(label), alert or "", re.I)
+            if found:
+                names.extend(re.findall(r"['\"]([^'\"]+)['\"]", found.group(1)))
+        if names:
+            return ",".join(sorted(set(_normalize_subject(alert_class, name) for name in names)))
+    if alert_class == "activity_novelty_trade":
+        found = re.search(r"trade ids \[([^\]]+)\]", alert or "", re.I)
+        if found:
+            ids = sorted(set(re.findall(r"\d+", found.group(1))), key=int)
+            if ids:
+                return "trade-" + ",".join(ids)
+    if alert_class == "activity_novelty_risk":
+        found = re.search(r"unknown:([a-z_]+)", alert or "", re.I)
+        if found:
+            return _normalize_subject(alert_class, found.group(1))
+        found = re.search(r"new risk event kind\(s\) \[([^\]]+)\]", alert or "", re.I)
+        if found:
+            names = re.findall(r"['\"]([^'\"]+)['\"]", found.group(1))
+            if names:
+                return ",".join(sorted(set(_normalize_subject(alert_class, name) for name in names)))
     if explicit:
         return _normalize_subject(alert_class, explicit)
     patterns = [
@@ -422,17 +454,21 @@ def open_or_update(
         opened = existing is None
         terminal = bool(existing and existing.get("status") in {"answered", "abandoned"})
         closed_run = (existing or {}).get("closed_run")
-        critical_recurrence = alert_class in {
-            "rank_lost", "overtaken", "no_path_to_win",
-            "activity_novelty_trade", "activity_novelty_rival",
-            "activity_novelty_risk", "activity_novelty_tools",
-        }
-        enough_new_runs = (
+        previous_seen = (existing or {}).get("last_seen_run")
+        monotonic_update = bool(
+            existing is None
+            or (isinstance(run, int) and (
+                not isinstance(previous_seen, int) or run >= previous_seen
+            ))
+            or (not isinstance(run, int) and not isinstance(previous_seen, int)
+                and str(ts) >= str((existing or {}).get("last_seen_ts") or ""))
+        )
+        newer_than_close = bool(
             not isinstance(run, int)
             or not isinstance(closed_run, int)
-            or run - closed_run >= rules.QUESTION_REOPEN_RUNS
+            or run > closed_run
         )
-        reopened = bool(terminal and (critical_recurrence or enough_new_runs))
+        reopened = bool(terminal and monotonic_update and newer_than_close)
         if existing is None:
             record: Dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
@@ -457,8 +493,13 @@ def open_or_update(
                 "cost_bound": cost_bound or defaults["budget"],
                 "decision_bundle": decision_bundle or {},
                 "evidence_refs": list(evidence_refs or []),
+                "generation_evidence_refs": [],
                 "generation": 1,
                 "answer": None,
+                "probe_result_status": None,
+                "resolution_kind": None,
+                "residual_uncertainty": None,
+                "evidence_cutoff_run": None,
                 "closed_run": None,
                 "closed_ts": None,
             }
@@ -467,23 +508,24 @@ def open_or_update(
         else:
             record = existing
             record["occurrences"] = int(record.get("occurrences") or 0) + 1
-            record["last_seen_run"] = run
-            record["last_seen_ts"] = ts
-            record["alert"] = alert
-            if decision_bundle:
-                record["decision_bundle"] = decision_bundle
-            if evidence_refs:
-                record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
-            # Deterministically migrate legacy active rows as they recur.
-            record["owner"] = selected_owner if owner or not record.get("owner") else record.get("owner")
-            record["next_step"] = selected_next_step if next_step or not record.get("next_step") else record.get("next_step")
-            if next_step_due_run is not None or not isinstance(record.get("next_step_due_run"), int):
-                record["next_step_due_run"] = due_run
-            if not isinstance(record.get("generation_opened_run"), int):
-                record["generation_opened_run"] = record.get("opened_run")
-            candidate_priority = defaults["priority"]
-            if _PRIORITY.get(candidate_priority, 0) > _PRIORITY.get(str(record.get("priority")), 0):
-                record["priority"] = candidate_priority
+            if monotonic_update:
+                record["last_seen_run"] = run
+                record["last_seen_ts"] = ts
+                record["alert"] = alert
+                if decision_bundle:
+                    record["decision_bundle"] = decision_bundle
+                if evidence_refs:
+                    record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
+                # Deterministically migrate legacy active rows as they recur.
+                record["owner"] = selected_owner if owner or not record.get("owner") else record.get("owner")
+                record["next_step"] = selected_next_step if next_step or not record.get("next_step") else record.get("next_step")
+                if next_step_due_run is not None or not isinstance(record.get("next_step_due_run"), int):
+                    record["next_step_due_run"] = due_run
+                if not isinstance(record.get("generation_opened_run"), int):
+                    record["generation_opened_run"] = record.get("opened_run")
+                candidate_priority = defaults["priority"]
+                if _PRIORITY.get(candidate_priority, 0) > _PRIORITY.get(str(record.get("priority")), 0):
+                    record["priority"] = candidate_priority
             if reopened:
                 record["status"] = "open"
                 record["generation"] = int(record.get("generation") or 1) + 1
@@ -492,11 +534,18 @@ def open_or_update(
                 record["next_step"] = selected_next_step
                 record["next_step_due_run"] = due_run
                 record["answer"] = None
+                record["probe_result_status"] = None
+                record["resolution_kind"] = None
+                record["residual_uncertainty"] = None
+                record["evidence_cutoff_run"] = None
+                record["generation_evidence_refs"] = []
+                record["active_probe_id"] = None
+                record["probe_started_run"] = None
                 record["closed_run"] = None
                 record["closed_ts"] = None
                 event_name = "reopened"
             else:
-                event_name = "updated"
+                event_name = "updated" if monotonic_update else "delayed_update"
         rows.sort(key=lambda value: (value.get("opened_run") or 0, value.get("id")))
         _write_current(current_path, rows)
         for migration in migrations:
@@ -540,9 +589,22 @@ def set_status(
     run: Optional[int] = None,
     probe_id: Optional[str] = None,
     result_status: Optional[str] = None,
+    expected_generation: Optional[int] = None,
+    expected_status: Optional[Any] = None,
+    expected_probe_id: Optional[str] = None,
+    evidence_cutoff_run: Optional[int] = None,
+    resolution_kind: Optional[str] = None,
+    residual_uncertainty: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Compare-and-set one lifecycle transition.
+
+    A delayed probe must not close a newer recurrence of the same question. A
+    terminal transition also needs a proposition and current durable evidence;
+    process exit alone is execution evidence, not epistemic closure.
+    """
     if status not in VALID_STATUSES:
         raise ValueError("invalid question status: %s" % status)
+    refs = sorted(set(str(value) for value in (evidence_refs or []) if value))
     current_path, events_path, lock_path = _paths()
     current_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+", encoding="utf-8") as lock_handle:
@@ -552,11 +614,60 @@ def set_status(
         if record is None:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
             return None
+        generation = int(record.get("generation") or 1)
+        if expected_generation is not None and generation != int(expected_generation):
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return None
+        if expected_status is not None:
+            allowed = set(expected_status) if isinstance(expected_status, (set, list, tuple)) else {expected_status}
+            if record.get("status") not in allowed:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                return None
+        if expected_probe_id is not None and record.get("active_probe_id") != expected_probe_id:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return None
+        # Autonomous probe transitions are always state-machine transitions even
+        # if an older caller omitted explicit expectations.
+        if status == "probing" and record.get("status") != "open":
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return None
+        if status == "open" and probe_id and record.get("status") != "probing":
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return None
+        if status in {"answered", "abandoned"} and record.get("status") == "probing":
+            if not probe_id or record.get("active_probe_id") != probe_id:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                return None
+
+        if status in {"answered", "abandoned"}:
+            if not str(answer or "").strip():
+                raise ValueError("terminal question transition requires an answer")
+            if not refs:
+                raise ValueError("terminal question transition requires durable evidence")
+            cutoff = evidence_cutoff_run if evidence_cutoff_run is not None else run
+            latest_obligation = max(
+                int(record.get("generation_opened_run") or 0),
+                int(record.get("last_seen_run") or 0),
+            )
+            if not isinstance(cutoff, int) or cutoff < latest_obligation:
+                raise ValueError(
+                    "terminal evidence predates the active question generation"
+                )
+            evidence_cutoff_run = cutoff
+            if not resolution_kind:
+                if result_status in {"falsified", "rejected"}:
+                    resolution_kind = "falsified"
+                elif result_status in {"superseded"}:
+                    resolution_kind = "superseded"
+                else:
+                    resolution_kind = "supported"
+
         record["status"] = status
         if answer is not None:
             record["answer"] = answer
-        if evidence_refs:
-            record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + evidence_refs))
+        if refs:
+            record["evidence_refs"] = sorted(set((record.get("evidence_refs") or []) + refs))
+            record["generation_evidence_refs"] = refs
         if status == "probing":
             record["active_probe_id"] = probe_id
             record["probe_started_run"] = run
@@ -573,7 +684,7 @@ def set_status(
             record["owner"] = record.get("owner") or "research"
             record["next_step"] = (
                 "Review probe %s and bind a revised probe or explicit human decision."
-                % (probe_id or record.get("active_probe_id") or "result")
+                % (probe_id or "result")
             )
             record["next_step_due_run"] = (
                 run + rules.QUESTION_MAX_AGE_RUNS if isinstance(run, int) else record.get("next_step_due_run")
@@ -585,6 +696,9 @@ def set_status(
             record["probe_started_run"] = None
             record["closed_run"] = run
             record["closed_ts"] = _utcnow()
+            record["resolution_kind"] = resolution_kind
+            record["residual_uncertainty"] = str(residual_uncertainty or "")
+            record["evidence_cutoff_run"] = evidence_cutoff_run
         if result_status is not None:
             record["probe_result_status"] = result_status
         _write_current(current_path, rows)
@@ -596,9 +710,12 @@ def set_status(
                 "ts": _utcnow(),
                 "question_id": question_id,
                 "run": run,
-                "generation": record.get("generation"),
+                "generation": generation,
                 "answer": answer,
-                "evidence_refs": evidence_refs or [],
+                "evidence_refs": refs,
+                "evidence_cutoff_run": evidence_cutoff_run,
+                "resolution_kind": resolution_kind,
+                "residual_uncertainty": residual_uncertainty,
                 "probe_id": probe_id,
                 "result_status": result_status,
             },
@@ -609,6 +726,33 @@ def set_status(
 
 def open_questions() -> List[Dict[str, Any]]:
     return [row for row in load_all() if row.get("status") in {"open", "probing"}]
+
+
+def release_stale_probes(current_run: Optional[int]) -> List[Dict[str, Any]]:
+    """Return questions stranded by a killed probe to schedulable open state."""
+    if not isinstance(current_run, int):
+        return []
+    released: List[Dict[str, Any]] = []
+    for question in open_questions():
+        if question.get("status") != "probing":
+            continue
+        started = question.get("probe_started_run")
+        if not isinstance(started, int) or current_run - started < rules.PROBE_STALE_RUNS:
+            continue
+        changed = set_status(
+            str(question.get("id")),
+            "open",
+            answer="Probe lease expired before a result was admitted; retry remains bounded.",
+            run=current_run,
+            probe_id=str(question.get("active_probe_id") or "interrupted-probe"),
+            result_status="interrupted",
+            expected_generation=int(question.get("generation") or 1),
+            expected_status="probing",
+            expected_probe_id=str(question.get("active_probe_id") or ""),
+        )
+        if changed:
+            released.append(changed)
+    return released
 
 
 def events() -> List[Dict[str, Any]]:
@@ -688,6 +832,358 @@ def backfill_metadata(run: Optional[int]) -> Dict[str, Any]:
     return {"changed": len(changed), "question_ids": sorted(changed)}
 
 
+def reconcile(
+    current_run: Optional[int],
+    rows: Optional[List[Dict[str, Any]]] = None,
+    registry: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Close only obligations settled by current class-specific evidence.
+
+    This is not an age-based garbage collector. Every transition names a
+    proposition, immutable evidence window, resolution kind, and any remaining
+    uncertainty. A recurring detector can reopen the same stable identity.
+    """
+    if not isinstance(current_run, int):
+        return []
+    from . import analysis, claims, mechanics, policy
+
+    history = list(rows) if rows is not None else analysis.history_rows(limit=240)
+    history = [row for row in history if isinstance(row.get("run"), int) and not row.get("dry")]
+    if not history:
+        return []
+    history.sort(key=lambda row: int(row["run"]))
+    latest = history[-1]
+    latest_run = int(latest["run"])
+    # The evidence cutoff, not a possibly stale caller snapshot, owns closure.
+    current_run = latest_run
+    window = history[-rules.QUESTION_FLOW_WINDOW_RUNS :]
+    first = window[0]
+    score_health = rules.score_production_health(history)
+    registry = registry if registry is not None else (claims.load() or {})
+    claim_map = claims.claim_map(registry) if registry else {}
+    resolved: List[Dict[str, Any]] = []
+
+    def evidence_window() -> str:
+        return "state/history.ndjson#runs=%s-%s" % (first.get("run"), latest.get("run"))
+
+    def close(
+        question: Dict[str, Any],
+        answer: str,
+        refs: List[str],
+        kind: str,
+        residual: str = "",
+        result_status: str = "supported",
+        evidence_cutoff: Optional[int] = None,
+    ) -> bool:
+        identity = str(question.get("id") or "")
+        if not identity:
+            return False
+        try:
+            changed = set_status(
+                identity,
+                "answered",
+                answer=answer,
+                evidence_refs=refs,
+                run=current_run,
+                probe_id="deterministic-reconciliation",
+                result_status=result_status,
+                expected_generation=int(question.get("generation") or 1),
+                expected_status="open",
+                evidence_cutoff_run=(
+                    evidence_cutoff if isinstance(evidence_cutoff, int) else current_run
+                ),
+                resolution_kind=kind,
+                residual_uncertainty=residual,
+            )
+        except ValueError:
+            return False
+        if changed is None:
+            return False
+        resolved.append({"question_id": identity, "resolution_kind": kind, "answer": answer})
+        return True
+
+    current_score = float(latest.get("produce") or 0)
+    first_score = float(first.get("produce") or 0)
+    our_gain = max(0.0, current_score - first_score)
+    current_at_cap = bool(
+        int(latest.get("animal_capacity") or 0) > 0
+        and int(latest.get("animals") or 0) >= int(latest.get("animal_capacity") or 0)
+    )
+
+    for question in open_questions():
+        qclass = str(question.get("class") or "")
+        subject = str(question.get("subject") or "")
+        alert = str(question.get("alert") or "")
+        last_seen = question.get("last_seen_run")
+        age = current_run - int(last_seen) if isinstance(last_seen, int) else None
+
+        if qclass == "strategy.unbacked_parameter":
+            policy_support = policy.parameter_support(subject)
+            parameter_values = {
+                "feed_cooldown_runs": rules.FEED_COOLDOWN_RUNS,
+                "threat_share": rules.THREAT_SHARE,
+            }
+            if (
+                policy_support.get("level") == "conservative_invariant"
+                and subject in parameter_values
+                and policy_support.get("value") == parameter_values[subject]
+                and score_health.get("status") in {"healthy", "watching"}
+            ):
+                close(
+                    question,
+                    str(policy_support.get("rationale") or "The value is bounded by a conservative invariant."),
+                    list(policy_support.get("evidence_refs") or []) + [evidence_window()],
+                    "supported",
+                    str(policy_support.get("falsifier") or "new contrary evidence can reopen this value"),
+                )
+                continue
+            if (
+                subject in {"growth_min_marginal_gain", "growth_comparison_window"}
+                and current_at_cap
+                and latest.get("rank") == 1
+            ):
+                close(
+                    question,
+                    "The growth threshold is unreachable while the herd is at its hard capacity; directional uncertainty is retained until a below-cap regime makes it decision-active.",
+                    [evidence_window(), "state/policy.json#capacity-guard"],
+                    "condition_cleared",
+                    "the exact value remains unproven and reopens immediately below cap",
+                    result_status="inactive_regime",
+                )
+                continue
+
+        if qclass == "model_drift" and subject == "output_yield":
+            claim = claim_map.get("mechanic.output_linear_with_herd") or {}
+            if (
+                claim.get("status") == "accepted"
+                and isinstance(claim.get("last_validated_run"), int)
+                and int(claim["last_validated_run"]) >= int(last_seen or 0)
+            ):
+                close(
+                    question,
+                    "A newer regime-filtered output claim validates positive herd/output scaling through run %s."
+                    % claim.get("last_validated_run"),
+                    ["state/claims.json#mechanic.output_linear_with_herd", evidence_window()],
+                    "superseded",
+                    "future cohort drift remains independently detectable",
+                    evidence_cutoff=int(claim["last_validated_run"]),
+                )
+                continue
+
+        if qclass == "model_drift" and subject == "hunger_wall":
+            claim = claim_map.get("safety.bulk_husbandry") or {}
+            if (
+                claim.get("status") == "accepted"
+                and (claim.get("refresh") or {}).get("state") == "current"
+                and isinstance(claim.get("last_validated_run"), int)
+                and int(claim["last_validated_run"]) >= int(last_seen or 0)
+            ):
+                close(
+                    question,
+                    "Constant-time whole-herd feeding and direct hunger/runway guards supersede the synthetic herd-size wall.",
+                    ["state/claims.json#safety.bulk_husbandry", evidence_window()],
+                    "superseded",
+                    "actual hunger and feed-runway incidents remain live safety signals",
+                    evidence_cutoff=int(claim["last_validated_run"]),
+                )
+                continue
+
+        if qclass == "knob_age" and subject == "individual_feeds" and (age or 0) >= rules.QUESTION_MAX_AGE_RUNS:
+            if all("individual_feeds" not in (row.get("knobs") or {}) for row in window):
+                close(
+                    question,
+                    "The retired per-animal feed knob is absent throughout the current evidence window.",
+                    [evidence_window(), "farm/heal.py#retired-individual-feeds"],
+                    "superseded",
+                    "bulk-feed performance remains governed by safety.bulk_husbandry",
+                )
+                continue
+
+        if qclass == "knob_age" and subject == "rate_ceiling" and (age or 0) >= rules.QUESTION_MAX_AGE_RUNS:
+            noisy = any(
+                "transport retries" in " ".join(row.get("anomalies") or []).lower()
+                or "server pushing back" in " ".join(row.get("anomalies") or []).lower()
+                for row in window
+            )
+            if not noisy and all("rate_ceiling" not in (row.get("knobs") or {}) for row in window):
+                close(
+                    question,
+                    "The transient rate override is absent and the current window has no transport/backpressure incident.",
+                    [evidence_window(), "state/heal.json#knobs"],
+                    "condition_cleared",
+                    "future transport pressure can recreate a fresh bounded override",
+                )
+                continue
+
+        if qclass == "knob_age" and subject in claim_map:
+            claim = claim_map.get(subject) or {}
+            if (
+                claim.get("status") == "accepted"
+                and (claim.get("refresh") or {}).get("state") == "current"
+                and isinstance(claim.get("last_validated_run"), int)
+                and int(claim["last_validated_run"]) >= int(last_seen or 0)
+            ):
+                close(
+                    question,
+                    "Claim %s was revalidated through run %s with its declared estimator."
+                    % (subject, claim.get("last_validated_run")),
+                    ["state/claims.json#%s" % subject] + list(claim.get("evidence_refs") or [])[:3],
+                    "supported",
+                    "the claim will reopen when its evidence-age contract expires again",
+                    evidence_cutoff=int(claim["last_validated_run"]),
+                )
+                continue
+
+        if qclass == "activity_novelty_risk" and "rustler" in alert.lower():
+            verified = None
+            for row in reversed(history):
+                for action in row.get("mechanic_actions") or []:
+                    before = ((action.get("verification") or {}).get("before") or {}) if isinstance(action, dict) else {}
+                    if (
+                        isinstance(action, dict)
+                        and action.get("kind") == "crisis"
+                        and action.get("tool") == "resolve_crisis"
+                        and action.get("status") in {"verified", "reconciled"}
+                        and before.get("crisis_kind") == "rustlers"
+                        and int(row.get("run") or 0) >= int(last_seen or 0)
+                    ):
+                        verified = row
+                        break
+                if verified:
+                    break
+            if verified and "resolve_crisis" in mechanics.active_tools():
+                close(
+                    question,
+                    "The rustlers signature is now bound to the protected resolve_crisis policy and was verified to clear the crisis.",
+                    ["state/history.ndjson#run=%s" % verified.get("run"), "capability-policy:resolve_crisis"],
+                    "supported",
+                    "new loss signatures remain blocked until separately classified",
+                    evidence_cutoff=int(verified.get("run") or current_run),
+                )
+                continue
+
+        if qclass == "operational_throughput":
+            interval = float(latest.get("interval_min") or 0.0)
+            rate = latest.get("units_per_animal_min")
+            exposure = int(latest.get("collection_animals") or latest.get("animals") or 0)
+            if rate is None and interval > 0 and exposure > 0:
+                rate = float(latest.get("units_collected") or 0) / float(exposure) / interval
+            if (
+                isinstance(rate, (int, float))
+                and rules.backlog_drained(int(latest.get("ready_units") or 0), int(latest.get("animals") or 0))
+                and int(latest.get("max_hunger") or 0) < rules.HUNGER_ALARM
+                and score_health.get("status") == "healthy"
+            ):
+                close(
+                    question,
+                    "All-species throughput is %.3f units/animal/min with a drained barn, safe hunger, and healthy score production; the chicken-only denominator was invalid."
+                    % float(rate),
+                    ["state/history.ndjson#run=%s" % current_run, "farm/cycle.py#units_per_animal_min"],
+                    "superseded",
+                    "upper-band changes remain periodic model evidence, not operational incidents",
+                )
+                continue
+
+        if qclass == "operational_collection_backlog" and (age or 0) >= rules.QUESTION_REOPEN_RUNS:
+            if rules.backlog_drained(
+                int(latest.get("ready_units") or 0), int(latest.get("animals") or 0)
+            ):
+                close(
+                    question,
+                    "The barn backlog is drained in the current negative-observation window.",
+                    [evidence_window()],
+                    "condition_cleared",
+                    "a renewed material backlog after empty collection calls reopens immediately",
+                )
+                continue
+
+        production_episode = (
+            qclass in {"operational_production", "operational_zero_collect"}
+            or (qclass == "operational_unknown" and alert.startswith("PRODUCTION:"))
+        )
+        if production_episode and score_health.get("status") == "healthy":
+            close(
+                question,
+                "The burst-spanning score window is healthy; adjacent zero deltas were a scoreboard publication phase, not a production halt.",
+                [evidence_window(), "farm/rules.py#score_production_health"],
+                "condition_cleared",
+                "a future 35-minute flat score still opens a new production incident",
+            )
+            continue
+
+        if qclass == "operational_trades_in" and (age or 0) >= rules.QUESTION_MAX_AGE_RUNS:
+            if all(int(row.get("trades_in") or 0) == 0 for row in window):
+                close(
+                    question,
+                    "No inbound trade remains anywhere in the current negative-observation window.",
+                    [evidence_window()],
+                    "condition_cleared",
+                    "future inbound offers remain subject to the promoted trade policy",
+                )
+                continue
+
+        if qclass == "operational_animals_fell":
+            if current_at_cap and not latest.get("active_crisis") and score_health.get("status") == "healthy":
+                close(
+                    question,
+                    "The herd recovered to its league capacity with no active crisis and healthy score production.",
+                    [evidence_window(), "state/history.ndjson#run=%s" % current_run],
+                    "condition_cleared",
+                    "future classified loss events remain independently actionable",
+                )
+                continue
+
+        if qclass == "idle_capital":
+            if current_at_cap and latest.get("rank") == 1 and score_health.get("status") == "healthy":
+                close(
+                    question,
+                    "The farm is at the hard animal cap, remains rank 1, and advances score; idle coins are not blocking an available growth action.",
+                    [evidence_window(), "state/claims.json#strategy.capped_slot_efficiency"],
+                    "condition_cleared",
+                    "exact capped-slot replacement economics remain claim-governed",
+                )
+                continue
+
+        if qclass in {"rival_wake", "rival_growing", "threat"} and (age or 0) >= rules.QUESTION_REOPEN_RUNS:
+            def named(mapping: Any, name: str) -> Optional[float]:
+                if not isinstance(mapping, dict):
+                    return None
+                for key, value in mapping.items():
+                    if str(key).strip().lower() == name.strip().lower() and isinstance(value, (int, float)):
+                        return float(value)
+                return None
+
+            before_score = named(first.get("rivals"), subject)
+            after_score = named(latest.get("rivals"), subject)
+            before_herd = named(first.get("rival_herds"), subject)
+            after_herd = named(latest.get("rival_herds"), subject)
+            if before_score is not None and after_score is not None:
+                rival_gain = max(0.0, after_score - before_score)
+                herd_gain = max(0.0, (after_herd or 0.0) - (before_herd or 0.0))
+                material = bool(
+                    (rival_gain > 0 and our_gain <= 0)
+                    or (rival_gain > 0 and our_gain > 0
+                        and rival_gain >= rules.THREAT_SHARE * our_gain)
+                    or herd_gain >= rules.RIVAL_HERD_GROWTH_ALARM
+                )
+                if (
+                    latest.get("rank") == 1
+                    and score_health.get("status") == "healthy"
+                    and not material
+                ):
+                    close(
+                        question,
+                        "The historical %s episode is no longer decision-material: over runs %s-%s our score gained %.0f versus %.0f for %s, while rank 1 was retained."
+                        % (qclass, first.get("run"), latest.get("run"), our_gain, rival_gain, subject),
+                        [evidence_window()],
+                        "condition_cleared",
+                        "the original rival mechanism is unresolved; any renewed material gain reopens the episode",
+                    )
+                    continue
+
+    return resolved
+
+
 def health(
     current_run: Optional[int],
     rows: Optional[List[Dict[str, Any]]] = None,
@@ -736,8 +1232,14 @@ def health(
         arrivals = sum(row.get("event") in {"opened", "reopened"} for row in selected)
         answered = sum(row.get("event") == "answered" for row in selected)
         abandoned = sum(row.get("event") == "abandoned" for row in selected)
-        return {"arrivals": arrivals, "answered": answered, "abandoned": abandoned,
-                "closures": answered + abandoned}
+        return {
+            "arrivals": arrivals,
+            "answered": answered,
+            "abandoned": abandoned,
+            # Abandonment is a work disposition, not evidence that uncertainty
+            # was resolved; it must never make learning throughput look healthy.
+            "closures": answered,
+        }
 
     if isinstance(current_run, int):
         current_flow = flow(max(0, current_run - window + 1), current_run)

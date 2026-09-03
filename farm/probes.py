@@ -22,6 +22,10 @@ PROJECT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
 
 
+class QuestionBindingUnavailable(RuntimeError):
+    """The selected question changed state before the worker could start."""
+
+
 def _registry() -> Dict[str, Dict[str, Any]]:
     from experiments.registry import PROBES
     return {name: dict(value) for name, value in PROBES.items()}
@@ -89,22 +93,53 @@ def _command(spec: Dict[str, Any]) -> List[str]:
         raise ValueError("probe command escapes the project: %s" % relative) from exc
     if not script.is_file():
         raise ValueError("probe script missing or unsafe: %s" % relative)
-    return [sys.executable, str(script)] + [str(value) for value in raw[1:]]
+    # Isolated mode prevents an editable sibling such as experiments/json.py
+    # from shadowing the standard library inside a pinned autonomous script.
+    return [sys.executable, "-I", str(script)] + [str(value) for value in raw[1:]]
 
 
 def _ensure_registration(spec: Dict[str, Any], question_ids: List[str], probe_id: str) -> None:
     identity = str(spec.get("hypothesis_id") or "")
     if not identity:
         return
-    if any(
-        row.get("event") == "hypothesis.registered" and row.get("node") == identity
-        for row in provenance.events()
-    ):
+    registrations = [
+        row for row in provenance.events()
+        if row.get("event") == "hypothesis.registered" and row.get("node") == identity
+    ]
+    if registrations:
+        registered_questions = set(str(value) for value in registrations[-1].get("question_ids") or [])
+        requested_questions = set(question_ids)
+        if registered_questions != requested_questions:
+            raise provenance.ProvenanceError(
+                "probe %s hypothesis is registered to different questions" % probe_id
+            )
+        registered_generations = registrations[-1].get("question_generations") or {}
+        registered_seen = registrations[-1].get("question_last_seen_runs") or {}
+        current = {str(row.get("id")): row for row in questions.load_all()}
+        if requested_questions and any(
+            int((current.get(identity) or {}).get("generation") or 0)
+                != int(registered_generations.get(identity) or 0)
+            or (current.get(identity) or {}).get("last_seen_run")
+                != registered_seen.get(identity)
+            for identity in requested_questions
+        ):
+            raise provenance.ProvenanceError(
+                "probe %s hypothesis binding is stale for the active question generation" % probe_id
+            )
         return
+    current = {str(row.get("id")): row for row in questions.load_all()}
     registration = provenance.register_hypothesis(
         spec,
         ["question:%s" % value for value in question_ids] or ["explicit-probe:%s" % probe_id],
         question_ids=question_ids,
+        question_generations={
+            identity: int((current.get(identity) or {}).get("generation") or 1)
+            for identity in question_ids
+        },
+        question_last_seen_runs={
+            identity: (current.get(identity) or {}).get("last_seen_run")
+            for identity in question_ids
+        },
     )
     if registration.get("id") != identity:
         raise provenance.ProvenanceError(
@@ -125,6 +160,8 @@ def _attributed_calls(execution_id: str) -> int:
 
 def _outputs(spec: Dict[str, Any]) -> List[str]:
     names = sorted(set(str(value) for value in (spec.get("outputs") or []) if value))
+    if sum(name.endswith(".json") for name in names) > 1:
+        raise ValueError("probe may declare at most one policy-driving JSON output")
     for name in names:
         path = Path(name)
         if path.is_absolute() or len(path.parts) != 1 or ".." in path.parts:
@@ -200,10 +237,14 @@ def _validated_provenance_result(
     if not refs:
         raise sandbox.ResultValidationError("hypothesis result has no declared JSON evidence output")
     return {
-        "status": status,
+        # These are a worker proposal, never a trusted causal result. A protected
+        # hypothesis-specific adjudicator must independently recompute the metric
+        # before provenance.record_result may be called.
+        "proposed_status": status,
         "evidence_class": evidence_class,
         "validation_evidence": sorted(refs),
-        "effect": effect,
+        "proposed_effect": effect,
+        "trusted": False,
     }
 
 
@@ -230,6 +271,326 @@ def _terminate_group(process: subprocess.Popen) -> None:
         pass
 
 
+def _executor_identity() -> str:
+    """Fingerprint the protected scheduler/boundary implementation.
+
+    Failure backoff is scoped to these bytes so a repaired release earns one
+    immediate retry without erasing the immutable history of the old failure.
+    """
+    digest = hashlib.sha256()
+    for module_path in (Path(__file__), Path(sandbox.__file__), Path(probe_guard.__file__)):
+        digest.update(module_path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def _trusted_adjudication(
+    probe_id: str,
+    live_state: Path,
+    prepared: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Interpret admitted probe bytes in trusted code.
+
+    Editable workers may produce measurements, but they cannot choose which
+    question classes they settle. That mapping lives here, behind the protected
+    release boundary.
+    """
+    prepared_json = {
+        str(item.get("path")): item
+        for item in prepared
+        if item.get("kind") == "json" and item.get("path")
+    }
+
+    def load(name: str) -> Dict[str, Any]:
+        item = prepared_json.get(name) or {}
+        value = item.get("value")
+        return dict(value) if isinstance(value, dict) else {}
+
+    def normalized(value: Any, ignored: set[str]) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: normalized(child, ignored)
+                for key, child in value.items() if key not in ignored
+            }
+        if isinstance(value, list):
+            return [normalized(child, ignored) for child in value]
+        return value
+
+    def require_equal(actual: Dict[str, Any], expected: Dict[str, Any], ignored: set[str] = set()) -> None:
+        if normalized(actual, ignored) != normalized(expected, ignored):
+            raise sandbox.ResultValidationError(
+                "probe output does not match trusted recomputation: %s" % probe_id
+            )
+
+    def recompute_stateful_analysis(
+        module: Any,
+        filename: str,
+        start_probe_id: str,
+        required_tools: Dict[str, int],
+    ) -> Dict[str, Any]:
+        baseline = live_state / filename
+        if not baseline.is_file() or baseline.is_symlink():
+            raise sandbox.ResultValidationError("probe analysis has no trusted baseline: %s" % filename)
+        try:
+            baseline_value = json.loads(baseline.read_text(encoding="utf-8"))
+            canonical = (
+                json.dumps(baseline_value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+            ).encode("utf-8")
+        except (OSError, TypeError, ValueError) as exc:
+            raise sandbox.ResultValidationError("probe analysis baseline is invalid") from exc
+        baseline_sha = hashlib.sha256(canonical).hexdigest()
+        attestations = [
+            event for event in analysis.read_ndjson(live_state / "experiments.ndjson", limit=2_000)
+            if event.get("probe_id") == start_probe_id
+            and event.get("status") == "passed"
+            and event.get("explicit") is True
+            and any(
+                output.get("path") == filename and output.get("sha256") == baseline_sha
+                for output in event.get("admitted_outputs") or []
+                if isinstance(output, dict)
+            )
+        ]
+        attestation = attestations[-1] if attestations else None
+        usage = (attestation or {}).get("tool_usage") or {}
+        if not attestation or any(
+            int(usage.get(tool) or 0) != count
+            for tool, count in required_tools.items()
+        ):
+            raise sandbox.ResultValidationError(
+                "probe analysis baseline lacks a matching parent/broker attestation"
+            )
+        if not str(baseline_value.get("intervention_id") or "").startswith("int-"):
+            raise sandbox.ResultValidationError("probe analysis baseline has no intervention identity")
+        with sandbox.scratch_dir("farm-trusted-adjudication-") as temp_name:
+            temp = Path(temp_name)
+            probe_path = temp / filename
+            probe_path.write_bytes(baseline.read_bytes())
+            experiments_path = temp / "experiments.ndjson"
+            experiments_path.touch()
+            saved = (module.PROBE, module.TOOL_CALLS, module.EXPERIMENTS)
+            try:
+                module.PROBE = probe_path
+                module.TOOL_CALLS = live_state / "tool_calls.ndjson"
+                module.EXPERIMENTS = experiments_path
+                module.analyze()
+                value = json.loads(probe_path.read_text(encoding="utf-8"))
+            finally:
+                module.PROBE, module.TOOL_CALLS, module.EXPERIMENTS = saved
+        if not isinstance(value, dict):
+            raise sandbox.ResultValidationError("trusted probe recomputation was not an object")
+        return value
+
+    if probe_id == "activity_replay":
+        value = load("activity_probe.json")
+        from experiments import activity_probe
+        expected = activity_probe.build(
+            analysis.read_ndjson(live_state / "history.ndjson", limit=200)
+        )
+        require_equal(value, expected)
+        trade_runs = [
+            int(item) for item in (value.get("trade_decision_runs") or [])
+            if isinstance(item, int)
+        ]
+        rival_runs = [
+            int(item) for item in (value.get("rival_change_runs") or [])
+            if isinstance(item, int)
+        ]
+        trade_ids = [str(item) for item in (value.get("trade_ids") or []) if isinstance(item, int)]
+        rival_players = sorted({
+            str(item.get("player") or "").strip().lower()
+            for item in (value.get("material_rival_changes") or [])
+            if isinstance(item, dict) and item.get("player")
+        })
+        coverage = {
+            "activity_novelty_trade": {
+                "settled": bool(trade_runs and trade_ids),
+                "status": "supported" if trade_runs and trade_ids else "inconclusive",
+                "evidence_cutoff_run": max(trade_runs) if trade_runs else None,
+                "subjects": (
+                    ["trade-" + value for value in trade_ids]
+                    + (["trade-" + ",".join(trade_ids)] if trade_ids else [])
+                ),
+                "answer": "Trade replay classified %d completed decision(s) and %d held trade evidence record(s)."
+                          % (int(value.get("decisions_observed") or 0),
+                             len(value.get("held_trade_evidence") or [])),
+            },
+            "activity_novelty_rival": {
+                "settled": bool(rival_runs and rival_players),
+                "status": "supported" if rival_runs and rival_players else "inconclusive",
+                "evidence_cutoff_run": max(rival_runs) if rival_runs else None,
+                "subjects": rival_players + ([",".join(rival_players)] if rival_players else []),
+                "answer": "Rival replay measured %d material regime-change interval(s)."
+                          % len(value.get("material_rival_changes") or []),
+            },
+        }
+        settled = any(item["settled"] for item in coverage.values())
+        cutoffs = [
+            item.get("evidence_cutoff_run") for item in coverage.values()
+            if isinstance(item.get("evidence_cutoff_run"), int)
+        ]
+        return {
+            "settled": settled,
+            "status": "supported" if settled else "inconclusive",
+            "evidence_cutoff_run": max(cutoffs) if cutoffs else None,
+            "question_classes": ["activity_novelty_trade", "activity_novelty_rival"],
+            "subjects": [],
+            "coverage": coverage,
+            "answer": str(value.get("finding") or "activity replay found no deciding event")[:400],
+            "residual_uncertainty": (
+                "future activity signatures remain independently reopenable"
+                if settled else "the projected history window contained no deciding event"
+            ),
+        }
+
+    if probe_id == "counterfactual_sweep":
+        value = load("counterfactual_sweep.json")
+        from . import research
+        expected = research.counterfactual_sweep(
+            analysis.read_ndjson(live_state / "history.ndjson")
+        )
+        require_equal(value, expected, {"generated_ts"})
+        cutoff = value.get("run_to") if isinstance(value.get("run_to"), int) else None
+        dimensions = [
+            str(item.get("parameter")) for item in (value.get("dimensions") or [])
+            if isinstance(item, dict) and item.get("parameter")
+        ]
+        return {
+            "settled": False,
+            "status": "inconclusive",
+            "evidence_cutoff_run": cutoff,
+            "question_classes": ["strategy_stale", "idle_capital", "knob_age", "policy_drift"],
+            "subjects": [],
+            "answer": "Counterfactual replay measured decision sensitivity for %s but did not establish outcome superiority."
+                      % ", ".join(dimensions),
+            "residual_uncertainty": "an outcome-labelled holdout or conservative invariant is still required",
+        }
+
+    if probe_id == "crop_timer_analysis":
+        value = load("dual_cap_probe.json")
+        from experiments import crop_timer_probe
+        expected = recompute_stateful_analysis(
+            crop_timer_probe,
+            "dual_cap_probe.json",
+            "crop_timer_revalidation",
+            {"list_farm": 2, "plant": 3},
+        )
+        require_equal(value, expected, {"evaluated_ts", "completed_ts"})
+        result = value.get("result") if isinstance(value.get("result"), dict) else value
+        observations = result.get("observations") if isinstance(result.get("observations"), dict) else {}
+        runs = [
+            int(item.get("run")) for item in observations.values()
+            if isinstance(item, dict) and isinstance(item.get("run"), int)
+        ]
+        complete = result.get("status") == "complete" and set(observations) == {"wheat", "corn", "pumpkin"}
+        supported = complete and bool(result.get("all_timers_supported"))
+        return {
+            "settled": complete,
+            "status": "supported" if supported else "falsified" if complete else "inconclusive",
+            "evidence_cutoff_run": max(runs) if runs else result.get("baseline_run"),
+            "question_classes": ["knob_age", "model_drift", "strategy_stale"],
+            "subjects": ["mechanic.crop_timers_active"],
+            "answer": (
+                "The bounded three-crop cohort %s the declared timer contract."
+                % ("supports" if supported else "falsifies" if complete else "is still observing")
+            ),
+            "residual_uncertainty": "crop contribution to league score is adjudicated separately",
+            "retry_runs": 2,
+        }
+
+    if probe_id == "crop_score_analysis":
+        value = load("crop_score_probe.json")
+        from experiments import crop_score_probe
+        expected = recompute_stateful_analysis(
+            crop_score_probe,
+            "crop_score_probe.json",
+            "crop_score_holdout",
+            {"list_farm": 2, "plant": 1},
+        )
+        require_equal(value, expected, {"evaluated_ts", "completed_ts"})
+        result = value.get("result") if isinstance(value.get("result"), dict) else value
+        harvest = result.get("harvest") if isinstance(result.get("harvest"), dict) else {}
+        complete = result.get("status") == "complete" and isinstance(harvest.get("run"), int)
+        supported = complete and bool(result.get("supported"))
+        return {
+            "settled": complete,
+            "status": "supported" if supported else "falsified" if complete else "inconclusive",
+            "evidence_cutoff_run": int(harvest["run"]) if complete else result.get("baseline_run"),
+            "question_classes": ["knob_age", "model_drift", "strategy_stale", "idle_capital"],
+            "subjects": ["strategy.food_crop_score"],
+            "answer": (
+                "The bounded wheat holdout %s a positive lifetime-score residual beyond animal production."
+                % ("supports" if supported else "falsifies" if complete else "is still observing")
+            ),
+            "residual_uncertainty": "coin profitability is separate from the league-score objective",
+            "retry_runs": 2,
+        }
+
+    if probe_id == "endgame_replay":
+        value = load("endgame_replay.json")
+        from experiments import endgame
+        history = analysis.read_ndjson(live_state / "history.ndjson", limit=40)
+        latest = next((row for row in reversed(history) if row.get("coins")), None)
+        if latest is None:
+            raise sandbox.ResultValidationError("endgame replay has no authoritative current row")
+        expected = endgame.analyze(latest)
+        require_equal(value, expected)
+        safe_path = bool(value.get("safe_path"))
+        cutoff = value.get("run") if isinstance(value.get("run"), int) else None
+        return {
+            "settled": safe_path,
+            "status": "supported" if safe_path else "inconclusive",
+            "evidence_cutoff_run": cutoff,
+            "question_classes": ["rank_lost", "no_path_to_win", "win_eta"],
+            "subjects": [],
+            "answer": (
+                "Bounded endgame replay found a safe objective path."
+                if safe_path else "No safe path was found inside the declared 24-hour target grid."
+            ),
+            "residual_uncertainty": "a changed rival regime or policy can reopen the projection",
+            "retry_runs": 2 if not safe_path else rules.PROBE_MIN_INTERVAL_RUNS,
+        }
+
+    if probe_id == "dual_cap_audit":
+        value = load("dual_cap_audit.json")
+        from experiments import dual_cap_audit
+        from . import parse
+        try:
+            farm_state = parse.parse_farm(
+                (live_state / "raw" / "latest" / "list_farm_final.txt").read_text(encoding="utf-8")
+            )
+        except (OSError, parse.ParseDrift):
+            farm_state = None
+        expected = dual_cap_audit.analyze(
+            analysis.read_ndjson(live_state / "history.ndjson", limit=2_000),
+            farm=farm_state,
+        )
+        require_equal(value, expected, {"evaluated_ts"})
+        animal = value.get("animal_regime") if isinstance(value.get("animal_regime"), dict) else {}
+        runs = [int(item) for item in (animal.get("runs") or []) if isinstance(item, int)]
+        measured = (
+            len(runs) >= 5
+            and int(animal.get("windows") or 0) == len(runs)
+            and isinstance(animal.get("supported"), bool)
+        )
+        supported = bool(animal.get("supported"))
+        ratio = animal.get("median_beehive_vs_chicken")
+        return {
+            "settled": measured,
+            "status": "supported" if supported else "falsified" if measured else "inconclusive",
+            "evidence_cutoff_run": max(runs) if runs else None,
+            "question_classes": ["knob_age", "model_drift", "strategy_stale", "idle_capital", "policy_drift"],
+            "subjects": [
+                "strategy.capped_slot_efficiency", "strategy.chicken_engine", "semantic_contract",
+            ],
+            "answer": (
+                "Fresh capped mixed-species replay %s the promoted denominator on %d windows (median ratio %s)."
+                % ("supports" if supported else "falsifies", len(runs), ratio)
+            ),
+            "residual_uncertainty": "crop scoring and timer claims require their own bounded interventions",
+        }
+
+    return {}
+
+
 def _finish_questions(
     question_ids: List[str],
     probe_id: str,
@@ -241,44 +602,122 @@ def _finish_questions(
     hypothesis_result = provenance.latest_result(hypothesis_id) if hypothesis_id else None
     evidence_ref = "probe:%s:%s" % (probe_id, result.get("started_ts") or result.get("ts"))
     refs = [evidence_ref]
-    destination = result.get("evidence_destination")
-    if destination:
-        refs.append(str(destination))
+    for item in result.get("admitted_outputs") or []:
+        if not item.get("path"):
+            continue
+        ref = "state/%s" % item["path"]
+        if item.get("sha256"):
+            ref += "#sha256=%s" % item["sha256"]
+        refs.append(ref)
+    for ref in (hypothesis_result or {}).get("validation_evidence") or []:
+        refs.append(str(ref))
+    refs = sorted(set(refs))
 
     supported = {"supported", "accepted", "passed", "falsified", "rejected"}
-    base_result_status = str((hypothesis_result or {}).get("status") or status)
-    base_settled = status == "passed" and (not hypothesis_id or base_result_status in supported)
+    adjudication = result.get("adjudication") if isinstance(result.get("adjudication"), dict) else {}
+    bindings = result.get("question_bindings") if isinstance(result.get("question_bindings"), dict) else {}
+    coverage = adjudication.get("coverage") if isinstance(adjudication.get("coverage"), dict) else {}
     question_map = {row.get("id"): row for row in questions.load_all()}
     policy_reconciliation: Optional[Dict[str, Any]] = None
     for question_id in question_ids:
         question = question_map.get(question_id) or {}
-        result_status = base_result_status
-        settled = base_settled
+        binding = bindings.get(question_id) if isinstance(bindings.get(question_id), dict) else {}
+        expected_generation = binding.get("generation")
+        scoped_adjudication = (
+            coverage.get(str(question.get("class") or ""), {})
+            if coverage else adjudication
+        )
+        if not isinstance(scoped_adjudication, dict):
+            scoped_adjudication = {}
+        result_status = str(
+            ((hypothesis_result or {}).get("status")
+             or scoped_adjudication.get("status") or status)
+            if status == "passed" else status
+        )
+        settled = bool(
+            status == "passed"
+            and result_status in supported
+            and (
+                bool(hypothesis_id)
+                or bool(scoped_adjudication.get("settled"))
+            )
+        )
+        base_cutoff = (
+            scoped_adjudication.get("evidence_cutoff_run")
+            if isinstance(scoped_adjudication.get("evidence_cutoff_run"), int)
+            else run if hypothesis_id else None
+        )
+        allowed_classes = set(adjudication.get("question_classes") or [])
+        allowed_subjects = set(
+            scoped_adjudication.get("subjects") or adjudication.get("subjects") or []
+        )
+        if adjudication and (
+            (allowed_classes and question.get("class") not in allowed_classes)
+            or (allowed_subjects and question.get("subject") not in allowed_subjects)
+            or (coverage and not scoped_adjudication)
+        ):
+            settled = False
+            result_status = "scope_mismatch"
+        latest_obligation = max(
+            int(question.get("generation_opened_run") or 0),
+            int(question.get("last_seen_run") or 0),
+        )
+        if settled and (not isinstance(base_cutoff, int) or base_cutoff < latest_obligation):
+            settled = False
+            result_status = "stale_evidence"
+
         # A policy audit exiting zero means only that it completed. It may not
         # close a policy-drift question until rebuilding the claims restores the
-        # exact promoted policy fingerprint. This prevents a successful local
-        # probe from hiding an unresolved runtime incompatibility.
+        # exact promoted policy fingerprint.
         if question.get("class") == "policy_drift" and status == "passed":
             if policy_reconciliation is None:
                 from . import claims, policy
                 registry = claims.refresh()
                 policy_reconciliation = policy.runtime_context(registry)
-            settled = bool(policy_reconciliation.get("compatible"))
-            result_status = "compatible" if settled else "incompatible"
+            compatible = bool(policy_reconciliation.get("compatible"))
+            settled = compatible and settled
+            result_status = (
+                "compatible" if settled else "evidence_missing" if compatible else "incompatible"
+            )
         if settled:
-            answer = "Probe %s completed with durable result %s." % (probe_id, result_status)
+            answer = str(scoped_adjudication.get("answer") or adjudication.get("answer") or "").strip() or (
+                "Probe %s adjudicated the active falsifier as %s."
+                % (probe_id, result_status)
+            )
             questions.set_status(
-                question_id, "answered", answer=answer, evidence_refs=refs,
-                run=run, probe_id=probe_id, result_status=result_status,
+                question_id,
+                "answered",
+                answer=answer,
+                evidence_refs=refs,
+                run=run,
+                probe_id=probe_id,
+                result_status=result_status,
+                expected_generation=expected_generation,
+                expected_status="probing",
+                expected_probe_id=probe_id,
+                evidence_cutoff_run=base_cutoff,
+                resolution_kind="falsified" if result_status in {"falsified", "rejected"} else "supported",
+                residual_uncertainty=str(
+                    scoped_adjudication.get("residual_uncertainty")
+                    or adjudication.get("residual_uncertainty") or ""
+                ),
             )
         else:
             reason = result.get("reason") or result_status
             if policy_reconciliation and not policy_reconciliation.get("compatible"):
                 reason = "; ".join(policy_reconciliation.get("errors") or []) or reason
-            answer = "Probe %s did not settle the question: %s." % (probe_id, reason)
+            answer = "Probe %s did not settle the active question generation: %s." % (probe_id, reason)
             questions.set_status(
-                question_id, "open", answer=answer, evidence_refs=refs,
-                run=run, probe_id=probe_id, result_status=result_status,
+                question_id,
+                "open",
+                answer=answer,
+                evidence_refs=refs,
+                run=run,
+                probe_id=probe_id,
+                result_status=result_status,
+                expected_generation=expected_generation,
+                expected_status="probing",
+                expected_probe_id=probe_id,
             )
 
 
@@ -314,6 +753,7 @@ def run_probe(
                     "ts": _utcnow(),
                     "run": run,
                     "probe_id": probe_id,
+                    "executor_identity": _executor_identity(),
                     "status": "skipped",
                     "reason": "farm cycle holds the mutation lock",
                     "budget": validated["budget"],
@@ -326,11 +766,6 @@ def run_probe(
         grant = probe_guard.new_grant(probe_id, spec)
         execution_id = str(grant["execution_id"])
         hypothesis_id = str(spec.get("hypothesis_id") or "")
-        result_count_before = sum(
-            1 for item in provenance.events()
-            if item.get("event") == "hypothesis.result"
-            and item.get("hypothesis_id") == hypothesis_id
-        ) if hypothesis_id else 0
         budget = dict(validated["budget"])
         timeout = max(1, int(budget.get("wall_seconds") or 60))
         status = "failed"
@@ -338,6 +773,9 @@ def run_probe(
         returncode: Optional[int] = None
         output = ""
         admitted: List[Dict[str, Any]] = []
+        adjudication: Dict[str, Any] = {}
+        validation_result: Optional[Dict[str, Any]] = None
+        question_bindings: Dict[str, Dict[str, Any]] = {}
 
         with sandbox.scratch_dir("farm-probe-%s-" % probe_id) as scratch_name:
             scratch = Path(scratch_name).resolve()
@@ -419,10 +857,42 @@ def run_probe(
             stdout_handle = stderr_handle = None
             try:
                 wrapped = sandbox.wrap(
-                    command, PROJECT, state_view, scratch, allow_processes=False,
+                    command,
+                    PROJECT,
+                    state_view,
+                    scratch,
+                    read_roots=tuple(projection.get("read_roots") or ()),
+                    allow_processes=False,
                 )
+                requested_binding = bool(bound_questions)
+                current_questions = {row.get("id"): row for row in questions.load_all()}
+                active_bound: List[str] = []
                 for question_id in bound_questions:
-                    questions.set_status(question_id, "probing", run=run, probe_id=probe_id)
+                    question = current_questions.get(question_id) or {}
+                    generation = int(question.get("generation") or 1)
+                    transitioned = questions.set_status(
+                        question_id,
+                        "probing",
+                        run=run,
+                        probe_id=probe_id,
+                        expected_generation=generation,
+                        expected_status="open",
+                    )
+                    if transitioned is None:
+                        continue
+                    active_bound.append(question_id)
+                    question_bindings[question_id] = {
+                        "generation": generation,
+                        "generation_opened_run": question.get("generation_opened_run"),
+                        "last_seen_run": question.get("last_seen_run"),
+                        "class": question.get("class"),
+                        "subject": question.get("subject"),
+                    }
+                bound_questions = active_bound
+                if requested_binding and not bound_questions:
+                    raise QuestionBindingUnavailable(
+                        "selected question is no longer open for this probe"
+                    )
                 # Regular scratch files let us wait on the direct worker rather
                 # than waiting for pipe EOF from descendants it may have forked.
                 stdout_handle = stdout_path.open("w", encoding="utf-8")
@@ -434,7 +904,7 @@ def run_probe(
                     stdout=stdout_handle,
                     stderr=stderr_handle,
                     text=True,
-                    pass_fds=(request_write, response_read),
+                    pass_fds=(request_write, response_read) + tuple(projection.get("read_fds") or ()),
                     start_new_session=True,
                 )
                 os.close(request_write)
@@ -449,6 +919,9 @@ def run_probe(
                     _terminate_group(process)
                     status = "timeout"
                     reason = "wall-time budget exceeded"
+            except QuestionBindingUnavailable as exc:
+                status = "skipped"
+                reason = str(exc)
             except sandbox.SandboxUnavailable as exc:
                 status = "sandbox_unavailable"
                 reason = str(exc)
@@ -488,6 +961,7 @@ def run_probe(
                         status = "broker_timeout"
                         reason = "parent broker exceeded its hard shutdown bound"
                 output = (_tail_file(stdout_path) + _tail_file(stderr_path))[-8_000:]
+                sandbox.close_projection(projection)
 
             authoritative_usage = probe_guard.usage(grant)
             if authoritative_usage.get("denials"):
@@ -501,31 +975,77 @@ def run_probe(
                     if hypothesis_id and validation_result is None:
                         admitted = []
                     else:
+                        def validate_prepared(prepared: List[Dict[str, Any]]) -> None:
+                            nonlocal adjudication
+                            if not hypothesis_id:
+                                adjudication = _trusted_adjudication(
+                                    probe_id, live_state, prepared
+                                )
+
                         admitted = sandbox.admit_outputs(
-                            live_state, projection,
+                            live_state,
+                            projection,
                             [name for name in declared_outputs if name != "provenance.ndjson"],
+                            validator=validate_prepared,
                         )
-                    if validation_result:
-                        provenance.record_result(
-                            hypothesis_id,
-                            validation_result["status"],
-                            validation_result["validation_evidence"],
-                            validation_result["evidence_class"],
-                            validation_result["effect"],
-                        )
+                    # Worker-proposed hypothesis outcomes remain measurements.
+                    # Only a protected hypothesis-specific adjudicator may call
+                    # provenance.record_result and create promotion authority.
                 except (OSError, TypeError, ValueError, sandbox.ResultValidationError) as exc:
                     status = "result_rejected"
                     reason = "probe result admission failed: %s" % str(exc)[:300]
 
+        if (
+            status == "passed"
+            and adjudication.get("settled")
+            and probe_id in {"dual_cap_audit", "crop_timer_analysis", "crop_score_analysis"}
+        ):
+            try:
+                from . import claims
+                claims.refresh()
+            except Exception as exc:  # noqa: BLE001 - claim admission is part of completion
+                status = "result_rejected"
+                reason = "admitted probe could not refresh its claim registry: %s" % str(exc)[:240]
         if status == "passed" and hypothesis_id:
-            result_count_after = sum(
-                1 for item in provenance.events()
-                if item.get("event") == "hypothesis.result"
-                and item.get("hypothesis_id") == hypothesis_id
-            )
-            if result_count_after <= result_count_before:
+            if validation_result is None:
                 status = "evidence_missing"
-                reason = "hypothesis-linked probe did not record a validation result"
+                reason = "hypothesis-linked probe did not record a validation measurement"
+            else:
+                status = "awaiting_adjudication"
+                reason = "worker measurement is hashed but has no protected causal adjudicator"
+        elif status == "passed" and bound_questions:
+            if not adjudication:
+                status = "evidence_missing"
+                reason = "probe has no trusted adjudicator or admitted deciding evidence"
+            elif not adjudication.get("settled"):
+                status = "inconclusive"
+                reason = str(adjudication.get("answer") or "probe did not satisfy its falsifier")[:300]
+            else:
+                coverage = adjudication.get("coverage") if isinstance(adjudication.get("coverage"), dict) else {}
+                current_coverage = 0
+                for binding in question_bindings.values():
+                    scoped = coverage.get(str(binding.get("class") or "")) if coverage else adjudication
+                    if not isinstance(scoped, dict) or not scoped.get("settled"):
+                        continue
+                    allowed_classes = set(adjudication.get("question_classes") or [])
+                    allowed_subjects = set(
+                        scoped.get("subjects") or adjudication.get("subjects") or []
+                    )
+                    if (
+                        (allowed_classes and binding.get("class") not in allowed_classes)
+                        or (allowed_subjects and binding.get("subject") not in allowed_subjects)
+                    ):
+                        continue
+                    cutoff = scoped.get("evidence_cutoff_run")
+                    obligation = max(
+                        int(binding.get("generation_opened_run") or 0),
+                        int(binding.get("last_seen_run") or 0),
+                    )
+                    if isinstance(cutoff, int) and cutoff >= obligation:
+                        current_coverage += 1
+                if current_coverage == 0:
+                    status = "inconclusive"
+                    reason = "admitted evidence does not cover any active question generation"
         authoritative_usage = probe_guard.usage(grant)
         result = {
             "schema_version": SCHEMA_VERSION,
@@ -534,7 +1054,9 @@ def run_probe(
             "run": run,
             "probe_id": probe_id,
             "execution_id": execution_id,
+            "executor_identity": _executor_identity(),
             "question_ids": bound_questions,
+            "question_bindings": question_bindings,
             "status": status,
             "returncode": returncode,
             "reason": reason,
@@ -550,6 +1072,8 @@ def run_probe(
             "capability_denials": int(authoritative_usage.get("denials") or 0),
             "tool_usage": authoritative_usage.get("by_tool") or {},
             "admitted_outputs": admitted,
+            "adjudication": adjudication,
+            "candidate_adjudication": validation_result,
             "stop_condition": spec.get("stop_condition"),
             "evidence_destination": spec.get("evidence_destination"),
             "output": output,
@@ -569,46 +1093,146 @@ def _recent_events() -> List[Dict[str, Any]]:
     return analysis.read_ndjson(_ledger())
 
 
-def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optional[Dict[str, Any]]:
-    """Run at most one autonomous read-only probe.
+_PROBE_FAILURES = {
+    "failed", "timeout", "sandbox_unavailable", "broker_timeout",
+    "capability_violation", "result_rejected", "evidence_missing",
+}
+_PROBE_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+_ANALYSIS_BASELINES = {
+    "crop_timer_analysis": "dual_cap_probe.json",
+    "crop_score_analysis": "crop_score_probe.json",
+}
 
-    Remote probes retain the global cadence because calls and rival inspection
-    are scarce. Pure local replays cost no calls and may settle a fail-closed
-    novelty hold immediately; making them wait twenty runs would turn adaptation
-    into an hour-long outage for no safety benefit.
+
+def _analysis_ready(probe_id: str, matching: List[Dict[str, Any]]) -> bool:
+    filename = _ANALYSIS_BASELINES.get(probe_id)
+    if not filename:
+        return True
+    try:
+        value = json.loads((_state_dir() / filename).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    baseline = value.get("baseline_run") if isinstance(value, dict) else None
+    obligation = max(
+        (int(question.get("generation_opened_run"))
+         for question in matching if isinstance(question.get("generation_opened_run"), int)),
+        default=None,
+    )
+    return isinstance(baseline, int) and isinstance(obligation, int) and baseline >= obligation
+
+
+def _probe_backoff(
+    probe_id: str,
+    run: int,
+    events: List[Dict[str, Any]],
+    executor_identity: str,
+) -> Optional[int]:
+    """Return remaining blocked runs, or None when this probe may run.
+
+    Infrastructure failures back off exponentially under the protected
+    scheduler. Inconclusive measurements wait one normal probe cadence. A new
+    executor identity gets one immediate retry after a code repair.
+    """
+    attempts = [
+        event for event in events
+        if event.get("probe_id") == probe_id and event.get("status") != "skipped"
+        and isinstance(event.get("run"), int)
+        and event.get("executor_identity") == executor_identity
+    ]
+    if not attempts:
+        return None
+    latest = attempts[-1]
+    age = run - int(latest["run"])
+    if age <= 0:
+        return max(1, 1 - age)
+    if latest.get("status") == "inconclusive":
+        retry_runs = int((latest.get("adjudication") or {}).get("retry_runs")
+                         or rules.PROBE_MIN_INTERVAL_RUNS)
+        return max(0, max(1, retry_runs) - age) or None
+    failures = 0
+    for event in reversed(attempts):
+        if event.get("status") not in _PROBE_FAILURES:
+            break
+        failures += 1
+    if failures:
+        delay = min(rules.QUESTION_MAX_AGE_RUNS, 2 ** min(failures - 1, 8))
+        return max(0, delay - age) or None
+    return None
+
+
+def maybe_run(open_questions: List[Dict[str, Any]], run: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Run one fair, failure-bounded autonomous read-only probe.
+
+    A broken local replay cannot monopolize the lexical head of the registry or
+    consume the scarce remote-call cadence. Selection is least-recently-attempted
+    first, then highest question priority and oldest active generation.
     """
     if not isinstance(run, int) or not open_questions:
         return None
     events = _recent_events()
-    last_run = max(
-        [
-            event.get("run") for event in events
-            if isinstance(event.get("run"), int) and event.get("status") != "skipped"
-        ],
-        default=None,
+    executor_identity = _executor_identity()
+    remote_runs = [
+        int(event["run"])
+        for event in events
+        if event.get("status") != "skipped"
+        and isinstance(event.get("run"), int)
+        and int((event.get("budget") or {}).get("calls") or 0) > 0
+    ]
+    remote_throttled = bool(
+        remote_runs and run - max(remote_runs) < rules.PROBE_MIN_INTERVAL_RUNS
     )
-    throttled = bool(
-        isinstance(last_run, int) and run - last_run < rules.PROBE_MIN_INTERVAL_RUNS
-    )
+    candidates: List[Dict[str, Any]] = []
     for probe_id, spec in sorted(_registry().items()):
         if not spec.get("read_only") or not spec.get("autonomous"):
             continue
         call_budget = int((spec.get("budget") or {}).get("calls") or 0)
-        if throttled and call_budget > 0:
+        if call_budget > 0 and remote_throttled:
+            continue
+        if _probe_backoff(probe_id, run, events, executor_identity) is not None:
             continue
         allowed_classes = set(spec.get("question_classes") or [])
         subject_patterns = [str(value).lower() for value in spec.get("subject_patterns") or []]
         matching = []
         for question in open_questions:
+            if question.get("status") != "open":
+                continue
             if question.get("class") not in allowed_classes:
                 continue
             subject = "%s %s" % (question.get("subject") or "", question.get("key") or "")
             if subject_patterns and not any(pattern in subject.lower() for pattern in subject_patterns):
                 continue
             matching.append(question)
-        if matching:
-            return run_probe(
-                probe_id, explicit=False, run=run,
-                question_ids=[str(question.get("id")) for question in matching if question.get("id")],
-            )
-    return None
+        if not matching or not _analysis_ready(probe_id, matching):
+            continue
+        prior = [
+            event for event in events
+            if event.get("probe_id") == probe_id and event.get("status") != "skipped"
+            and isinstance(event.get("run"), int)
+        ]
+        last_attempt = max((int(event["run"]) for event in prior), default=-1)
+        priority = max(
+            (_PROBE_PRIORITY.get(str(question.get("priority") or "medium"), 1)
+             for question in matching),
+            default=1,
+        )
+        oldest = min(
+            (int(question.get("generation_opened_run"))
+             for question in matching if isinstance(question.get("generation_opened_run"), int)),
+            default=run,
+        )
+        candidates.append({
+            "probe_id": probe_id,
+            "matching": matching,
+            "order": (last_attempt, -priority, oldest, probe_id),
+        })
+    if not candidates:
+        return None
+    selected = min(candidates, key=lambda item: item["order"])
+    return run_probe(
+        str(selected["probe_id"]),
+        explicit=False,
+        run=run,
+        question_ids=[
+            str(question.get("id")) for question in selected["matching"] if question.get("id")
+        ],
+    )

@@ -233,6 +233,8 @@ CLASSES: List[Tuple[str, str, Optional[Remedy]]] = [
     ("activity_novelty_risk", r"^NOVEL ACTIVITY \[risk\]:", None),
     ("activity_novelty_tools", r"^NOVEL ACTIVITY \[tools\]:", None),
     ("tools_changed", r"tools/list changed", None),
+    ("production", r"^PRODUCTION:", None),
+    ("collection_backlog", r"^collection backlog remained", None),
     ("animals_fell", r"animal count fell", None),
     ("count_mismatch", r"animal count \d+ != expected", None),
     ("trade_policy_breach", r"^TRADE POLICY BREACH:", None),
@@ -249,7 +251,7 @@ CLASSES: List[Tuple[str, str, Optional[Remedy]]] = [
     ("adopt_failures", r"^adopt stopped early", _heal_adopt_failures),
     ("transport", r"^\d+ transport retries across", _heal_transport),
     ("backpressure", r"call rate .* server pushing back", _heal_backpressure),
-    ("throughput", r"^throughput .* outside band", _heal_throughput),
+    ("throughput", r"^throughput .* (?:outside|below) band", _heal_throughput),
     ("feed_call_failed", r"^could not feed ", _heal_transport),
 ]
 

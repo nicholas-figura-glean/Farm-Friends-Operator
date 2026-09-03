@@ -561,7 +561,10 @@ check("freshness-check errors affect the dashboard problem list",
       and '"breaking" if source == "cycle_age"' in agent_src)
 check("freshness repair orders name only the owning agent",
       '["experiments/dashboard_agent.py"]' in agent_src
-      and 'if str(problem["source"]).endswith("_age")' in agent_src)
+      and 'if source.endswith("_age")' in agent_src)
+check("evidence performance repairs target the measured implementation",
+      'source == "evidence.report"' in agent_src
+      and '["farm/evidence.py", "farm/research.py"]' in agent_src)
 check("the probe measures twice", "_probe_once" in agent_src)
 check("the cold number is still reported", "cold_ms" in agent_src)
 

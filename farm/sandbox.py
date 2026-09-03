@@ -16,7 +16,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from . import compaction
 
@@ -32,6 +32,13 @@ class SandboxUnavailable(RuntimeError):
 
 class ResultValidationError(RuntimeError):
     """An untrusted worker produced an inadmissible result."""
+
+
+def _strict_json_loads(text: str) -> Any:
+    def reject(value: str) -> None:
+        raise ResultValidationError("non-finite JSON constant is forbidden: %s" % value)
+
+    return json.loads(text, parse_constant=reject)
 
 
 def available() -> bool:
@@ -250,6 +257,8 @@ def project_state(
     if any(not name or name.startswith("/") or ".." in Path(name).parts for name in writable):
         raise ResultValidationError("invalid writable state path")
     baselines: Dict[str, Dict[str, Any]] = {}
+    read_roots: List[Path] = []
+    read_fds: List[int] = []
 
     for source in live.iterdir():
         name = source.name
@@ -267,7 +276,37 @@ def project_state(
             digest = hashlib.sha256(destination.read_bytes()).hexdigest() if size else hashlib.sha256(b"").hexdigest()
             baselines[name] = {"size": size, "sha256": digest}
         else:
-            destination.symlink_to(source)
+            mode = source.lstat().st_mode
+            # Pin the actual vnode before constructing either the projection or
+            # the Seatbelt allowlist. A path may be replaced concurrently, but an
+            # inherited descriptor cannot be retargeted after this point.
+            if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise ResultValidationError(
+                    "read-only state input is not a regular file or directory: %s" % name
+                )
+            if stat.S_ISDIR(mode):
+                # macOS cannot traverse /dev/fd/<directory>/child. Snapshot the
+                # directory into scratch without following source symlinks. The
+                # worker can alter only this copy, and semantic adjudication is
+                # recomputed against live authoritative inputs before admission.
+                shutil.copytree(str(source), str(destination), symlinks=True)
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(str(source), flags)
+                pinned = os.fstat(descriptor)
+            except OSError as exc:
+                raise ResultValidationError(
+                    "could not pin read-only state input %s: %s" % (name, exc.__class__.__name__)
+                ) from exc
+            original = source.lstat()
+            if (pinned.st_dev, pinned.st_ino) != (original.st_dev, original.st_ino):
+                os.close(descriptor)
+                raise ResultValidationError("read-only state input changed while pinning: %s" % name)
+            fd_path = Path("/dev/fd/%d" % descriptor)
+            destination.symlink_to(fd_path)
+            read_fds.append(descriptor)
+            read_roots.append(fd_path)
 
     for name in writable:
         destination = root / name
@@ -282,7 +321,25 @@ def project_state(
         local_lock.unlink()
     if not local_lock.exists():
         local_lock.touch(mode=0o600)
-    return {"root": root, "baselines": baselines}
+    return {
+        "root": root,
+        "baselines": baselines,
+        # sandbox.wrap authorizes these exact symlink targets for reading. It
+        # still grants writes only inside scratch and keeps every unprojected
+        # sibling under ~/.glean denied.
+        "read_roots": sorted(set(read_roots), key=lambda value: str(value)),
+        "read_fds": tuple(read_fds),
+    }
+
+
+def close_projection(projection: Dict[str, Any]) -> None:
+    """Release descriptor-pinned read inputs after the worker has exited."""
+    for descriptor in projection.get("read_fds") or ():
+        try:
+            os.close(int(descriptor))
+        except OSError:
+            pass
+    projection["read_fds"] = ()
 
 
 def _validate_result_path(root: Path, name: str) -> Path:
@@ -302,6 +359,7 @@ def admit_outputs(
     live_state: Path,
     projection: Dict[str, Any],
     names: Iterable[str],
+    validator: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Validate the complete output set before persisting any member of it."""
     root = Path(projection["root"])
@@ -329,29 +387,59 @@ def admit_outputs(
             for line in suffix.decode("utf-8").splitlines():
                 if not line.strip():
                     continue
-                value = json.loads(line)
+                value = _strict_json_loads(line)
                 if not isinstance(value, dict):
                     raise ResultValidationError("worker ledger row must be an object: %s" % name)
                 rows.append(value)
-            prepared.append({"path": name, "kind": "ndjson", "rows": rows})
+            prepared.append({
+                "path": name,
+                "kind": "ndjson",
+                "rows": rows,
+                "sha256": hashlib.sha256(suffix).hexdigest(),
+            })
             continue
         if not name.endswith(".json"):
             raise ResultValidationError("unsupported result type: %s" % name)
         if len(data) > MAX_RESULT_BYTES:
             raise ResultValidationError("worker result exceeds limit: %s" % name)
-        value = json.loads(data.decode("utf-8"))
+        value = _strict_json_loads(data.decode("utf-8"))
         if not isinstance(value, dict):
             raise ResultValidationError("worker JSON result must be an object: %s" % name)
-        prepared.append({"path": name, "kind": "json", "value": value, "bytes": len(data)})
+        canonical = (
+            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        prepared.append({
+            "path": name,
+            "kind": "json",
+            "value": value,
+            "bytes": len(canonical),
+            "sha256": hashlib.sha256(canonical).hexdigest(),
+        })
+
+    # Trusted semantic adjudication runs before any worker byte can become live.
+    # A content hash authenticates bytes, not truth; the caller must be able to
+    # reject a well-formed but false result transactionally.
+    if validator is not None:
+        validator(prepared)
 
     # Phase two runs only after every declared output validates.
     admitted: List[Dict[str, Any]] = []
-    for item in prepared:
+    # Commit append-only audit ledgers before the single policy-driving JSON
+    # result. Every registered probe declares at most one JSON output. Therefore
+    # an audit append failure cannot leave claim-consumed worker bytes live; a
+    # later JSON failure may leave only non-authoritative audit evidence.
+    commit_order = sorted(prepared, key=lambda item: 1 if item["kind"] == "json" else 0)
+    for item in commit_order:
         name = str(item["path"])
         if item["kind"] == "ndjson":
             for row in item["rows"]:
                 compaction.append_json(live_state / name, row, strict=True)
-            admitted.append({"path": name, "kind": "ndjson", "rows": len(item["rows"])})
+            admitted.append({
+                "path": name,
+                "kind": "ndjson",
+                "rows": len(item["rows"]),
+                "sha256": item["sha256"],
+            })
             continue
         destination = live_state / name
         tmp = Path("%s.tmp.%d" % (destination, os.getpid()))
@@ -360,5 +448,10 @@ def admit_outputs(
             encoding="utf-8",
         )
         os.replace(str(tmp), str(destination))
-        admitted.append({"path": name, "kind": "json", "bytes": item["bytes"]})
+        admitted.append({
+            "path": name,
+            "kind": "json",
+            "bytes": item["bytes"],
+            "sha256": item["sha256"],
+        })
     return admitted

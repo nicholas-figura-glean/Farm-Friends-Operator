@@ -76,7 +76,10 @@ check("claiming retains immutable submission age",
       claimed.get("created_ts") == first.get("created_ts"), str(claimed))
 check("a claimed order leaves the open queue", workorders.open_orders(queue) == [])
 
-workorders.resolve("abc123", workorders.PUBLISHED, note="shipped", release="20260825T1", path=queue)
+workorders.resolve(
+    "abc123", workorders.PUBLISHED, note="shipped", release="20260825T1", path=queue,
+    expected_status=workorders.CLAIMED, expected_claim_token=claimed.get("claim_token"),
+)
 cur = workorders.current(queue)["abc123"]
 check("an order can be published", cur["status"] == workorders.PUBLISHED)
 check("the publishing release is recorded", cur["release"] == "20260825T1")
@@ -116,8 +119,12 @@ check("legacy orders derive immutable age from their first event",
 queue3 = os.path.join(tmp, "q3.ndjson")
 workorders.submit(change, "contract_watch", "i", [], [], path=queue3)
 for _ in range(workorders.MAX_ATTEMPTS):
-    workorders.claim("abc123", "author_agent", path=queue3)
-    workorders.resolve("abc123", workorders.FAILED, note="gate failed", path=queue3)
+    failed_claim = workorders.claim("abc123", "author_agent", path=queue3)
+    workorders.resolve(
+        "abc123", workorders.FAILED, note="gate failed", path=queue3,
+        expected_status=workorders.CLAIMED,
+        expected_claim_token=(failed_claim or {}).get("claim_token"),
+    )
 check(
     "an order that keeps failing stops being refiled",
     workorders.submit(change, "contract_watch", "i", [], [], path=queue3) is None,
@@ -132,6 +139,20 @@ check("a fresh claim is not stale", workorders.stale_claims(3600, queue4) == [])
 check("an old claim is detected as stale", len(workorders.stale_claims(-1, queue4)) == 1)
 workorders.release_stale(-1, queue4)
 check("a stale claim is returned to open", len(workorders.open_orders(queue4)) == 1)
+
+legacy_queue = os.path.join(tmp, "legacy-claim.ndjson")
+with open(legacy_queue, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "id": "legacy-claimed", "status": workorders.CLAIMED,
+        "severity": "breaking", "attempts": 1,
+        "ts": "2020-01-01T00:00:00Z", "created_ts": "2020-01-01T00:00:00Z",
+    }) + "\n")
+legacy_released = workorders.release_stale(0, legacy_queue)
+check("pre-token stale claims migrate back to the actionable queue",
+      len(legacy_released) == 1
+      and legacy_released[0].get("legacy_tokenless_claim") is True
+      and workorders.open_orders(legacy_queue)[0]["id"] == "legacy-claimed",
+      str(legacy_released))
 
 
 # -- intent generation ------------------------------------------------------

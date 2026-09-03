@@ -71,6 +71,8 @@ def start() -> Dict[str, Any]:
         before = parse.parse_farm(client.call("list_farm"))
         if before.crisis:
             raise RuntimeError("active crisis %s" % before.crisis.kind)
+        if before.food_crop_count:
+            raise RuntimeError("timer probe requires an empty food-crop cohort")
         if before.plot_capacity is None or before.plot_capacity - before.plot_count < len(CROPS):
             raise RuntimeError("fewer than three plot slots remain")
         cost = sum(item["cost"] for item in CROPS.values())
@@ -93,7 +95,12 @@ def start() -> Dict[str, Any]:
             "baseline_run": _latest_run(),
             "budget": {"coins": cost, "calls": 3, "plots": 3, "wall_seconds": 2400},
             "before": {"coins": before.coins, "plots": before.plot_count, "lifetime_produce": before.lifetime_produce},
-            "after": {"coins": after.coins, "plots": after.plot_count, "lifetime_produce": after.lifetime_produce},
+            "after": {
+                "coins": after.coins,
+                "plots": after.plot_count,
+                "lifetime_produce": after.lifetime_produce,
+                "plot_counts": after.counts_by_crop,
+            },
             "responses": responses,
             "intervention_id": intervention,
             "falsifier": "any crop advances and harvests inside its current declared timer window",
@@ -142,8 +149,13 @@ def analyze() -> Dict[str, Any]:
         item["sale_revenue"] = item["yield"] * item["sale_value"]
         item["net_coins"] = item["sale_revenue"] - item["plant_cost"]
         item["timer_within_tolerance"] = item["elapsed_minutes"] <= item["declared_minutes"] + 6
-    complete = set(observations) == set(CROPS)
-    timer_supported = complete and all(item["timer_within_tolerance"] for item in observations.values())
+    planted_counts = ((state.get("after") or {}).get("plot_counts") or {})
+    cohort_valid = all(int(planted_counts.get(crop) or 0) == 1 for crop in CROPS)
+    complete = cohort_valid and set(observations) == set(CROPS)
+    timer_supported = complete and all(
+        item["timer_within_tolerance"] and int(item.get("yield") or 0) > 0
+        for item in observations.values()
+    )
     best = max(
         observations.values(),
         key=lambda item: item["units_per_plot_minute"],
@@ -158,6 +170,7 @@ def analyze() -> Dict[str, Any]:
         "baseline_run": state.get("baseline_run"),
         "budget": state.get("budget"),
         "observations": observations,
+        "cohort_valid": cohort_valid,
         "noop_harvests": noops,
         "all_timers_supported": timer_supported,
         "old_stalled_timer_claim_falsified": bool(observations),
@@ -184,9 +197,11 @@ def main() -> int:
     else:
         result = analyze()
     print(json.dumps(result, indent=2, sort_keys=True))
-    if result.get("status") == "observing":
-        return 3
-    return 0 if result.get("all_timers_supported") or args.start else 2
+    # `--analyze` completing is execution success even when the evidence
+    # falsifies the timer claim; the trusted parent owns that adjudication.
+    if args.start:
+        return 0
+    return 0
 
 
 if __name__ == "__main__":

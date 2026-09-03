@@ -560,8 +560,8 @@ def refresh(
 ) -> Dict[str, Any]:
     candidate = build(rows)
     existing = load()
-    old_version = int(existing.get("registry_version") or 0)
     changed = candidate["semantic_fingerprint"] != existing.get("semantic_fingerprint")
+    old_version = int(existing.get("registry_version") or 0)
     candidate["registry_version"] = old_version + 1 if changed else max(1, old_version)
     if not persist:
         return candidate
@@ -571,9 +571,66 @@ def refresh(
     with open(lock, "a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         existing = load()
+        candidate_run = candidate.get("current_run")
+        existing_run = existing.get("current_run")
+        if (
+            isinstance(existing_run, int)
+            and (
+                not isinstance(candidate_run, int)
+                or candidate_run < existing_run
+            )
+        ):
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            return existing
+        if (
+            existing
+            and isinstance(existing_run, int)
+            and candidate_run == existing_run
+            and candidate.get("semantic_fingerprint") != existing.get("semantic_fingerprint")
+        ):
+            old_freshness = {
+                str(claim.get("id")): int(claim.get("last_validated_run") or -1)
+                for claim in existing.get("claims") or [] if claim.get("id")
+            }
+            new_freshness = {
+                str(claim.get("id")): int(claim.get("last_validated_run") or -1)
+                for claim in candidate.get("claims") or [] if claim.get("id")
+            }
+            old_claims = {
+                str(claim.get("id")): claim
+                for claim in existing.get("claims") or [] if claim.get("id")
+            }
+            new_claims = {
+                str(claim.get("id")): claim
+                for claim in candidate.get("claims") or [] if claim.get("id")
+            }
+            regressed = any(
+                new_freshness.get(identity, -1) < old_run
+                for identity, old_run in old_freshness.items()
+            )
+            changed_claims = {
+                identity for identity in set(old_claims) | set(new_claims)
+                if _semantic_claim(old_claims.get(identity) or {})
+                   != _semantic_claim(new_claims.get(identity) or {})
+            }
+            every_change_advanced = bool(changed_claims) and all(
+                identity not in old_claims
+                or new_freshness.get(identity, -1) > old_freshness.get(identity, -1)
+                for identity in changed_claims
+            )
+            if regressed or not every_change_advanced:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                return existing
+        # Version and change identity are decided against the registry protected
+        # by this lock, not the stale snapshot observed before building.
+        changed = candidate["semantic_fingerprint"] != existing.get("semantic_fingerprint")
+        old_version = int(existing.get("registry_version") or 0)
+        candidate["registry_version"] = old_version + 1 if changed else max(1, old_version)
         old_map = {claim.get("id"): claim for claim in existing.get("claims") or []}
         if changed or not existing:
-            _atomic_write(current, candidate)
+            # Audit every claim transition before advancing the authoritative
+            # registry. A ledger failure may leave non-authoritative prepared
+            # events, but it can never leave unaudited policy-driving claims live.
             for claim in candidate["claims"]:
                 prior = old_map.get(claim["id"])
                 if prior is None:
@@ -596,6 +653,7 @@ def refresh(
                         "evidence_refs": claim.get("evidence_refs"),
                     },
                 )
+            _atomic_write(current, candidate)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return candidate
 

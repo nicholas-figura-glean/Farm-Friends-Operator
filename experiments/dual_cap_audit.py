@@ -278,7 +278,9 @@ def main() -> int:
     if not args.no_write:
         write_result(result)
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if (result.get("animal_regime") or {}).get("supported") else 2
+    # Completing the bounded replay is execution success. The trusted parent
+    # independently adjudicates supported, falsified, or insufficient evidence.
+    return 0
 
 
 if __name__ == "__main__":

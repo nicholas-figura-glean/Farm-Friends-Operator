@@ -67,6 +67,36 @@ OWNERS: Dict[str, Dict[str, List[str]]] = {
     "max_plant_per_cycle": {"claims": ["strategy.food_crop_score"], "invariants": ["bounded_mutation"]},
 }
 
+# Exact-value support is stricter than ordinary parameter ownership. Directional
+# ownership says which evidence matters; only `exact` or `conservative_invariant`
+# is enough to retire an unbacked-value question without a new holdout.
+PARAMETER_SUPPORT: Dict[str, Dict[str, Any]] = {
+    "feed_cooldown_runs": {
+        "level": "conservative_invariant",
+        "value": 0,
+        "claims": ["objective.lifetime_produce", "safety.bulk_husbandry"],
+        "evidence_refs": ["state/history.ndjson#runs=14-16"],
+        "rationale": "Skipping successive bulk feeds reduced net production per chicken by about 80%; zero cooldown is the fail-safe value below the hunger stop.",
+        "falsifier": "A bounded current-regime cohort shows a positive cooldown preserves hunger safety and improves lifetime produce net of feed cost.",
+    },
+    "growth_min_marginal_gain": {"level": "directional", "claims": ["mechanic.output_linear_with_herd"]},
+    "growth_comparison_window": {"level": "directional", "claims": ["mechanic.output_linear_with_herd"]},
+    "threat_share": {
+        "level": "conservative_invariant",
+        "value": 0.5,
+        "claims": ["objective.lifetime_produce"],
+        "invariants": ["question_not_remedy"],
+        "evidence_refs": ["farm/rules.py#two-window-threat-share"],
+        "rationale": "A rival sustaining at least half our gain for two windows receives research while our lead is still widening; the threshold can open a question but cannot mutate or throttle the farm.",
+        "falsifier": "A rival below half our gain reaches a decision-material crossover before the next bounded review window.",
+    },
+}
+
+
+def parameter_support(name: str) -> Dict[str, Any]:
+    return dict(PARAMETER_SUPPORT.get(str(name or "").lower()) or {})
+
+
 REQUIRED_CLAIMS = {
     "objective.league_first",
     "objective.lifetime_produce",

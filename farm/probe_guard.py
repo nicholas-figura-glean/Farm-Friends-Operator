@@ -56,10 +56,11 @@ CROP_COST = {"wheat": 4, "corn": 5, "pumpkin": 8, "wildflowers": 10}
 # new spec, but it cannot make that spec schedulable without an independent TCB
 # change and its release review.
 PINNED_AUTONOMOUS = {
-    "activity_replay": "346df4841c1a4430",
-    "counterfactual_sweep": "aeeff94fd1081370",
-    "dual_cap_audit": "6fcc1d52e494acb1",
-    "endgame_replay": "b1f882a198999a11",
+    "activity_replay": "4f0e38f4930db7b2",
+    "crop_score_analysis": "e609053fa2111a76",
+    "crop_timer_analysis": "a12846d2674aa363",
+    "dual_cap_audit": "83184f936ff4fa02",
+    "endgame_replay": "7e2ea94be1ae2e38",
 }
 
 
@@ -78,6 +79,11 @@ def spec_fingerprint(probe_id: str, spec: Dict[str, Any]) -> str:
         "budget": spec.get("budget"),
         "tools": spec.get("tools"),
         "outputs": spec.get("outputs"),
+        "question_classes": spec.get("question_classes"),
+        "subject_patterns": spec.get("subject_patterns"),
+        "hypothesis": spec.get("hypothesis"),
+        "stop_condition": spec.get("stop_condition"),
+        "evidence_destination": spec.get("evidence_destination"),
         "script_sha256": script_sha256,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)

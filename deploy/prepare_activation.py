@@ -60,6 +60,34 @@ def _latest_run(state: Path) -> Optional[int]:
     return latest
 
 
+def _workorder_lease_valid(state: Path) -> bool:
+    order_id = os.environ.get("FARM_WORKORDER_ID")
+    expected_hash = os.environ.get("FARM_WORKORDER_CLAIM_TOKEN_SHA256")
+    if not order_id and not expected_hash:
+        return True  # explicit/manual releases do not claim autonomous authority
+    if not order_id or not expected_hash:
+        return False
+    latest = None
+    try:
+        lines = (state / "workorders.ndjson").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict) and value.get("id") == order_id:
+            latest = value
+    token = str((latest or {}).get("claim_token") or "")
+    return bool(
+        latest
+        and latest.get("status") == "claimed"
+        and token
+        and hashlib.sha256(token.encode("utf-8")).hexdigest() == expected_hash
+    )
+
+
 def _atomic_json(path: Path, value: Dict) -> None:
     tmp = Path("%s.tmp.%d" % (path, os.getpid()))
     tmp.write_text(json.dumps(value, indent=1, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
@@ -81,6 +109,8 @@ def main() -> int:
     latest_run = _latest_run(state)
     if not isinstance(latest_run, int):
         raise SystemExit("release activation requires a durable run-history identity")
+    if not _workorder_lease_valid(state):
+        raise SystemExit("release activation lost its work-order lease before pointer exposure")
 
     if previous:
         sys.path.insert(0, str(Path(trusted_runtime).resolve()))

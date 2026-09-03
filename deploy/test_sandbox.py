@@ -196,6 +196,8 @@ def main() -> int:
         (live / "history.ndjson").write_text('{"run":1}\n', encoding="utf-8")
         (live / "result.json").write_text('{"old":true}\n', encoding="utf-8")
         (live / "events.ndjson").write_text('{"event":"old"}\n', encoding="utf-8")
+        (live / "nested").mkdir()
+        (live / "nested" / "evidence.json").write_text('{"nested":true}\n', encoding="utf-8")
         scratch = root / "scratch"
         scratch.mkdir()
         projection = sandbox.project_state(
@@ -204,7 +206,30 @@ def main() -> int:
         )
         view = Path(projection["root"])
         suite.check((view / "history.ndjson").is_symlink(),
-                    "undeclared state is projected read-only by reference")
+                    "undeclared regular state is projected by pinned descriptor")
+        suite.check(
+            json.loads((view / "nested" / "evidence.json").read_text()).get("nested") is True
+            and not (view / "nested").is_symlink(),
+            "nested state evidence is snapshot-copied without directory-fd traversal",
+        )
+        pinned_roots = projection.get("read_roots") or []
+        pinned_fds = projection.get("read_fds") or ()
+        suite.check(
+            len(pinned_roots) == len(pinned_fds) == 1
+            and str(pinned_roots[0]).startswith("/dev/fd/")
+            and os.fstat(pinned_fds[0]).st_ino == (live / "history.ndjson").stat().st_ino,
+            "projection pins exact read-only inputs by inherited descriptor",
+            {"roots": pinned_roots, "fds": pinned_fds},
+        )
+        projected_profile = sandbox.profile(
+            PROJECT, view, scratch, read_roots=projection.get("read_roots") or (),
+            allow_processes=False,
+        )
+        suite.check(
+            str(pinned_roots[0]) in projected_profile
+            and str((live / "result.json").resolve()) not in projected_profile,
+            "Seatbelt receives descriptor-pinned inputs but not copied writable outputs",
+        )
         (view / "result.json").write_text('{"accepted":true}\n', encoding="utf-8")
         with (view / "events.ndjson").open("a", encoding="utf-8") as handle:
             handle.write('{"event":"new"}\n')
@@ -213,6 +238,7 @@ def main() -> int:
                     "trusted parent admits a validated JSON result", admitted)
         suite.check(len((live / "events.ndjson").read_text().splitlines()) == 2,
                     "trusted parent appends only the new NDJSON suffix", admitted)
+        sandbox.close_projection(projection)
 
         atomic_scratch = root / "atomic"
         atomic_scratch.mkdir()
@@ -228,6 +254,75 @@ def main() -> int:
         )
         suite.check(json.loads((live / "result.json").read_text()).get("accepted") is True,
                     "rejected output set leaves earlier live evidence unchanged")
+        sandbox.close_projection(atomic)
+
+        semantic_scratch = root / "semantic"
+        semantic_scratch.mkdir()
+        semantic = sandbox.project_state(live, semantic_scratch, {"result.json"})
+        semantic_view = Path(semantic["root"])
+        semantic_view.joinpath("result.json").write_text('{"forged":true}\n', encoding="utf-8")
+        suite.raises(
+            sandbox.ResultValidationError,
+            lambda: sandbox.admit_outputs(
+                live,
+                semantic,
+                ["result.json"],
+                validator=lambda prepared: (_ for _ in ()).throw(
+                    sandbox.ResultValidationError("semantic mismatch")
+                ),
+            ),
+            "trusted semantic rejection occurs before any worker byte becomes live",
+        )
+        suite.check(
+            json.loads((live / "result.json").read_text()).get("accepted") is True,
+            "semantically rejected output leaves live evidence unchanged",
+        )
+        sandbox.close_projection(semantic)
+
+        nonfinite_scratch = root / "nonfinite"
+        nonfinite_scratch.mkdir()
+        nonfinite = sandbox.project_state(live, nonfinite_scratch, {"result.json", "events.ndjson"})
+        nonfinite_view = Path(nonfinite["root"])
+        nonfinite_view.joinpath("result.json").write_text('{"forged":true}\n', encoding="utf-8")
+        with nonfinite_view.joinpath("events.ndjson").open("a", encoding="utf-8") as handle:
+            handle.write('{"value":NaN}\n')
+        suite.raises(
+            sandbox.ResultValidationError,
+            lambda: sandbox.admit_outputs(live, nonfinite, ["result.json", "events.ndjson"]),
+            "non-finite NDJSON is rejected before multi-output admission begins",
+        )
+        suite.check(
+            json.loads((live / "result.json").read_text()).get("accepted") is True,
+            "later non-finite output cannot leave an earlier JSON result live",
+        )
+        sandbox.close_projection(nonfinite)
+
+        commit_failure_scratch = root / "commit-failure"
+        commit_failure_scratch.mkdir()
+        commit_failure = sandbox.project_state(
+            live, commit_failure_scratch, {"result.json", "events.ndjson"}
+        )
+        commit_failure_view = Path(commit_failure["root"])
+        commit_failure_view.joinpath("result.json").write_text('{"forged":true}\n', encoding="utf-8")
+        with commit_failure_view.joinpath("events.ndjson").open("a", encoding="utf-8") as handle:
+            handle.write('{"event":"valid-but-write-fails"}\n')
+        saved_append_json = sandbox.compaction.append_json
+        try:
+            sandbox.compaction.append_json = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full"))
+            suite.raises(
+                OSError,
+                lambda: sandbox.admit_outputs(
+                    live, commit_failure, ["result.json", "events.ndjson"]
+                ),
+                "audit commit failure aborts before policy-driving JSON replacement",
+            )
+        finally:
+            sandbox.compaction.append_json = saved_append_json
+        suite.check(
+            json.loads((live / "result.json").read_text()).get("accepted") is True,
+            "failed audit commit cannot leave a JSON result live",
+        )
+        sandbox.close_projection(commit_failure)
 
         rewrite_scratch = root / "rewrite"
         rewrite_scratch.mkdir()
@@ -238,6 +333,7 @@ def main() -> int:
             lambda: sandbox.admit_outputs(live, rewritten, ["events.ndjson"]),
             "worker cannot rewrite an existing evidence prefix",
         )
+        sandbox.close_projection(rewritten)
 
         link_scratch = root / "link"
         link_scratch.mkdir()
@@ -249,6 +345,32 @@ def main() -> int:
             sandbox.ResultValidationError,
             lambda: sandbox.admit_outputs(live, linked, ["result.json"]),
             "worker result symlinks are rejected",
+        )
+        sandbox.close_projection(linked)
+
+        swapped_live = root / "swapped-live"
+        swapped_live.mkdir()
+        (swapped_live / "input.json").write_text('{"safe":true}\n', encoding="utf-8")
+        swapped_scratch = root / "swapped-scratch"
+        swapped_scratch.mkdir()
+        swapped = sandbox.project_state(swapped_live, swapped_scratch, set())
+        (swapped_live / "input.json").unlink()
+        (swapped_live / "input.json").symlink_to(Path.home() / ".ssh")
+        suite.check(
+            json.loads((Path(swapped["root"]) / "input.json").read_text()).get("safe") is True,
+            "a post-projection path swap cannot retarget a descriptor-pinned input",
+        )
+        sandbox.close_projection(swapped)
+
+        escaped_live = root / "escaped-live"
+        escaped_live.mkdir()
+        (escaped_live / "outside").symlink_to(Path.home() / ".ssh")
+        escaped_scratch = root / "escaped-scratch"
+        escaped_scratch.mkdir()
+        suite.raises(
+            sandbox.ResultValidationError,
+            lambda: sandbox.project_state(escaped_live, escaped_scratch, set()),
+            "live-state symlinks cannot widen projected read authority",
         )
     if outer_read_only is not None:
         os.environ["FARM_STATE_READ_ONLY"] = outer_read_only

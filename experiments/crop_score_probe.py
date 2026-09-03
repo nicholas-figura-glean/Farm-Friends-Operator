@@ -271,9 +271,9 @@ def main() -> int:
     args = parser.parse_args()
     result = start(args.qty) if args.start else analyze()
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    if result.get("status") == "observing":
-        return 3
-    return 0 if result.get("supported") or args.start else 2
+    # Analysis success is distinct from hypothesis support. The protected
+    # parent decides supported versus falsified from the admitted result bytes.
+    return 0
 
 
 if __name__ == "__main__":

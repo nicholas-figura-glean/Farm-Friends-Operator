@@ -26,11 +26,14 @@ pass.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import secrets
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 QUEUE = os.path.join("state", "workorders.ndjson")
 
@@ -56,13 +59,34 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _append(row: Dict[str, Any], path: str = QUEUE) -> Dict[str, Any]:
+@contextmanager
+def _queue_lock(path: str) -> Iterator[None]:
+    lock_path = path + ".lock"
+    parent = os.path.dirname(lock_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _append_unlocked(row: Dict[str, Any], path: str = QUEUE) -> Dict[str, Any]:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     return row
+
+
+def _append(row: Dict[str, Any], path: str = QUEUE) -> Dict[str, Any]:
+    with _queue_lock(path):
+        return _append_unlocked(row, path)
 
 
 def _rows(path: str = QUEUE) -> List[Dict[str, Any]]:
@@ -116,48 +140,43 @@ def submit(
     if not order_id:
         return None
 
-    existing = current(path).get(order_id)
-    if existing and existing.get("status") not in TERMINAL:
-        return None
-    if existing and existing.get("status") == PUBLISHED:
-        # Already fixed and shipped. If the watcher still sees it, the fix did
-        # not take: reopen with the attempt count carried forward so MAX_ATTEMPTS
-        # still applies and we cannot loop forever.
-        pass
+    with _queue_lock(path):
+        existing = current(path).get(order_id)
+        if existing and existing.get("status") not in TERMINAL:
+            return None
+        if existing and existing.get("status") == PUBLISHED:
+            # Already fixed and shipped. If the watcher still sees it, the fix did
+            # not take: reopen with the attempt count carried forward so MAX_ATTEMPTS
+            # still applies and we cannot loop forever.
+            pass
 
-    attempts = int((existing or {}).get("attempts") or 0)
-    if attempts >= MAX_ATTEMPTS:
-        return None
+        attempts = int((existing or {}).get("attempts") or 0)
+        if attempts >= MAX_ATTEMPTS:
+            return None
 
-    created_ts = _utcnow()
-    return _append(
-        {
-            "id": order_id,
-            "ts": created_ts,
-            "created_ts": created_ts,
-            "status": OPEN,
-            "source": source,
-            "severity": str(change.get("severity") or "additive"),
-            "kind": str(change.get("kind") or "unknown"),
-            "tool": str(change.get("tool") or ""),
-            "summary": str(change.get("summary") or "")[:400],
-            "we_use_it": bool(change.get("we_use_it")),
-            "sites": list(change.get("sites") or []),
-            "detail": change.get("detail") or {},
-            # What the author agent is being asked to achieve, in prose. This is
-            # the prompt's spine, so it is stored rather than regenerated.
-            "intent": intent,
-            # Objective, checkable conditions. The gate matrix is generic; these
-            # are the order-specific ones.
-            "acceptance": list(acceptance or []),
-            "files": list(files or []),
-            # Research-authored orders carry the pre-registered hypothesis and
-            # cohort contract through authoring, release, canary, and promotion.
-            "provenance": dict(provenance or {}),
-            "attempts": attempts,
-        },
-        path,
-    )
+        created_ts = _utcnow()
+        return _append_unlocked(
+            {
+                "id": order_id,
+                "ts": created_ts,
+                "created_ts": created_ts,
+                "status": OPEN,
+                "source": source,
+                "severity": str(change.get("severity") or "additive"),
+                "kind": str(change.get("kind") or "unknown"),
+                "tool": str(change.get("tool") or ""),
+                "summary": str(change.get("summary") or "")[:400],
+                "we_use_it": bool(change.get("we_use_it")),
+                "sites": list(change.get("sites") or []),
+                "detail": change.get("detail") or {},
+                "intent": intent,
+                "acceptance": list(acceptance or []),
+                "files": list(files or []),
+                "provenance": dict(provenance or {}),
+                "attempts": attempts,
+            },
+            path,
+        )
 
 
 def _event(order: Dict[str, Any], status: str, **extra: Any) -> Dict[str, Any]:
@@ -169,31 +188,72 @@ def _event(order: Dict[str, Any], status: str, **extra: Any) -> Dict[str, Any]:
 
 
 def claim(order_id: str, actor: str, run: Optional[int] = None, path: str = QUEUE) -> Optional[Dict[str, Any]]:
-    """Take ownership of an order and increment its attempt count."""
-    order = current(path).get(order_id)
-    if not order or order.get("status") in TERMINAL:
-        return None
-    return _append(
-        _event(order, CLAIMED, actor=actor, run=run, attempts=int(order.get("attempts") or 0) + 1),
-        path,
+    """Atomically take ownership of one open order."""
+    with _queue_lock(path):
+        order = current(path).get(order_id)
+        if (
+            not order
+            or order.get("status") not in {OPEN, FAILED}
+            or int(order.get("attempts") or 0) >= MAX_ATTEMPTS
+        ):
+            return None
+        return _append_unlocked(
+            _event(
+                order,
+                CLAIMED,
+                actor=actor,
+                run=run,
+                claim_token=secrets.token_hex(16),
+                attempts=int(order.get("attempts") or 0) + 1,
+            ),
+            path,
+        )
+
+
+def lease_owned(order_id: str, claim_token: str, path: str = QUEUE) -> bool:
+    order = current(path).get(order_id) or {}
+    return bool(
+        claim_token
+        and order.get("status") == CLAIMED
+        and order.get("claim_token") == claim_token
     )
+
+
+def renew_claim(order_id: str, claim_token: str, path: str = QUEUE) -> Optional[Dict[str, Any]]:
+    """Atomically renew a live author lease without incrementing attempts."""
+    with _queue_lock(path):
+        order = current(path).get(order_id)
+        if (
+            not order
+            or order.get("status") != CLAIMED
+            or order.get("claim_token") != claim_token
+        ):
+            return None
+        return _append_unlocked(
+            _event(order, CLAIMED, claim_token=claim_token), path
+        )
 
 
 def ensure_probe_path(order_id: str, path: str = QUEUE) -> Optional[Dict[str, Any]]:
     """Backfill the explicit new-file path required by bounded model creation."""
-    order = current(path).get(order_id)
-    if not order or order.get("source") != "research_agent":
-        return None
-    if order.get("kind") not in {"strategy_hypothesis", "unused_capability"}:
-        return None
-    stem = re.sub(r"^research-(?:hypothesis|capability)-", "", order_id)
-    stem = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")[:48] or "generated"
-    probe_path = "experiments/%s_probe.py" % stem
-    files = list(order.get("files") or [])
-    if probe_path in files:
-        return None
-    files = [probe_path] + files
-    return _append(_event(order, str(order.get("status") or OPEN), files=files), path)
+    with _queue_lock(path):
+        order = current(path).get(order_id)
+        if (
+            not order
+            or order.get("source") != "research_agent"
+            or order.get("status") not in {OPEN, FAILED}
+        ):
+            return None
+        if order.get("kind") not in {"strategy_hypothesis", "unused_capability"}:
+            return None
+        stem = re.sub(r"^research-(?:hypothesis|capability)-", "", order_id)
+        stem = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")[:48] or "generated"
+        probe_path = "experiments/%s_probe.py" % stem
+        files = list(order.get("files") or [])
+        if probe_path in files:
+            return None
+        files = [probe_path] + files
+        return _append_unlocked(_event(order, str(order.get("status") or OPEN), files=files), path)
 
 
 def attach_provenance(
@@ -202,13 +262,18 @@ def attach_provenance(
     path: str = QUEUE,
 ) -> Optional[Dict[str, Any]]:
     """Enrich a legacy live order without changing its queue status."""
-    order = current(path).get(order_id)
-    if not order:
-        return None
-    return _append(
-        _event(order, str(order.get("status") or OPEN), provenance=dict(provenance)),
-        path,
-    )
+    with _queue_lock(path):
+        order = current(path).get(order_id)
+        if (
+            not order
+            or order.get("status") not in {OPEN, FAILED}
+            or bool(order.get("provenance"))
+        ):
+            return None
+        return _append_unlocked(
+            _event(order, str(order.get("status") or OPEN), provenance=dict(provenance)),
+            path,
+        )
 
 
 def resolve(
@@ -217,12 +282,29 @@ def resolve(
     note: str = "",
     release: str = "",
     path: str = QUEUE,
+    expected_status: Optional[Any] = None,
+    expected_ts: Optional[str] = None,
+    expected_claim_token: Optional[str] = None,
     **extra: Any,
 ) -> Optional[Dict[str, Any]]:
-    order = current(path).get(order_id)
-    if not order:
-        return None
-    return _append(_event(order, status, note=note[:500], release=release, **extra), path)
+    with _queue_lock(path):
+        order = current(path).get(order_id)
+        if not order:
+            return None
+        if expected_status is not None:
+            allowed = set(expected_status) if isinstance(expected_status, (set, list, tuple)) else {expected_status}
+            if order.get("status") not in allowed:
+                return None
+        if expected_ts is not None and str(order.get("ts") or "") != str(expected_ts):
+            return None
+        if order.get("status") == CLAIMED:
+            if not expected_claim_token or order.get("claim_token") != expected_claim_token:
+                return None
+        elif expected_claim_token is not None and order.get("claim_token") != expected_claim_token:
+            return None
+        return _append_unlocked(
+            _event(order, status, note=note[:500], release=release, **extra), path
+        )
 
 
 def open_orders(path: str = QUEUE) -> List[Dict[str, Any]]:
@@ -230,7 +312,11 @@ def open_orders(path: str = QUEUE) -> List[Dict[str, Any]]:
 
     A `claimed` order is included only if it looks abandoned; see `stale_claims`.
     """
-    out = [o for o in current(path).values() if o.get("status") == OPEN]
+    out = [
+        order for order in current(path).values()
+        if order.get("status") in {OPEN, FAILED}
+        and int(order.get("attempts") or 0) < MAX_ATTEMPTS
+    ]
     out.sort(key=lambda o: (_severity_rank(o), o.get("created_ts") or o.get("ts") or ""))
     return out
 
@@ -267,13 +353,32 @@ def stale_claims(max_age_seconds: int = 3600, path: str = QUEUE) -> List[Dict[st
 
 
 def release_stale(max_age_seconds: int = 3600, path: str = QUEUE) -> List[Dict[str, Any]]:
-    """Return abandoned claims to the queue so they can be retried."""
+    """Atomically return expired claims, including pre-token legacy rows."""
     released = []
-    for order in stale_claims(max_age_seconds, path):
-        if int(order.get("attempts") or 0) >= MAX_ATTEMPTS:
-            released.append(_append(_event(order, ABANDONED, note="claim expired; attempts exhausted"), path))
-        else:
-            released.append(_append(_event(order, OPEN, note="claim expired; returned to queue"), path))
+    for stale in stale_claims(max_age_seconds, path):
+        with _queue_lock(path):
+            order = current(path).get(str(stale.get("id")))
+            if (
+                not order
+                or order.get("status") != CLAIMED
+                or str(order.get("ts") or "") != str(stale.get("ts") or "")
+            ):
+                continue
+            status = ABANDONED if int(order.get("attempts") or 0) >= MAX_ATTEMPTS else OPEN
+            note = (
+                "claim expired; attempts exhausted"
+                if status == ABANDONED
+                else "claim expired; returned to queue"
+            )
+            released.append(_append_unlocked(
+                _event(
+                    order,
+                    status,
+                    note=note,
+                    legacy_tokenless_claim=not bool(order.get("claim_token")),
+                ),
+                path,
+            ))
     return released
 
 

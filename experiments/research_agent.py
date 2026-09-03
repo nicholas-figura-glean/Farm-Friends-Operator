@@ -76,7 +76,8 @@ def proposal_capacity(order_rows: List[Dict[str, Any]]) -> int:
     active = [
         order for order in order_rows
         if order.get("source") == "research_agent"
-        and order.get("status") in {"open", "claimed"}
+        and order.get("status") in {"open", "claimed", "failed"}
+        and int(order.get("attempts") or 0) < workorders.MAX_ATTEMPTS
     ]
     return min(MAX_PROPOSALS_PER_PASS, max(0, rules.MAX_RESEARCH_ORDER_WIP - len(active)))
 
@@ -347,6 +348,18 @@ def unbacked_parameters(sensitive: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         backing = json.dumps(registry, default=str)
     except Exception:  # noqa: BLE001
         return []
+    canonical_names = {
+        "GROWTH_MIN_MARGINAL_GAIN": "growth_min_marginal_gain",
+        "GROWTH_COMPARISON_WINDOW": "growth_comparison_window",
+        "FEED_COOLDOWN_RUNS": "feed_cooldown_runs",
+        "THREAT_SHARE": "threat_share",
+    }
+    latest_rows = analysis.history_rows(limit=1)
+    latest = latest_rows[-1] if latest_rows else {}
+    at_hard_cap = bool(
+        int(latest.get("animal_capacity") or 0) > 0
+        and int(latest.get("animals") or 0) >= int(latest.get("animal_capacity") or 0)
+    )
     out = []
     seen = set()
     for item in sensitive:
@@ -354,8 +367,17 @@ def unbacked_parameters(sensitive: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         if not name or name in seen:
             continue
         seen.add(name)
+        canonical = canonical_names.get(name, name.lower())
+        support = policy.parameter_support(canonical)
+        if support.get("level") in {"exact", "conservative_invariant"}:
+            continue
+        if at_hard_cap and canonical in {"growth_min_marginal_gain", "growth_comparison_window"}:
+            # Preserve directional uncertainty in policy metadata, but it is not
+            # active work while the capacity guard makes both values unreachable.
+            # The first below-cap research pass reopens the stable question.
+            continue
         if name not in backing:
-            out.append(item)
+            out.append(dict(item, support_level=support.get("level") or "missing"))
     return out
 
 
@@ -456,14 +478,19 @@ def model_hypotheses(context: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     required = ("question_id", "title", "hypothesis", "falsifier", "probe", "metric")
     allowed_questions = {
-        str(item.get("id")) for item in context.get("open_questions") or [] if item.get("id")
+        str(item.get("id")): item
+        for item in context.get("open_questions") or [] if item.get("id")
     }
     out = []
     for item in parsed[:3]:
         if (isinstance(item, dict)
                 and all(isinstance(item.get(k), str) and item.get(k) for k in required)
                 and item.get("question_id") in allowed_questions):
-            out.append({k: str(item.get(k) or "")[:800] for k in list(required) + ["risk"]})
+            proposal = {k: str(item.get(k) or "")[:800] for k in list(required) + ["risk"]}
+            bound = allowed_questions[str(item["question_id"])]
+            proposal["question_generation"] = int(bound.get("generation") or 1)
+            proposal["question_last_seen_run"] = bound.get("last_seen_run")
+            out.append(proposal)
     return out
 
 
@@ -485,7 +512,8 @@ def hypothesis_proposal(item: Dict[str, Any]) -> Dict[str, Any]:
         "change live strategy or the protected registry.\n\nHypothesis: %s\n\nFalsifier: %s"
         "\n\nProbe design: %s\n\nDeciding metric: %s\n\nThe script must declare its "
         "requested tools, arguments, outputs, and budget in a literal PROPOSED_SPEC value. "
-        "Independent review is required before that spec can be copied into the registry."
+        "It must not call provenance.record_result or label its own hypothesis supported; "
+        "independent protected adjudication is required before that spec can be copied into the registry."
         % (item["hypothesis"], item["falsifier"], item["probe"], item["metric"])
     )
     acceptance = [
@@ -500,6 +528,12 @@ def hypothesis_proposal(item: Dict[str, Any]) -> Dict[str, Any]:
         "acceptance": acceptance,
         "files": [_probe_path(key)],
         "question_ids": [item["question_id"]],
+        "question_generations": {
+            item["question_id"]: int(item.get("question_generation") or 1)
+        },
+        "question_last_seen_runs": {
+            item["question_id"]: item.get("question_last_seen_run")
+        },
         "change_class": "research_probe",
     }
 
@@ -609,6 +643,11 @@ def settle_superseded_questions() -> List[str]:
             run=latest_run,
             probe_id="research-reconciliation",
             result_status="supported",
+            expected_generation=int(question.get("generation") or 1),
+            expected_status="open",
+            evidence_cutoff_run=latest_run,
+            resolution_kind="superseded",
+            residual_uncertainty="a materially new recurrence opens a fresh generation",
         )
         settled.append(identity)
     return settled
@@ -643,9 +682,101 @@ def settle_active_capability_questions() -> List[str]:
             run=canary.latest_run(),
             probe_id="capability-policy",
             result_status="supported",
+            expected_generation=int(question.get("generation") or 1),
+            expected_status="open",
+            evidence_cutoff_run=canary.latest_run(),
+            resolution_kind="supported",
+            residual_uncertainty="new capability or risk signatures remain separately gated",
         )
         settled.append(identity)
     return settled
+
+
+def reconcile_question_orders(queue: str) -> List[Dict[str, Any]]:
+    """Retire research work only when its linked obligation or premise is settled."""
+    current_questions = {str(row.get("id")): row for row in questions.load_all()}
+    history = analysis.history_rows(limit=80)
+    score_health = rules.score_production_health(history)
+    latest = history[-1] if history else {}
+    recent = history[-rules.QUESTION_FLOW_WINDOW_RUNS :]
+    resolved: List[Dict[str, Any]] = []
+    for order in workorders.current(queue).values():
+        if order.get("source") != "research_agent" or order.get("kind") != "strategy_hypothesis":
+            continue
+        if order.get("status") not in {workorders.OPEN, workorders.FAILED}:
+            continue
+        question_ids = [
+            str(value) for value in ((order.get("provenance") or {}).get("question_ids") or [])
+            if value
+        ]
+        reason = ""
+        evidence: List[str] = []
+        expected_generations = (order.get("provenance") or {}).get("question_generations") or {}
+
+        def evidence_closed(identity: str) -> bool:
+            question = current_questions.get(identity) or {}
+            cutoff = question.get("evidence_cutoff_run")
+            refs = [str(value) for value in question.get("generation_evidence_refs") or []]
+            expected_generation = expected_generations.get(identity)
+            content_addressed = any(
+                "#sha256=" in ref or ref.startswith("result-") for ref in refs
+            )
+            return bool(
+                isinstance(expected_generation, int)
+                and int(question.get("generation") or 0) == expected_generation
+                and question.get("status") == "answered"
+                and question.get("resolution_kind") in {"supported", "falsified"}
+                and content_addressed
+                and isinstance(cutoff, int)
+                and cutoff >= int(question.get("last_seen_run") or 0)
+            )
+
+        if question_ids and all(evidence_closed(identity) for identity in question_ids):
+            reason = "all linked question generations have evidence-backed terminal dispositions"
+            evidence = ["question:%s" % identity for identity in question_ids]
+        elif not question_ids:
+            legacy_burst_orders = {
+                "research-hypothesis-verify-production-stall",
+                "research-hypothesis-verify-telemetry-zero",
+            }
+            legacy_progression_orders = {
+                "research-hypothesis-audit-progression-blockers",
+                "research-hypothesis-check-promotion-eligibility",
+            }
+            identity = str(order.get("id") or "")
+            if identity in legacy_burst_orders and score_health.get("status") == "healthy":
+                reason = "burst-spanning current score evidence falsifies the old adjacent-zero premise"
+                evidence = [
+                    "state/history.ndjson#runs=%s-%s" % (
+                        recent[0].get("run") if recent else None, latest.get("run")
+                    ),
+                    "farm/rules.py#score_production_health",
+                ]
+            elif identity in legacy_progression_orders:
+                blocked = any(
+                    row.get("prestige_available") or row.get("progression_pending")
+                    for row in recent
+                )
+                if latest.get("rank") == 1 and not blocked:
+                    reason = "the current negative-observation window has no pending progression action"
+                    evidence = ["state/history.ndjson#runs=%s-%s" % (
+                        recent[0].get("run") if recent else None, latest.get("run")
+                    )]
+        if not reason:
+            continue
+        changed = workorders.resolve(
+            str(order.get("id")),
+            workorders.SUPERSEDED,
+            note="%s; evidence=%s" % (reason, ",".join(evidence)),
+            path=queue,
+            expected_status={workorders.OPEN, workorders.FAILED},
+            expected_ts=str(order.get("ts") or ""),
+            evidence_refs=evidence,
+            evidence_run=latest.get("run"),
+        )
+        if changed:
+            resolved.append(changed)
+    return resolved
 
 
 def reconcile_active_capability_orders(queue: str) -> List[Dict[str, Any]]:
@@ -663,6 +794,8 @@ def reconcile_active_capability_orders(queue: str) -> List[Dict[str, Any]]:
             workorders.SUPERSEDED,
             note="superseded only after validated executable capability policy became active",
             path=queue,
+            expected_status=workorders.OPEN,
+            expected_ts=str(order.get("ts") or ""),
         )
         if row:
             resolved.append(row)
@@ -685,6 +818,7 @@ def main() -> int:
     proposed = set(stored.get("proposed") or [])
     queue = str(PROJECT / workorders.QUEUE)
     reconciled_capabilities = reconcile_active_capability_orders(queue)
+    reconciled_question_orders = reconcile_question_orders(queue)
     settled_superseded_questions = settle_superseded_questions()
     settled_capability_questions = settle_active_capability_questions()
     implementation_orders = file_supported_implementations(queue)
@@ -716,7 +850,7 @@ def main() -> int:
 
     # A sensitive parameter with no supporting claim is an open question, not a
     # change. Opening it is free and keeps the uncertainty durable.
-    for item in unbacked[:3]:
+    for item in unbacked:
         try:
             questions.open_or_update(
                 "strategy.unbacked_parameter",
@@ -769,8 +903,19 @@ def main() -> int:
                     {
                         "id": q.get("id"), "class": q.get("class"),
                         "subject": q.get("subject"), "question": str(q.get("alert"))[:200],
+                        "generation": q.get("generation"),
+                        "last_seen_run": q.get("last_seen_run"),
                     }
-                    for q in (questions.open_questions() or [])[:10]
+                    for q in sorted(
+                        questions.open_questions() or [],
+                        key=lambda row: (
+                            -{"critical": 3, "high": 2, "medium": 1, "low": 0}.get(
+                                str(row.get("priority") or "medium"), 1
+                            ),
+                            int(row.get("generation_opened_run") or 0),
+                            str(row.get("id") or ""),
+                        ),
+                    )[:10]
                 ],
                 "guardrails": {
                     "cycle_budget_seconds": rules.CYCLE_HARD_TIMEOUT,
@@ -816,6 +961,19 @@ def main() -> int:
                 proposal.get("question_ids") or detail.get("question_ids") or []
             ) if value
         ))
+        expected_generations = dict(proposal.get("question_generations") or {})
+        expected_last_seen = dict(proposal.get("question_last_seen_runs") or {})
+        current_question_map = {str(row.get("id")): row for row in questions.load_all()}
+        if expected_generations and any(
+            (current_question_map.get(identity) or {}).get("status") != "open"
+            or int((current_question_map.get(identity) or {}).get("generation") or 0)
+                != int(expected_generations.get(identity) or 0)
+            or (current_question_map.get(identity) or {}).get("last_seen_run")
+                != expected_last_seen.get(identity)
+            for identity in question_ids
+        ):
+            print("  skipped stale model proposal: question generation changed during research")
+            continue
         if proposal.get("evidence_spec"):
             spec = dict(proposal["evidence_spec"])
         elif change.get("kind") == "strategy_hypothesis":
@@ -843,23 +1001,51 @@ def main() -> int:
             discovery_refs,
             context_policy_id=runtime.get("policy_id"),
             question_ids=question_ids,
+            question_generations=expected_generations,
+            question_last_seen_runs=expected_last_seen,
         )
         proposed.add(key)
         if not registered.get("accepted"):
             print("  skipped %s: %s" % (registered.get("id"), registered.get("reason")))
             continue
+        if expected_generations:
+            current_question_map = {str(row.get("id")): row for row in questions.load_all()}
+            if any(
+                (current_question_map.get(identity) or {}).get("status") != "open"
+                or int((current_question_map.get(identity) or {}).get("generation") or 0)
+                    != int(expected_generations.get(identity) or 0)
+                or (current_question_map.get(identity) or {}).get("last_seen_run")
+                    != expected_last_seen.get(identity)
+                for identity in question_ids
+            ):
+                print("  skipped stale registered proposal: question changed before filing")
+                continue
         lineage = dict(
             spec,
             hypothesis_id=registered["id"],
             discovery_evidence=discovery_refs,
             question_ids=question_ids,
+            question_generations=(
+                expected_generations
+                or {
+                    identity: int((current_question_map.get(identity) or {}).get("generation") or 1)
+                    for identity in question_ids
+                }
+            ),
+            question_last_seen_runs=(
+                expected_last_seen
+                or {
+                    identity: (current_question_map.get(identity) or {}).get("last_seen_run")
+                    for identity in question_ids
+                }
+            ),
             change_class=str(proposal.get("change_class") or "research_probe"),
             evidence_class="direct_mechanism" if change.get("kind") == "capability_policy" else None,
         )
         acceptance = list(proposal["acceptance"]) + [
-            "the registry entry carries hypothesis_id %s and a causal evidence_class"
+            "the candidate's literal requested spec resolves to hypothesis_id %s without editing the protected registry"
             % registered["id"],
-            "the probe records supported or falsified via farm.provenance.record_result using validation evidence that is not discovery evidence",
+            "the worker emits only a content-addressed measurement; a protected hypothesis-specific adjudicator is required before provenance or question closure",
         ]
         order = workorders.submit(
             change, source="research_agent", intent=proposal["intent"],
@@ -877,6 +1063,10 @@ def main() -> int:
     if reconciled_capabilities:
         print("  active capability policies retired: %s" % ", ".join(
             str(row.get("id")) for row in reconciled_capabilities
+        ))
+    if reconciled_question_orders:
+        print("  evidence-settled research orders retired: %s" % ", ".join(
+            str(row.get("id")) for row in reconciled_question_orders
         ))
     if settled_superseded_questions:
         print("  superseded questions settled: %s"

@@ -385,15 +385,18 @@ def _resolve_healthy_orders(
         order_id = "dashboard-%s" % source.replace(".", "-")
         order = current.get(order_id)
         if not order or order.get("status") not in {
-            workorders.OPEN, workorders.CLAIMED, workorders.FAILED,
+            workorders.OPEN, workorders.FAILED,
         }:
             continue
-        workorders.resolve(
+        changed = workorders.resolve(
             order_id, workorders.SUPERSEDED,
             note="readout is healthy again; periodic verifier closed stale repair",
             path=queue,
+            expected_status={workorders.OPEN, workorders.FAILED},
+            expected_ts=str(order.get("ts") or ""),
         )
-        resolved.append(order_id)
+        if changed:
+            resolved.append(order_id)
     return resolved
 
 
@@ -569,11 +572,13 @@ def main() -> int:
             "detail": problem["why"],
         }
         try:
-            repair_files = (
-                ["experiments/dashboard_agent.py"]
-                if str(problem["source"]).endswith("_age")
-                else ["farm/autonomy.py", "farm/architecture.py", "monitor.py"]
-            )
+            source = str(problem["source"])
+            if source.endswith("_age"):
+                repair_files = ["experiments/dashboard_agent.py"]
+            elif source == "evidence.report":
+                repair_files = ["farm/evidence.py", "farm/research.py"]
+            else:
+                repair_files = ["farm/autonomy.py", "farm/architecture.py", "monitor.py"]
             if read_only:
                 continue
             submitted = workorders.submit(

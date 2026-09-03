@@ -82,47 +82,49 @@ def evaluate(
     produce_delta = None
     if prev and row.get("produce") is not None and prev.get("produce") is not None:
         produce_delta = row["produce"] - prev["produce"]
-    bad_rate = rules.produce_rate_trouble(produce_delta, produce_minutes, row.get("animals"))
-    # Record the rate on the row so the next run can see this one. Lifetime
-    # produce arrives in bursts (per-animal timers, and the leaderboard figure
-    # lags), so single windows are lumpy: replaying history, runs 40, 46 and 55
-    # each read 105-246/min immediately before a 1,600-2,000/min window. A real
-    # stall - hunger 70, or a server change - persists, so alerting requires two
-    # consecutive low windows. That costs one cycle of detection latency and
-    # removes three false wake-ups out of 56 runs.
+    # Preserve the raw adjacent-window rate for telemetry. The control decision
+    # uses a shared burst-spanning score window because leaderboard updates now
+    # legitimately remain flat for five consecutive cycles before one large jump.
     if produce_delta is not None and produce_minutes:
         row["produce_per_min"] = round(produce_delta / produce_minutes, 1)
-    prev_rate = (prev or {}).get("produce_per_min")
-    prev_low = (
-        prev_rate is not None
-        and prev_rate < rules.produce_floor((prev or {}).get("animals") or row.get("animals"))
+    score_rows = list(history or [])
+    if not score_rows or score_rows[-1].get("run") != row.get("run"):
+        score_rows.append(row)
+    score_health = rules.score_production_health(score_rows)
+    row["score_health"] = score_health
+    score_status = str(score_health.get("status") or "unknown")
+    produce_healthy = score_status == "healthy"
+    production_bad = score_status in {"stalled", "degraded"}
+    previous_health = rules.score_production_health(list(history or []))
+    previous_bad = previous_health.get("status") in {"stalled", "degraded"}
+    reminder = (
+        isinstance(row.get("run"), int)
+        and int(row["run"]) % rules.SCORE_ALERT_REMINDER_RUNS == 0
     )
-    produce_healthy = (
-        produce_delta is not None
-        and produce_minutes is not None
-        and produce_minutes >= rules.MIN_INTERVAL_FOR_PRODUCE_CHECK
-        and bad_rate is None
-    )
-    if bad_rate is not None and prev_low:
+    if production_bad and (not previous_bad or reminder):
         out.append(
             "PRODUCTION: %.0f produce/min over %.1f min, below the %.0f/min floor "
-            "for two runs running (hunger %s, %d animals)"
+            "across the burst-spanning window (hunger %s, %d animals)"
             % (
-                bad_rate,
-                produce_minutes,
-                rules.produce_floor(row.get("animals")),
+                float(score_health.get("rate") or 0.0),
+                float((score_health.get("window") or {}).get("minutes")
+                      or score_health.get("flat_minutes") or 0.0),
+                float(score_health.get("floor") or rules.produce_floor(row.get("animals"))),
                 row.get("max_hunger"),
                 row.get("animals") or 0,
             )
         )
-    elif bad_rate is not None:
-        soft.append(
-            "score rate %.0f produce/min below floor for one run - watching" % bad_rate
-        )
+    elif production_bad:
+        soft.append("production stall remains active; duplicate alert suppressed")
+    elif score_status == "watching":
+        soft.append(str(score_health.get("reason") or "score window is still forming"))
     elif produce_healthy:
         soft.append(
-            "score rate %.0f produce/min over %.1f min"
-            % (produce_delta / produce_minutes, produce_minutes)
+            "burst-spanning score rate %.0f produce/min over %.1f min"
+            % (
+                float(score_health.get("rate") or 0.0),
+                float((score_health.get("window") or {}).get("minutes") or 0.0),
+            )
         )
 
     # Throughput, measured per chicken per minute over the real interval. Only
@@ -130,9 +132,15 @@ def evaluate(
     # incident when produce is actually piling up or the herd is going hungry.
     # Without the backlog test this detector fired on almost every run at herd
     # scale and was the single largest source of token spend.
-    rate = row.get("units_per_chicken_min")
     interval = row.get("interval_min")
-    lo, hi = rules.UNITS_PER_CHICKEN_MIN_BAND
+    rate = row.get("units_per_animal_min")
+    exposure_animals = int(row.get("collection_animals") or row.get("animals") or 0)
+    if rate is None and interval and interval > 0 and exposure_animals:
+        rate = float(row.get("units_collected") or 0) / float(exposure_animals) / float(interval)
+        row["units_per_animal_min"] = round(rate, 4)
+    lo, hi = rules.UNITS_PER_ANIMAL_MIN_BAND
+    drained = rules.backlog_drained(row.get("ready_units") or 0, row.get("animals") or 0)
+    hunger_ok = (row.get("max_hunger") or 0) < rules.HUNGER_ALARM
     if (
         rate is not None
         and interval is not None
@@ -140,39 +148,30 @@ def evaluate(
         and row.get("units_collected", 0) > 0
         and not (lo <= rate <= hi)
     ):
-        drained = rules.backlog_drained(row.get("ready_units") or 0, row.get("animals") or 0)
-        hunger_ok = (row.get("max_hunger") or 0) < rules.HUNGER_ALARM
-        if rate < lo and (drained or produce_healthy) and hunger_ok:
-            # Nothing was left to collect, or the score rate proves production is
-            # fine and this run simply banked its produce during feed_animals.
-            # Either way the loop is keeping up: a measurement artifact, not an
-            # incident. Without this the detector fires nearly every run.
+        if rate > hi:
+            # More output than the calibration band is positive model evidence,
+            # never an operational failure. The periodic research audit owns any
+            # claim refresh this warrants.
+            soft.append("throughput %.3f units/animal/min is above the calibration band" % rate)
+        elif drained and hunger_ok:
             soft.append(
-                "throughput %.3f below band but %s and hunger %s"
-                % (
-                    rate,
-                    "backlog drained (%s ready)" % row.get("ready_units")
-                    if drained
-                    else "score rate healthy",
-                    row.get("max_hunger"),
-                )
+                "throughput %.3f below band but backlog drained (%s ready) and hunger %s"
+                % (rate, row.get("ready_units"), row.get("max_hunger"))
             )
         else:
             out.append(
-                "throughput %.3f units/chicken/min outside band %.2f-%.2f over %.1f min "
+                "throughput %.3f units/animal/min below band %.2f-%.2f over %.1f min "
                 "(%s ready, hunger %s)"
                 % (rate, lo, hi, interval, row.get("ready_units"), row.get("max_hunger"))
             )
 
-    # A sustained streak of empty collections used to mean production had stopped.
-    # It no longer does on its own: collect_produce returns nothing whenever the
-    # herd is hungry, and the produce banks during the feed call instead. Only
-    # escalate when the score rate does not contradict it.
+    # Empty collection calls are diagnostic only. Escalate a collection failure
+    # when material backlog remains; score stalls are handled once by the shared
+    # burst-spanning detector above.
     streak = int(row.get("zero_streak", 0))
-    if streak >= rules.ZERO_COLLECT_RUNS_TO_ALARM and not produce_healthy:
+    if streak >= rules.ZERO_COLLECT_RUNS_TO_ALARM and not drained:
         out.append(
-            "no produce collected in %d consecutive runs - production may have stopped"
-            % streak
+            "collection backlog remained after %d empty collection runs" % streak
         )
 
     if row.get("max_hunger", 0) >= rules.HUNGER_ALARM:

@@ -95,58 +95,36 @@ def production_stall_windows(
     rows: Optional[List[Dict[str, Any]]] = None,
     minimum: int = 2,
 ) -> int:
-    """Count consecutive healthy verified windows with no lifetime-score gain.
-
-    Zero-output windows are intentionally excluded from the marginal regression,
-    but they cannot be excluded from the safety decision: doing so turned a real
-    production halt into "insufficient samples" and retained a 400-adoption cap.
-    """
+    """Return burst-spanning intervals only for a confirmed score halt."""
     history = rows if rows is not None else _tail_rows()
-    streak = 0
-    for before, after in reversed(list(zip(history, history[1:]))):
-        produced_before, produced_after = before.get("produce"), after.get("produce")
-        start, end = _parse_ts(before.get("ts")), _parse_ts(after.get("ts"))
-        if produced_before is None or produced_after is None or not start or not end:
-            break
-        minutes = (end - start).total_seconds() / 60.0
-        if int(produced_after) != int(produced_before):
-            break
-        if (
-            int(after.get("max_hunger") or 0) >= rules.HUNGER_ALARM
-            or minutes < rules.MIN_INTERVAL_FOR_PRODUCE_CHECK
-        ):
-            break
-        if not after.get("verified"):
-            # Reconciliation uncertainty is not evidence of recovery. Skip the
-            # window, but keep walking across it while the score itself is flat.
-            continue
-        streak += 1
-        if streak >= minimum:
-            # Continue counting for an honest reason string and dashboard value.
-            continue
-    return streak
+    health = rules.score_production_health(history)
+    if health.get("status") not in {"stalled", "degraded"}:
+        return 0
+    return max(minimum, int(health.get("intervals") or minimum))
 
 
 def production_stall_active(
     rows: Optional[List[Dict[str, Any]]] = None,
     model: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, int]:
-    """Latch a confirmed halt until lifetime produce advances again."""
+    """Latch a confirmed halt until a burst-spanning healthy window returns."""
     previous = model or {}
     history = rows if rows is not None else _tail_rows(previous.get("epoch_started_run"))
-    streak = production_stall_windows(history)
-    if streak >= 2:
-        return True, streak
+    health = rules.score_production_health(history)
+    if health.get("status") in {"stalled", "degraded"}:
+        windows = max(2, int(health.get("intervals") or 2))
+        return True, windows
     if not previous.get("production_stalled"):
-        return False, streak
-    latest_gain = None
-    if len(history) >= 2:
-        before, after = history[-2].get("produce"), history[-1].get("produce")
-        if isinstance(before, int) and isinstance(after, int):
-            latest_gain = after - before
-    if latest_gain is not None and latest_gain > 0:
         return False, 0
-    return True, max(streak, int(previous.get("production_stall_windows") or 2))
+    if int(previous.get("production_stall_schema") or 0) != rules.SCORE_HEALTH_SCHEMA:
+        # A two-adjacent-zero latch was created by the detector this release
+        # replaces. Carry it only if the new burst-spanning evidence independently
+        # reconfirms the halt above; otherwise migrate fail-open to observation.
+        return False, 0
+    if health.get("status") == "healthy":
+        return False, 0
+    # Thin or reset evidence cannot release a previously confirmed halt.
+    return True, max(2, int(previous.get("production_stall_windows") or 2))
 
 
 def samples(rows: Optional[List[Dict[str, Any]]] = None) -> List[Tuple[int, float]]:
@@ -183,6 +161,7 @@ def reset_after_progression(run: Optional[int], league_level: Optional[int]) -> 
         "saturated": False,
         "production_stalled": False,
         "production_stall_windows": 0,
+        "production_stall_schema": rules.SCORE_HEALTH_SCHEMA,
         "plateau": None,
         "recent_samples": 0,
         "smaller_samples": 0,
@@ -228,6 +207,7 @@ def decide(
 
     changed = bool(model.get("saturated")) != bool(verdict.get("saturated"))
     record = dict(verdict)
+    record["production_stall_schema"] = rules.SCORE_HEALTH_SCHEMA
     record["updated_ts"] = _utcnow()
     record["run"] = run
     record["cap"] = cap

@@ -5,7 +5,8 @@ Change a rule here and every future cycle follows it, at zero token cost.
 """
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # --- market -----------------------------------------------------------------
 ANIMAL_COST = {"chicken": 10, "pig": 20, "sheep": 20, "beehive": 25, "cow": 30}
@@ -124,7 +125,10 @@ FEED_RESERVE_TOLERANCE_FRACTION = 0.02
 # Observed healthy range across runs 2-6: 0.09-0.63 units/chicken/min.
 # Lower bound raised to catch hunger-driven degradation: a fed herd runs
 # 0.28-0.40, and 0.056 was the signature of two skipped feeds.
-UNITS_PER_CHICKEN_MIN_BAND = (0.10, 1.00)
+UNITS_PER_ANIMAL_MIN_BAND = (0.10, 1.00)
+# Historical/dashboard compatibility; new control decisions use all producing
+# animals because mixed-species collection totals cannot use a chicken-only denominator.
+UNITS_PER_CHICKEN_MIN_BAND = UNITS_PER_ANIMAL_MIN_BAND
 MIN_INTERVAL_FOR_RATE_CHECK = 4.0   # minutes; shorter samples are meaningless
 ZERO_COLLECT_RUNS_TO_ALARM = 3      # consecutive empty collections before alarm
 
@@ -150,6 +154,17 @@ ZERO_COLLECT_RUNS_TO_ALARM = 3      # consecutive empty collections before alarm
 PRODUCE_PER_MIN_FLOOR = 600.0
 PRODUCE_FLOOR_PER_ANIMAL = 0.05
 MIN_INTERVAL_FOR_PRODUCE_CHECK = 3.0
+# Lifetime score is published in multi-run bursts in the current server regime.
+# A production halt therefore needs a burst-spanning wall-clock window, not two
+# adjacent raw zero deltas. These values were replayed against runs 2310-2584:
+# healthy phases included five zero windows over 26 minutes, while every 35-minute
+# window retained >1,000 produce/min. A real flat-score outage is still detected
+# within one bounded 35-minute window, and hunger remains an immediate alarm.
+SCORE_HEALTH_SCHEMA = 2
+SCORE_HEALTH_WINDOW_MINUTES = 30.0
+SCORE_STALL_WINDOW_MINUTES = 35.0
+SCORE_HEALTH_MAX_GAP_MINUTES = 30.0  # meets the schedule-gap detector with no blind interval
+SCORE_ALERT_REMINDER_RUNS = 40
 
 # A low measured rate has two very different causes and only one is an incident:
 #   1. production degraded (hunger, a server change)  -> must alarm
@@ -283,6 +298,7 @@ RESEARCH_AUDIT_RUNS = 10
 # Broad autonomous operating review; aligned with the journal/claim evidence window.
 GOVERNANCE_REVIEW_RUNS = JOURNAL_EVERY
 PROBE_MIN_INTERVAL_RUNS = 20
+PROBE_STALE_RUNS = 2
 # Learning-flow contracts. High-blast uncertainty must never sit unattended for
 # more than two governance windows, and one farm mutation lock means only one
 # probe can be active at a time.
@@ -485,6 +501,142 @@ def produce_rate_trouble(
         return None
     rate = float(produce_delta) / float(minutes)
     return rate if rate < produce_floor(animal_count) else None
+
+
+def _score_timestamp(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_progression(row: Dict[str, Any]) -> bool:
+    if int(row.get("prestige_count") or 0) > 0:
+        return True
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "progression"
+        and item.get("status") in {"verified", "reconciled"}
+        for item in (row.get("mechanic_actions") or [])
+    )
+
+
+def score_production_health(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Judge score production over a burst-spanning wall-clock window.
+
+    Raw leaderboard deltas remain useful telemetry, but adjacent zeros are not
+    independent evidence: the server publishes lifetime score in multi-run
+    bursts. This helper is shared by detection and the growth brake so those
+    control paths cannot disagree about whether production actually stopped.
+    """
+    indexed: Dict[int, Dict[str, Any]] = {}
+    for offset, raw in enumerate(rows or []):
+        if not isinstance(raw, dict) or raw.get("dry"):
+            continue
+        key = raw.get("run") if isinstance(raw.get("run"), int) else offset
+        indexed[int(key)] = raw
+    ordered = [indexed[key] for key in sorted(indexed)]
+    segment: List[Dict[str, Any]] = []
+    for row in ordered:
+        ts = _score_timestamp(row.get("ts"))
+        produce = row.get("produce")
+        if ts is None or not isinstance(produce, (int, float)) or isinstance(produce, bool):
+            continue
+        if segment:
+            previous = segment[-1]
+            previous_ts = _score_timestamp(previous.get("ts"))
+            gap = (ts - previous_ts).total_seconds() / 60.0 if previous_ts else None
+            counts = row.get("risk_event_counts") or {}
+            reset = bool(
+                gap is None
+                or gap <= 0
+                or gap > SCORE_HEALTH_MAX_GAP_MINUTES
+                or float(produce) < float(previous.get("produce") or 0)
+                or _score_progression(row)
+                or (isinstance(counts, dict) and int(counts.get("aliens") or 0) > 0)
+            )
+            if reset:
+                segment = [row]
+                continue
+        segment.append(row)
+    if len(segment) < 2:
+        return {"status": "unknown", "reason": "insufficient score history", "rows": len(segment)}
+
+    def window(endpoint: int, minimum_minutes: float) -> Optional[Dict[str, Any]]:
+        end = segment[endpoint]
+        end_ts = _score_timestamp(end.get("ts"))
+        if end_ts is None:
+            return None
+        for start_index in range(endpoint - 1, -1, -1):
+            start = segment[start_index]
+            start_ts = _score_timestamp(start.get("ts"))
+            if start_ts is None:
+                continue
+            minutes = (end_ts - start_ts).total_seconds() / 60.0
+            if minutes < minimum_minutes:
+                continue
+            delta = float(end.get("produce") or 0) - float(start.get("produce") or 0)
+            rate = delta / minutes
+            animals = int(end.get("animals") or start.get("animals") or 0)
+            return {
+                "run_from": start.get("run"),
+                "run_to": end.get("run"),
+                "minutes": round(minutes, 3),
+                "delta": delta,
+                "rate": rate,
+                "floor": produce_floor(animals),
+                "intervals": endpoint - start_index,
+                "animals": animals,
+            }
+        return None
+
+    latest_index = len(segment) - 1
+    latest = segment[latest_index]
+    latest_ts = _score_timestamp(latest.get("ts"))
+    flat_start = latest_index
+    for index in range(latest_index - 1, -1, -1):
+        if float(segment[index].get("produce") or 0) != float(latest.get("produce") or 0):
+            break
+        flat_start = index
+    flat_ts = _score_timestamp(segment[flat_start].get("ts"))
+    flat_minutes = (
+        (latest_ts - flat_ts).total_seconds() / 60.0
+        if latest_ts is not None and flat_ts is not None else 0.0
+    )
+    current = window(latest_index, SCORE_HEALTH_WINDOW_MINUTES)
+    base = {
+        "run": latest.get("run"),
+        "flat_minutes": round(flat_minutes, 3),
+        "window": current,
+        "rows": len(segment),
+    }
+    if flat_minutes >= SCORE_STALL_WINDOW_MINUTES:
+        return dict(
+            base,
+            status="stalled",
+            reason="lifetime score was flat for %.1f minutes" % flat_minutes,
+            rate=0.0,
+            floor=produce_floor(int(latest.get("animals") or 0)),
+            intervals=latest_index - flat_start,
+        )
+    if current is None:
+        return dict(base, status="watching", reason="score window has not reached %.0f minutes" % SCORE_HEALTH_WINDOW_MINUTES)
+    if current["rate"] >= current["floor"]:
+        return dict(base, status="healthy", reason="burst-spanning score rate is healthy",
+                    rate=current["rate"], floor=current["floor"], intervals=current["intervals"])
+    previous = window(latest_index - 1, SCORE_HEALTH_WINDOW_MINUTES) if latest_index > 1 else None
+    if previous is not None and previous["rate"] < previous["floor"]:
+        return dict(
+            base,
+            status="degraded",
+            reason="two burst-spanning score windows are below the herd-scaled floor",
+            rate=current["rate"],
+            floor=current["floor"],
+            intervals=current["intervals"],
+            previous_window=previous,
+        )
+    return dict(base, status="watching", reason="one burst-spanning score window is below floor",
+                rate=current["rate"], floor=current["floor"], intervals=current["intervals"])
 
 
 def adoptable(kind: str) -> bool:

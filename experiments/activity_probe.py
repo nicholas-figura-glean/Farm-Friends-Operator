@@ -30,7 +30,20 @@ def build(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     decisions = []
     correlations = []
     rival_changes = []
+    held_trade_evidence = []
     for index, row in enumerate(rows):
+        novelty_state = row.get("novelty") or {}
+        for block in novelty_state.get("active_blocks") or []:
+            if not isinstance(block, dict) or block.get("class") != "activity_novelty_trade":
+                continue
+            evidence = block.get("evidence") or {}
+            held_trade_evidence.append({
+                "run": row.get("run"),
+                "trade_ids": [int(value) for value in evidence.get("trade_ids") or [] if isinstance(value, int)],
+                "profiles": [str(value) for value in evidence.get("profiles") or []],
+                "requested_coin_outflow": int(evidence.get("requested_coin_outflow") or 0),
+                "material_values": [int(value) for value in evidence.get("material_values") or [] if isinstance(value, int)],
+            })
         for decision in row.get("trade_decisions") or []:
             item = {
                 "run": row.get("run"),
@@ -118,25 +131,44 @@ def build(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if isinstance(item.get("next_run_herd_delta"), int)
         and item["next_run_herd_delta"] >= rules.RIVAL_HERD_GROWTH_ALARM
     ]
+    trade_runs = sorted(
+        {int(item["run"]) for item in decisions if isinstance(item.get("run"), int)}
+        | {int(item["run"]) for item in held_trade_evidence if isinstance(item.get("run"), int)}
+    )
+    rival_runs = sorted({int(item["run"]) for item in rival_changes if isinstance(item.get("run"), int)})
     return {
         "schema_version": 1,
         "kind": "trade_activity_replay",
         "runs": [rows[0].get("run"), rows[-1].get("run")] if rows else [],
         "decisions_observed": len(decisions),
+        "held_trade_evidence": held_trade_evidence[-40:],
+        "trade_ids": sorted(
+            {int(item["trade_id"]) for item in decisions if isinstance(item.get("trade_id"), int)}
+            | {trade_id for item in held_trade_evidence for trade_id in item["trade_ids"]}
+        ),
         "accepted_coin_outflow": accepted_coin_outflow,
         "blocked_coin_outflow": blocked_coin_outflow,
         "counterparty_correlations": correlations[-20:],
         "material_counterparty_growth": material_counterparty_growth[-20:],
         "material_rival_changes": rival_changes[-40:],
+        "trade_decision_runs": trade_runs,
+        "rival_change_runs": rival_runs,
+        "settled_classes": [
+            name for name, present in (
+                ("activity_novelty_trade", bool(trade_runs)),
+                ("activity_novelty_rival", bool(rival_runs)),
+            ) if present
+        ],
         "neutral_feed_price": rules.FEED_COST,
         "finding": (
-            "unsafe coin-to-rival transfer observed; retain categorical coin-outflow block"
+            "unsafe coin-to-rival transfer observed or held; categorical coin-outflow policy applies"
             if accepted_coin_outflow or material_counterparty_growth
+            or any(item["requested_coin_outflow"] for item in held_trade_evidence)
             else "material rival regime change confirmed from leaderboard deltas"
             if rival_changes
             else "observed offers were contained by the promoted trade and reserve gates"
         ),
-        "settled": bool(decisions or rival_changes),
+        "settled": bool(decisions or rival_changes or held_trade_evidence),
     }
 
 
@@ -148,7 +180,10 @@ def main() -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["settled"] else 2
+    # An empty replay is a valid measurement with an inconclusive adjudication,
+    # not an infrastructure failure. The trusted parent decides whether the
+    # admitted evidence covers the active question generation.
+    return 0
 
 
 if __name__ == "__main__":

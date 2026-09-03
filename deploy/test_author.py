@@ -22,13 +22,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "experiments"))
 
-from farm import canary, compatibility, control, evaluation, llm, rules, tokens, vcs, workorders  # noqa: E402
+from farm import canary, compatibility, control, evaluation, gates, llm, rules, tokens, vcs, workorders  # noqa: E402
 
 import author_agent  # noqa: E402
 import research_agent  # noqa: E402
@@ -88,6 +89,7 @@ required_tcb = {
     "farm/policy.py", "farm/probe_guard.py", "farm/probes.py", "farm/sandbox.py",
     "farm/staged_verify.py", "monitor.py", "experiments/__init__.py",
     "experiments/activity_probe.py", "experiments/author_agent.py",
+    "experiments/crop_score_probe.py", "experiments/crop_timer_probe.py",
     "experiments/dual_cap_audit.py", "experiments/endgame.py", "experiments/expand.py",
     "experiments/registry.py", "deploy/prepare_activation.py", "deploy/release.sh",
     "deploy/run_sandboxed.py",
@@ -413,6 +415,25 @@ with tempfile.TemporaryDirectory(prefix="activation-guard-test-") as activation_
           activation.returncode == 0 and canary_path.is_file()
           and not (activation_project / "state" / "state" / "canary.json").exists(),
           "rc=%s stdout=%s stderr=%s" % (activation.returncode, activation.stdout, activation.stderr))
+    (activation_project / "state" / "workorders.ndjson").write_text(json.dumps({
+        "id": "lease-test", "status": "claimed", "claim_token": "actual-token",
+    }) + "\n")
+    lease_env = dict(os.environ)
+    lease_env.update({
+        "FARM_WORKORDER_ID": "lease-test",
+        "FARM_WORKORDER_CLAIM_TOKEN_SHA256": "0" * 64,
+    })
+    lost_lease = subprocess.run(
+        [
+            sys.executable, str(pathlib.Path(ROOT) / "deploy" / "prepare_activation.py"),
+            str(activation_target), str(activation_project), "rev-lost-lease", "rev-old",
+            ROOT, str(pathlib.Path(ROOT) / "farm" / "gates.py"), "0",
+        ],
+        env=lease_env, capture_output=True, text=True, timeout=30,
+    )
+    check("activation refuses a lost work-order lease before pointer exposure",
+          lost_lease.returncode != 0 and "work-order lease" in lost_lease.stderr,
+          "rc=%s stderr=%s" % (lost_lease.returncode, lost_lease.stderr))
     (activation_project / "state" / "history.ndjson").unlink()
     missing_history = subprocess.run(
         [
@@ -589,6 +610,7 @@ saved_gates = author_agent.run_gates
 saved_commit_change = author_agent.commit_change
 saved_publish = author_agent.publish
 saved_resolve = workorders.resolve
+saved_renew_claim = author_agent._renew_claim
 saved_log = author_agent.log
 saved_ledger_record = author_agent.ledger.record
 resolved = []
@@ -610,12 +632,14 @@ with tempfile.TemporaryDirectory(prefix="author-remote-fail-") as failroot:
         author_agent.commit_change = _commit_refused
         author_agent.publish = lambda *a, **k: publish_calls.append(True) or {"published": True}
         workorders.resolve = lambda *a, **k: resolved.append((a, k)) or {}
+        author_agent._renew_claim = lambda order, queue: dict(order, claim_token="fixture-lease")
         author_agent.log = lambda *a, **k: None
         author_agent.ledger.record = lambda *a, **k: None
         rc = author_agent.author_pass(
             {"id": "push-fail", "severity": "shape", "kind": "repair",
              "files": ["farm/parse.py"]},
-            failroot, "unused-queue", {}, {"vcs": {"base_sha": base_sha}},
+            failroot, os.path.join(failroot, "workorders.ndjson"), {},
+            {"vcs": {"base_sha": base_sha}},
         )
     finally:
         author_agent.mechanical_patch = saved_mechanical
@@ -623,6 +647,7 @@ with tempfile.TemporaryDirectory(prefix="author-remote-fail-") as failroot:
         author_agent.commit_change = saved_commit_change
         author_agent.publish = saved_publish
         workorders.resolve = saved_resolve
+        author_agent._renew_claim = saved_renew_claim
         author_agent.log = saved_log
         author_agent.ledger.record = saved_ledger_record
 
@@ -785,7 +810,7 @@ stalled_hist = os.path.join(can, "stalled-canary.ndjson")
 stalled_base = [
     {"run": n, "animals": 100, "interval_min": 5.0,
      "produce_per_min": 0.0, "collected": 0, "transport_errors_core": 0}
-    for n in range(1, 4)
+    for n in range(1, 8)
 ]
 write_runs(stalled_base)
 stalled_arm = canary.arm(
@@ -795,12 +820,12 @@ stalled_arm = canary.arm(
 )
 check("arming records a pre-existing authoritative score stall",
       stalled_arm.get("baseline_stalled") is True
-      and stalled_arm.get("baseline_stall_runs") == [1, 2, 3],
+      and stalled_arm.get("baseline_stall_runs") == list(range(1, 8)),
       str(stalled_arm))
 stalled_candidate = [
     {"run": n, "animals": 100, "interval_min": 5.0,
      "produce_per_min": 0.0, "collected": 0, "transport_errors_core": 0}
-    for n in range(4, 7)
+    for n in range(8, 11)
 ]
 write_runs(stalled_base + stalled_candidate)
 stalled_verdict = canary.evaluate(stalled_store, runs)
@@ -932,6 +957,117 @@ check("the regression order carries candidate evidence and complete changed file
       and ((queued_row.get("detail") or {}).get("verdict") or {}).get("status")
           == canary.REGRESSED,
       str(queued_row))
+
+with tempfile.TemporaryDirectory() as verified_root:
+    verified_path = pathlib.Path(verified_root)
+    successor = verified_path / "releases" / "rev-good"
+    successor.mkdir(parents=True)
+    (verified_path / "release").symlink_to(successor)
+    verified_store = str(verified_path / "canary.json")
+    verified_queue = str(verified_path / "workorders.ndjson")
+    with open(verified_store, "w", encoding="utf-8") as handle:
+        json.dump({
+            "status": canary.HEALTHY,
+            "revision": "rev-good",
+            "commit": "b" * 40,
+            "resolved_ts": "2099-01-01T00:00:00Z",
+            "efficacy": {"accepted": True},
+        }, handle)
+    workorders.submit(
+        {
+            "id": "canary-regression-old", "kind": "canary_regression",
+            "severity": "breaking", "summary": "old regression",
+            "detail": {"revision": "rev-bad", "commit": "a" * 40},
+        },
+        source="release_canary", intent="repair old regression", path=verified_queue,
+        provenance={"rejected_revision": "rev-bad", "rejected_commit": "a" * 40},
+    )
+    certificate = {
+        "revision": "rev-good", "matrix_fingerprint": gates.fingerprint(),
+        "observed": gates.names(), "complete": True, "passed": True,
+        "failed": [], "waived": [],
+    }
+    refused_reconcile = canary.reconcile_regression_orders(
+        verified_store, verified_root, verified_queue,
+        gate_record=dict(certificate, passed=False), ancestry=lambda a, b: True,
+    )
+    reconciled_repair = canary.reconcile_regression_orders(
+        verified_store, verified_root, verified_queue,
+        gate_record=certificate, ancestry=lambda a, b: a == "a" * 40 and b == "b" * 40,
+    )
+    repeated_reconcile = canary.reconcile_regression_orders(
+        verified_store, verified_root, verified_queue,
+        gate_record=certificate, ancestry=lambda a, b: True,
+    )
+    verified_order = workorders.current(verified_queue)["canary-regression-old"]
+    check("unproven successor cannot clear a canary repair",
+          not refused_reconcile, str(refused_reconcile))
+    check("a complete healthy descendant supersedes its stale canary repair",
+          len(reconciled_repair) == 1
+          and verified_order.get("status") == workorders.SUPERSEDED
+          and verified_order.get("superseded_by_release") == "rev-good",
+          str(verified_order))
+    check("verified canary repair reconciliation is idempotent",
+          not repeated_reconcile, str(repeated_reconcile))
+
+with tempfile.TemporaryDirectory() as queue_race_root:
+    race_queue = str(pathlib.Path(queue_race_root) / "workorders.ndjson")
+    race_failures = []
+    for index in range(20):
+        order_id = "race-%d" % index
+        submitted = workorders.submit(
+            {"id": order_id, "kind": "repair", "severity": "breaking", "summary": "race"},
+            source="fixture", intent="race", path=race_queue,
+        )
+        barrier = threading.Barrier(3)
+        outcomes = {}
+
+        def claim_race():
+            barrier.wait()
+            outcomes["claim"] = workorders.claim(order_id, "author", path=race_queue)
+
+        def resolve_race():
+            barrier.wait()
+            outcomes["resolve"] = workorders.resolve(
+                order_id, workorders.SUPERSEDED, path=race_queue,
+                expected_status=workorders.OPEN, expected_ts=submitted.get("ts"),
+            )
+
+        threads = [threading.Thread(target=claim_race), threading.Thread(target=resolve_race)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        if outcomes.get("claim") and outcomes.get("resolve"):
+            race_failures.append(order_id)
+    check("work-order claim and reconciliation compare-and-set atomically",
+          not race_failures, str(race_failures))
+    retry_id = "retry-after-failure"
+    workorders.submit(
+        {"id": retry_id, "kind": "repair", "severity": "breaking", "summary": "retry"},
+        source="fixture", intent="retry", path=race_queue,
+    )
+    first_claim = workorders.claim(retry_id, "author", path=race_queue)
+    workorders.resolve(
+        retry_id, workorders.FAILED, note="transient",
+        path=race_queue, expected_status=workorders.CLAIMED,
+        expected_claim_token=first_claim.get("claim_token"),
+    )
+    retryable = {row["id"] for row in workorders.open_orders(race_queue)}
+    second_claim = workorders.claim(retry_id, "author", path=race_queue)
+    check("a transient failed order remains retryable through the bounded attempt limit",
+          retry_id in retryable and second_claim is not None
+          and second_claim.get("attempts") == 2, str(second_claim))
+    check("claimed work-order provenance cannot be rewritten without its lease",
+          workorders.attach_provenance(retry_id, {"forged": True}, race_queue) is None)
+    workorders.resolve(
+        retry_id, workorders.PUBLISHED, path=race_queue,
+        expected_status=workorders.CLAIMED,
+        expected_claim_token=second_claim.get("claim_token"),
+    )
+    check("terminal work-order provenance is immutable",
+          workorders.attach_provenance(retry_id, {"forged": True}, race_queue) is None)
 
 # Collection changed from a scalar to a per-produce mapping. A transport retry on
 # a productive run is not a hard failure, while an all-zero mapping still is.

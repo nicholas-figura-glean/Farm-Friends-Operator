@@ -74,10 +74,23 @@ def main() -> int:
         ),
         "every autonomous probe executable is inside the trusted boundary",
     )
+    suite.check(
+        all(probes._command(item)[1] == "-I" for item in registry.values() if item.get("autonomous")),
+        "autonomous Python cannot import-shadow through an editable script directory",
+    )
     suite.raises(
         probe_guard.AuthorizationError,
         lambda: probe_guard.validate_spec("read", dict(spec(), autonomous=True)),
         "an unpinned registry edit cannot become autonomous",
+    )
+    widened_scope = dict(
+        registry["activity_replay"],
+        question_classes=list(registry["activity_replay"].get("question_classes") or []) + ["policy_drift"],
+    )
+    suite.raises(
+        probe_guard.AuthorizationError,
+        lambda: probe_guard.validate_spec("activity_replay", widened_scope),
+        "editable question scope cannot widen a pinned autonomous probe",
     )
     adjudicating = dict(registry["activity_replay"], hypothesis_id="hyp-untrusted")
     suite.raises(

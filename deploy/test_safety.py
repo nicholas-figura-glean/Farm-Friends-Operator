@@ -16,7 +16,7 @@ sys.path.insert(0, str(PROJECT))
 
 from farm import (  # noqa: E402
     analysis, canary, claims, compaction, control, evaluation, policy, probes,
-    provenance, questions, workorders,
+    provenance, questions, sandbox, workorders,
 )
 
 
@@ -151,8 +151,8 @@ def main() -> int:
                 "primary_metric": "produce per animal per minute",
                 "expected_improvement": 0.02,
             }
-            first = provenance.register_hypothesis(spec, ["history#runs=1-20"], "pol-a", ["q-1"])
-            duplicate = provenance.register_hypothesis(spec, ["history#runs=1-20"], "pol-a", ["q-1"])
+            first = provenance.register_hypothesis(spec, ["history#runs=1-20"], "pol-a")
+            duplicate = provenance.register_hypothesis(spec, ["history#runs=1-20"], "pol-a")
             suite.check(first.get("accepted") and first.get("id", "").startswith("hyp-"),
                         "hypothesis is pre-registered by semantic identity", first)
             suite.check(not duplicate.get("accepted") and duplicate.get("duplicate"),
@@ -204,6 +204,61 @@ def main() -> int:
             suite.check(any("overlap" in item for item in
                             provenance.validate_promotion_contract(overlapping, "pol-b", "pol-a", [])),
                         "discovery rows cannot validate their own hypothesis")
+
+            generation_question = questions.open_or_update(
+                "model_drift", "MODEL DRIFT: generation-fenced promotion",
+                item={"run": 60}, subject="generation-fence",
+            )["question"]
+            generation_spec = dict(
+                spec,
+                hypothesis="A generation-fenced candidate improves output.",
+            )
+            generation_registration = provenance.register_hypothesis(
+                generation_spec,
+                ["history#runs=51-60"],
+                "pol-a",
+                [generation_question["id"]],
+                {generation_question["id"]: generation_question["generation"]},
+                {generation_question["id"]: generation_question["last_seen_run"]},
+            )
+            generation_validation = ["experiment#cohort=61-70"]
+            provenance.record_result(
+                generation_registration["id"], "supported", generation_validation,
+                "holdout", {"effect": 0.03},
+            )
+            generation_contract = {
+                "hypothesis_id": generation_registration["id"],
+                "null_hypothesis": generation_spec["null_hypothesis"],
+                "falsifier": generation_spec["falsifier"],
+                "primary_metric": generation_spec["primary_metric"],
+                "evidence_class": "holdout",
+                "expected_improvement": generation_spec["expected_improvement"],
+                "discovery_evidence": ["history#runs=51-60"],
+                "validation_evidence": generation_validation,
+                "question_generations": {generation_question["id"]: 1},
+            }
+            suite.check(
+                not provenance.validate_promotion_contract(
+                    generation_contract, "pol-generation", "pol-a", []
+                ),
+                "current generation-bound result may authorize its matching contract",
+            )
+            questions.set_status(
+                generation_question["id"], "answered", "generation one result",
+                ["experiment#cohort=61-70"], 60,
+                expected_generation=1, expected_status="open", evidence_cutoff_run=60,
+            )
+            questions.open_or_update(
+                "model_drift", "MODEL DRIFT: generation-fenced promotion recurred",
+                item={"run": 61}, subject="generation-fence",
+            )
+            suite.check(
+                any("generation advanced" in error for error in
+                    provenance.validate_promotion_contract(
+                        generation_contract, "pol-generation", "pol-a", []
+                    )),
+                "a reopened question invalidates its older policy-promotion result",
+            )
             policy_events = [
                 {"event": "promoted", "policy_id": "pol-a"},
                 {"event": "promoted", "policy_id": "pol-b"},
@@ -245,11 +300,92 @@ def main() -> int:
                 "the rival probe carries matching lineage and routes live threat questions",
                 peek_spec,
             )
+            history_path = Path(tmp) / "history.ndjson"
+            history_path.write_text(
+                json.dumps({"run": 1, "rivals": {}, "rival_herds": {}, "rival_coins": {}}) + "\n",
+                encoding="utf-8",
+            )
+            forged_activity = {
+                "schema_version": 1, "settled": True, "runs": [1, 999999],
+                "trade_decision_runs": [999999], "rival_change_runs": [],
+                "decisions_observed": 1, "material_rival_changes": [],
+            }
+            suite.raises(
+                sandbox.ResultValidationError,
+                lambda: probes._trusted_adjudication(
+                    "activity_replay", Path(tmp), [{
+                        "path": "activity_probe.json", "kind": "json", "value": forged_activity,
+                    }],
+                ),
+                "worker-supplied status and future run ids cannot forge adjudication",
+            )
+            trade_question = questions.open_or_update(
+                "activity_novelty_trade", "NOVEL ACTIVITY [trade]: fixture",
+                item={"run": 5}, subject="trade-fixture",
+            )["question"]
+            rival_question = questions.open_or_update(
+                "activity_novelty_rival", "NOVEL ACTIVITY [rival]: Bob changed",
+                item={"run": 5}, subject="bob",
+            )["question"]
+            unrelated_rival = questions.open_or_update(
+                "activity_novelty_rival", "NOVEL ACTIVITY [rival]: Alice changed",
+                item={"run": 5}, subject="alice",
+            )["question"]
+            for question in (trade_question, rival_question, unrelated_rival):
+                questions.set_status(
+                    question["id"], "probing", run=5, probe_id="activity_replay",
+                    expected_generation=question["generation"], expected_status="open",
+                )
+            probes._finish_questions(
+                [trade_question["id"], rival_question["id"], unrelated_rival["id"]], "activity_replay", 5,
+                {
+                    "status": "passed", "ts": "2026-08-27T00:00:00Z",
+                    "adjudication": {
+                        "settled": True, "status": "supported",
+                        "question_classes": ["activity_novelty_trade", "activity_novelty_rival"],
+                        "coverage": {
+                            "activity_novelty_trade": {
+                                "settled": False, "status": "inconclusive",
+                                "evidence_cutoff_run": None,
+                            },
+                            "activity_novelty_rival": {
+                                "settled": True, "status": "supported",
+                                "evidence_cutoff_run": 5, "subjects": ["bob"],
+                            },
+                        },
+                    },
+                    "question_bindings": {
+                        trade_question["id"]: {"generation": trade_question["generation"]},
+                        rival_question["id"]: {"generation": rival_question["generation"]},
+                        unrelated_rival["id"]: {"generation": unrelated_rival["generation"]},
+                    },
+                },
+            )
+            scoped_questions = {row["id"]: row for row in questions.load_all()}
+            suite.check(
+                scoped_questions[trade_question["id"]]["status"] == "open"
+                and scoped_questions[rival_question["id"]]["status"] == "answered"
+                and scoped_questions[unrelated_rival["id"]]["status"] == "open",
+                "activity evidence closes only its matching class and subject",
+                scoped_questions,
+            )
             saved_registry, saved_command = probes._registry, probes._command
             script = Path(tmp) / "linked_probe.py"
+            opened = questions.open_or_update(
+                "model_drift", "MODEL DRIFT: linked fixture", item={"run": 79},
+                subject="linked fixture",
+            )["question"]
+            linked_hypothesis = dict(
+                spec,
+                hypothesis="A separately registered fixture measurement improves output.",
+            )
+            linked_id = provenance.hypothesis_id(linked_hypothesis)
             spec_probe = {
-                "hypothesis_id": reopened["id"],
-                "hypothesis": spec["hypothesis"],
+                "hypothesis_id": linked_id,
+                "hypothesis": linked_hypothesis["hypothesis"],
+                "null_hypothesis": linked_hypothesis["null_hypothesis"],
+                "falsifier": linked_hypothesis["falsifier"],
+                "primary_metric": linked_hypothesis["primary_metric"],
                 "evidence_class": "holdout",
                 "command": ["unused"],
                 "read_only": True,
@@ -264,7 +400,9 @@ def main() -> int:
                 probes._registry = lambda: {"linked": dict(spec_probe)}
                 probes._command = lambda unused: [sys.executable, str(script)]
                 script.write_text("print('no result')\n", encoding="utf-8")
-                missing_result = probes.run_probe("linked", explicit=True, run=80)
+                missing_result = probes.run_probe(
+                    "linked", explicit=True, run=80, question_ids=[opened["id"]]
+                )
                 suite.check(missing_result["status"] == "evidence_missing",
                             "hypothesis-linked probe cannot pass without adjudicating evidence",
                             missing_result)
@@ -279,31 +417,31 @@ def main() -> int:
                     "['worker-supplied-ref-is-not-authoritative'], os.environ['FARM_EVIDENCE_CLASS'], {'effect': 0.04})\n",
                     encoding="utf-8",
                 )
-                opened = questions.open_or_update(
-                    "model_drift", "MODEL DRIFT: linked fixture", item={"run": 89},
-                    subject="linked fixture",
-                )["question"]
                 durable_result = probes.run_probe(
                     "linked", explicit=True, run=90, question_ids=[opened["id"]],
                 )
-                suite.check(durable_result["status"] == "passed",
-                            "probe passes after writing a durable hypothesis result", durable_result)
-                admitted_result = provenance.latest_result(reopened["id"]) or {}
+                suite.check(
+                    durable_result["status"] == "awaiting_adjudication",
+                    "worker-proposed causal status cannot become a trusted result",
+                    durable_result,
+                )
+                candidate_result = durable_result.get("candidate_adjudication") or {}
                 durable_hash = hashlib.sha256(
                     (Path(tmp) / "fixture_result.json").read_bytes()
                 ).hexdigest()
                 suite.check(
-                    admitted_result.get("validation_evidence")
+                    candidate_result.get("validation_evidence")
                     == ["state/fixture_result.json#sha256=" + durable_hash]
-                    and "worker-supplied-ref-is-not-authoritative" not in str(admitted_result),
-                    "trusted parent hashes the exact admitted evidence bytes",
-                    admitted_result,
+                    and candidate_result.get("trusted") is False
+                    and provenance.latest_result(linked_id) is None,
+                    "parent hashes measurement bytes without granting promotion authority",
+                    candidate_result,
                 )
                 settled = next(row for row in questions.load_all() if row["id"] == opened["id"])
                 suite.check(
-                    settled["status"] == "answered"
-                    and settled.get("probe_result_status") == "supported",
-                    "a durable probe result closes its bound question", settled,
+                    settled["status"] == "open"
+                    and settled.get("probe_result_status") == "awaiting_adjudication",
+                    "unadjudicated hypothesis evidence leaves its question open", settled,
                 )
 
                 unrelated = Path(tmp) / "tool_calls.ndjson"
@@ -325,12 +463,16 @@ def main() -> int:
                     "unlinked", explicit=True, run=92, question_ids=[stale["id"]],
                 )
                 suite.check(
-                    replay["status"] == "passed" and replay["calls"] == 0,
+                    replay["status"] == "evidence_missing" and replay["calls"] == 0,
                     "unrelated global telemetry cannot create a probe budget violation", replay,
                 )
                 stale_after = next(row for row in questions.load_all() if row["id"] == stale["id"])
-                suite.check(stale_after["status"] == "answered",
-                            "a successful replay closes an unlinked strategy question", stale_after)
+                suite.check(
+                    stale_after["status"] == "open"
+                    and stale_after.get("probe_result_status") == "evidence_missing",
+                    "process exit without admitted adjudication cannot close a question",
+                    stale_after,
+                )
 
                 policy_question = questions.open_or_update(
                     "policy_drift", "POLICY DRIFT: fixture", item={"run": 93},
@@ -349,9 +491,12 @@ def main() -> int:
                     unresolved = next(
                         row for row in questions.load_all() if row["id"] == policy_question["id"]
                     )
-                    suite.check(unresolved["status"] == "open"
-                                and unresolved.get("probe_result_status") == "incompatible",
-                                "a successful probe cannot hide unresolved policy drift", unresolved)
+                    suite.check(
+                        unresolved["status"] == "open"
+                        and unresolved.get("probe_result_status") is None,
+                        "an unbound completion cannot alter unresolved policy drift",
+                        unresolved,
+                    )
 
                     policy.runtime_context = lambda registry=None: {
                         "compatible": True, "errors": [], "policy_id": "pol-restored",
@@ -363,9 +508,12 @@ def main() -> int:
                     resolved = next(
                         row for row in questions.load_all() if row["id"] == policy_question["id"]
                     )
-                    suite.check(resolved["status"] == "answered"
-                                and resolved.get("probe_result_status") == "compatible",
-                                "policy drift closes only after the promoted fingerprint is restored", resolved)
+                    suite.check(
+                        resolved["status"] == "open"
+                        and resolved.get("probe_result_status") is None,
+                        "policy compatibility alone cannot replace admitted deciding evidence",
+                        resolved,
+                    )
                 finally:
                     claims.refresh, policy.runtime_context = saved_refresh, saved_runtime
             finally:
@@ -386,7 +534,8 @@ def main() -> int:
                 }
                 probes.run_probe = lambda probe_id, **kwargs: called.append(probe_id) or {"status": "passed"}
                 probes.maybe_run(
-                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm"}], 101,
+                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm",
+                      "status": "open"}], 101,
                 )
             finally:
                 probes._recent_events, probes.run_probe, probes._registry = (
@@ -394,6 +543,144 @@ def main() -> int:
                 )
             suite.check(called == ["scheduled"],
                         "a lock-contention skip does not consume probe cooldown", called)
+
+            saved_recent, saved_run_probe, saved_registry = (
+                probes._recent_events, probes.run_probe, probes._registry,
+            )
+            identity = probes._executor_identity()
+            called = []
+            try:
+                probes._recent_events = lambda: [{
+                    "run": 101, "probe_id": "alpha", "status": "failed",
+                    "executor_identity": identity, "budget": {"calls": 0},
+                }]
+                probes._registry = lambda: {
+                    name: {
+                        "read_only": True, "autonomous": True,
+                        "question_classes": ["strategy_stale"],
+                        "subject_patterns": ["farm"], "budget": {"calls": 0},
+                    }
+                    for name in ("alpha", "beta")
+                }
+                probes.run_probe = lambda probe_id, **kwargs: called.append(probe_id) or {"status": "passed"}
+                probes.maybe_run(
+                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm",
+                      "status": "open", "priority": "high", "generation_opened_run": 1}],
+                    101,
+                )
+            finally:
+                probes._recent_events, probes.run_probe, probes._registry = (
+                    saved_recent, saved_run_probe, saved_registry,
+                )
+            suite.check(
+                called == ["beta"],
+                "a same-run failed probe backs off while another eligible probe progresses",
+                called,
+            )
+
+            saved_recent, saved_run_probe, saved_registry = (
+                probes._recent_events, probes.run_probe, probes._registry,
+            )
+            called = []
+            remote_spec = {
+                "read_only": True, "autonomous": True,
+                "question_classes": ["strategy_stale"],
+                "subject_patterns": ["farm"], "budget": {"calls": 1},
+            }
+            try:
+                probes._recent_events = lambda: [{
+                    "run": 100, "probe_id": "local", "status": "failed",
+                    "executor_identity": identity, "budget": {"calls": 0},
+                }]
+                probes._registry = lambda: {"remote": remote_spec}
+                probes.run_probe = lambda probe_id, **kwargs: called.append(probe_id) or {"status": "passed"}
+                probes.maybe_run(
+                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm",
+                      "status": "open"}], 101,
+                )
+                probes._recent_events = lambda: [{
+                    "run": 100, "probe_id": "prior-remote", "status": "failed",
+                    "executor_identity": identity, "budget": {"calls": 1},
+                }]
+                probes.maybe_run(
+                    [{"id": "q-fixture", "class": "strategy_stale", "subject": "farm",
+                      "status": "open"}], 101,
+                )
+            finally:
+                probes._recent_events, probes.run_probe, probes._registry = (
+                    saved_recent, saved_run_probe, saved_registry,
+                )
+            suite.check(
+                called == ["remote"],
+                "zero-call failures do not consume remote cadence but remote attempts do",
+                called,
+            )
+
+            from experiments import crop_timer_probe
+            crop_root = Path(tmp) / "crop-zero-yield"
+            crop_root.mkdir()
+            saved_crop_paths = (
+                crop_timer_probe.PROBE, crop_timer_probe.TOOL_CALLS,
+                crop_timer_probe.EXPERIMENTS,
+            )
+            try:
+                crop_timer_probe.PROBE = crop_root / "dual_cap_probe.json"
+                crop_timer_probe.TOOL_CALLS = crop_root / "tool_calls.ndjson"
+                crop_timer_probe.EXPERIMENTS = crop_root / "experiments.ndjson"
+                crop_timer_probe.EXPERIMENTS.touch()
+                crop_timer_probe.PROBE.write_text(json.dumps({
+                    "started_ts": "2026-08-27T00:00:00Z", "baseline_run": 1,
+                    "budget": {"calls": 0, "coins": 0},
+                    "after": {"plot_counts": {"wheat": 1, "corn": 1, "pumpkin": 1}},
+                }))
+                crop_timer_probe.TOOL_CALLS.write_text("".join(
+                    json.dumps({
+                        "event": "end", "tool": "harvest", "run": index + 2,
+                        "ts": "2026-08-27T00:%02d:00Z" % minute,
+                        "result": "Harvested plot 0 %s" % crop,
+                    }) + "\n"
+                    for index, (crop, minute) in enumerate(
+                        (("wheat", 15), ("corn", 20), ("pumpkin", 30))
+                    )
+                ))
+                zero_yield = crop_timer_probe.analyze()
+            finally:
+                (crop_timer_probe.PROBE, crop_timer_probe.TOOL_CALLS,
+                 crop_timer_probe.EXPERIMENTS) = saved_crop_paths
+            suite.check(
+                zero_yield.get("status") == "complete"
+                and zero_yield.get("all_timers_supported") is False,
+                "zero-yield harvests cannot support the crop timer claim",
+                zero_yield,
+            )
+            from experiments import endgame
+            capped_race = endgame.analyze({
+                "run": 10, "rank": 2, "leader": "Neill", "league": "Gold I",
+                "animals": 100, "animal_capacity": 100, "produce": 1_000,
+                "coins": 1_000_000, "feed": 1_000_000,
+                "rivals": {"John": 10, "Neill": 1_000_000},
+                "rival_herds": {"John": 1, "Neill": 100_000},
+                "rival_leagues": {"John": "Gold I", "Neill": "Gold I"},
+                "projection": {"our_growth_per_min": 0.0, "rival_growth_per_min": 1.0},
+            })
+            suite.check(
+                capped_race.get("rival") == "Neill"
+                and max(item["target"] for item in capped_race.get("options") or []) == 100
+                and capped_race.get("safe_path") is False,
+                "endgame replay targets the actual leader and cannot simulate through capacity",
+                capped_race,
+            )
+            missing_rival = endgame.analyze({
+                "run": 11, "rank": 2, "leader": "Missing", "animals": 100,
+                "animal_capacity": 100, "produce": 1_000, "coins": 1_000_000,
+                "feed": 1_000_000, "rivals": {}, "rival_herds": {}, "projection": {},
+            })
+            suite.check(
+                missing_rival.get("objective_rival_observed") is False
+                and missing_rival.get("safe_path") is False,
+                "missing objective-rival evidence leaves endgame adjudication inconclusive",
+                missing_rival,
+            )
 
             queue = str(Path(tmp) / "workorders.ndjson")
             workorders.submit(

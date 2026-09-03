@@ -181,6 +181,8 @@ TRUSTED_PATHS = frozenset(
         "experiments/author_agent.py",
         "experiments/capability_policies.py",
         "experiments/contract_watch.py",
+        "experiments/crop_score_probe.py",
+        "experiments/crop_timer_probe.py",
         "experiments/dashboard_agent.py",
         "experiments/dual_cap_audit.py",
         "experiments/endgame.py",

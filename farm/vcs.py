@@ -106,6 +106,21 @@ def head() -> Optional[str]:
         return None
 
 
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    """Prove two named commits exist and preserve release ancestry."""
+    if not ancestor or not descendant or not available():
+        return False
+    try:
+        for value in (ancestor, descendant):
+            if _run(["cat-file", "-e", "%s^{commit}" % value], check=False).returncode != 0:
+                return False
+        return _run(
+            ["merge-base", "--is-ancestor", ancestor, descendant], check=False
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def short(sha: Optional[str]) -> str:
     return (sha or "")[:12]
 

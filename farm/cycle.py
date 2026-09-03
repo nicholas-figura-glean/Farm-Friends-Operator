@@ -1647,7 +1647,13 @@ class Cycle(object):
             interval = (this_collect - prev_collect).total_seconds() / 60.0
         per_chicken_min = None
         if interval and interval > 0 and chickens:
+            # Retained for historical/dashboard compatibility only. Mixed herds
+            # make this denominator invalid because `units` includes every kind.
             per_chicken_min = round(units / float(chickens) / interval, 4)
+        collection_animals = int(state.animal_count or 0)
+        per_animal_min = None
+        if interval and interval > 0 and collection_animals:
+            per_animal_min = round(units / float(collection_animals) / interval, 4)
 
         zero_streak = 0
         if units == 0:
@@ -1674,6 +1680,8 @@ class Cycle(object):
             "ready_units": final.ready_units,
             "interval_min": round(interval, 2) if interval else None,
             "units_per_chicken_min": per_chicken_min,
+            "units_per_animal_min": per_animal_min,
+            "collection_animals": collection_animals,
             "zero_streak": zero_streak,
             "revenue": self.actions["revenue"],
             "feed_share": (

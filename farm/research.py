@@ -58,22 +58,51 @@ def _growth_decisions(
     marginal: float,
     low: float = rules.GROWTH_SMALLER_LOW,
     high: float = rules.GROWTH_SMALLER_HIGH,
+    prepared_samples: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[int, bool]:
-    samples = analysis.rate_samples(rows, healthy_only=True)
+    """Replay growth decisions with one monotonic sample-index pass."""
+    samples = list(
+        prepared_samples
+        if prepared_samples is not None
+        else analysis.rate_samples(rows, healthy_only=True)
+    )
+    sample_rows = sorted(
+        [
+            (int(sample["run"]), int(sample["herd"]), float(sample["rate"]))
+            for sample in samples
+            if isinstance(sample.get("run"), int)
+            and isinstance(sample.get("herd"), (int, float))
+            and isinstance(sample.get("rate"), (int, float))
+        ],
+        key=lambda item: item[0],
+    )
+    valid_runs = [row.get("run") for row in rows if isinstance(row.get("run"), int)]
+    monotonic = valid_runs == sorted(valid_runs)
     model: Dict[str, Any] = {}
     decisions: Dict[int, bool] = {}
+    available: List[Tuple[int, float]] = []
+    cursor = 0
     for row in rows:
         run = row.get("run")
         herd = row.get("animals")
         if not isinstance(run, int) or not isinstance(herd, int):
             continue
-        available = [
-            (int(sample["herd"]), float(sample["rate"]))
-            for sample in samples
-            if isinstance(sample.get("run"), int) and sample["run"] <= run
-        ]
+        if monotonic:
+            while cursor < len(sample_rows) and sample_rows[cursor][0] <= run:
+                _, sample_herd, sample_rate = sample_rows[cursor]
+                available.append((sample_herd, sample_rate))
+                cursor += 1
+            current_samples = available
+        else:
+            # Fixtures and forensic callers may intentionally supply reordered
+            # rows. Preserve the exact historical semantics for that rare path.
+            current_samples = [
+                (sample_herd, sample_rate)
+                for sample_run, sample_herd, sample_rate in sample_rows
+                if sample_run <= run
+            ]
         verdict = rules.growth_verdict(
-            available,
+            current_samples,
             herd,
             model,
             min_marginal_gain=marginal,
@@ -138,12 +167,31 @@ def counterfactual_sweep(
 ) -> Dict[str, Any]:
     """Perturb decision constants over immutable history. No MCP import or call."""
     history = list(rows) if rows is not None else analysis.history_rows()
-    live_growth = _growth_decisions(history, rules.GROWTH_MIN_MARGINAL_GAIN)
+    prepared_samples = analysis.rate_samples(history, healthy_only=True)
+    decision_cache: Dict[Tuple[float, float, float], Dict[int, bool]] = {}
+
+    def growth_decisions(marginal: float, low: float, high: float) -> Dict[int, bool]:
+        key = (float(marginal), float(low), float(high))
+        if key not in decision_cache:
+            decision_cache[key] = _growth_decisions(
+                history,
+                marginal,
+                low,
+                high,
+                prepared_samples=prepared_samples,
+            )
+        return decision_cache[key]
+
+    live_growth = growth_decisions(
+        rules.GROWTH_MIN_MARGINAL_GAIN,
+        rules.GROWTH_SMALLER_LOW,
+        rules.GROWTH_SMALLER_HIGH,
+    )
     dimensions: List[Dict[str, Any]] = []
 
     growth_alternatives = []
     for value in (0.0, 0.02, 0.05, 0.10):
-        decisions = _growth_decisions(history, value)
+        decisions = growth_decisions(value, rules.GROWTH_SMALLER_LOW, rules.GROWTH_SMALLER_HIGH)
         changed = [run for run, answer in decisions.items() if live_growth.get(run) != answer]
         growth_alternatives.append({
             "value": value,
@@ -160,7 +208,7 @@ def counterfactual_sweep(
 
     window_alternatives = []
     for low, high in ((0.60, 0.85), (0.70, 0.90), (0.80, 0.95)):
-        decisions = _growth_decisions(history, rules.GROWTH_MIN_MARGINAL_GAIN, low, high)
+        decisions = growth_decisions(rules.GROWTH_MIN_MARGINAL_GAIN, low, high)
         changed = [run for run, answer in decisions.items() if live_growth.get(run) != answer]
         window_alternatives.append({
             "value": {"low": low, "high": high},

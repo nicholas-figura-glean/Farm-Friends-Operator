@@ -239,10 +239,23 @@ def _weighted_mean(
 
 
 def _baseline_stall_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The consecutive pre-arm rows proving score production was already stalled."""
+    """Burst-spanning pre-arm rows proving score production was already stalled."""
     eligible = [row for row in rows if not _exogenous_loss(row) and _rate(row) is not None]
-    recent = eligible[-rules.CANARY_MIN_RUNS :]
-    if len(recent) < rules.CANARY_MIN_RUNS:
+    selected: List[Dict[str, Any]] = []
+    represented_minutes = 0.0
+    for row in reversed(eligible):
+        selected.append(row)
+        represented_minutes += _sample_weight(row)
+        if (
+            len(selected) >= rules.CANARY_MIN_RUNS
+            and represented_minutes >= rules.SCORE_STALL_WINDOW_MINUTES
+        ):
+            break
+    recent = list(reversed(selected))
+    if (
+        len(recent) < rules.CANARY_MIN_RUNS
+        or represented_minutes < rules.SCORE_STALL_WINDOW_MINUTES
+    ):
         return []
     if all(
         float(_rate(row) or 0.0) < rules.produce_floor(int(row.get("animals") or 0))
@@ -994,6 +1007,86 @@ def _regression_order(
     return {"id": order_id, "created": submitted is not None, "status": current.get("status")}
 
 
+def reconcile_regression_orders(
+    store: str = STORE,
+    project: Optional[str] = None,
+    queue: Optional[str] = None,
+    gate_record: Optional[Dict[str, Any]] = None,
+    ancestry: Optional[Callable[[str, str], bool]] = None,
+) -> List[Dict[str, Any]]:
+    """Supersede rejected-release repairs only after a proven healthy successor."""
+    record = _read_json(store)
+    if (
+        record.get("status") != HEALTHY
+        or not record.get("resolved_ts")
+        or not (record.get("efficacy") or {}).get("accepted")
+    ):
+        return []
+    project = project or PROJECT
+    revision = str(record.get("revision") or "")
+    live = os.path.basename(os.path.realpath(os.path.join(project, "release")))
+    if not revision or live != revision:
+        return []
+
+    from . import gates, vcs
+    certificate = gate_record if gate_record is not None else gates.load(revision)
+    if not (
+        certificate.get("revision") == revision
+        and certificate.get("matrix_fingerprint") == gates.fingerprint()
+        and certificate.get("observed") == gates.names()
+        and certificate.get("complete") is True
+        and certificate.get("passed") is True
+        and not certificate.get("failed")
+        and not certificate.get("waived")
+    ):
+        return []
+    successor_commit = str(record.get("commit") or "")
+    if not successor_commit:
+        return []
+    proves_ancestry = ancestry or vcs.is_ancestor
+    queue = queue or os.path.join(os.path.dirname(store), os.path.basename(workorders.QUEUE))
+    resolved: List[Dict[str, Any]] = []
+    for order in workorders.current(queue).values():
+        if order.get("source") != "release_canary" or order.get("kind") != "canary_regression":
+            continue
+        if order.get("status") not in {workorders.OPEN, workorders.FAILED}:
+            continue
+        rejected_revision = str(
+            (order.get("provenance") or {}).get("rejected_revision")
+            or (order.get("detail") or {}).get("revision") or ""
+        )
+        rejected_commit = str(
+            (order.get("provenance") or {}).get("rejected_commit")
+            or (order.get("detail") or {}).get("commit") or ""
+        )
+        if not rejected_revision or rejected_revision == revision or not rejected_commit:
+            continue
+        if str(record.get("resolved_ts")) <= str(order.get("created_ts") or order.get("ts") or ""):
+            continue
+        if not proves_ancestry(rejected_commit, successor_commit):
+            continue
+        changed = workorders.resolve(
+            str(order.get("id")),
+            workorders.SUPERSEDED,
+            note=(
+                "healthy successor %s (%s) passed the complete unwaived matrix and accepted canary; "
+                "it descends from rejected %s (%s)"
+                % (revision, successor_commit[:12], rejected_revision, rejected_commit[:12])
+            ),
+            release=revision,
+            path=queue,
+            expected_status={workorders.OPEN, workorders.FAILED},
+            expected_ts=str(order.get("ts") or ""),
+            superseded_by_release=revision,
+            successor_commit=successor_commit,
+            rejected_revision=rejected_revision,
+            proof={"gate_fingerprint": certificate.get("matrix_fingerprint"), "efficacy": record.get("efficacy")},
+        )
+        if changed:
+            resolved.append(changed)
+    return resolved
+
+
 def resolve(
     verdict: Dict[str, Any],
     project: Optional[str] = None,
@@ -1067,6 +1160,12 @@ def resolve(
             )
         except Exception as exc:  # noqa: BLE001 - release verdict remains durable
             outcome["compaction_compatibility_error"] = str(exc)[:200]
+        try:
+            reconciled = reconcile_regression_orders(store=store, project=project)
+            if reconciled:
+                outcome["reconciled_regression_orders"] = [row.get("id") for row in reconciled]
+        except Exception as exc:  # noqa: BLE001 - healthy release remains authoritative
+            outcome["regression_reconciliation_error"] = str(exc)[:200]
     return outcome
 
 
