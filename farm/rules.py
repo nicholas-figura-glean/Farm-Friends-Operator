@@ -400,7 +400,8 @@ AUTHOR_MAX_COST_USD_PER_DAY = 5.00     # hard spend ceiling for authoring
 CANARY_MIN_RUNS = 3                    # direct structural/strategy proof floor
 CANARY_RATE_MIN_RUNS = 6               # score updates burst; three rows can contain only one burst
 CANARY_MAX_RUNS = 10                   # decide by here, or clear it and move on
-CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert
+CANARY_REGRESSION_TOLERANCE = 0.25     # >25% slower than baseline is a revert at the full window
+CANARY_EARLY_REGRESSION_TOLERANCE = 0.50  # before 10 runs, only a decisive half-rate loss reverts
 CANARY_BASELINE_RUNS = 20              # spans burst phases; six rows produced a false 42% baseline spike
 # A release that prevents completed runs cannot wait forever for run-count evidence.
 CANARY_STALL_SECONDS = 30 * 60

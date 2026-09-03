@@ -873,6 +873,15 @@ def evaluate(
         verdict["observed_per_animal"] = round(observed_pa, 6)
         verdict["threshold"] = floor
         if observed_pa < floor:
+            early_floor = baseline_pa * (1.0 - rules.CANARY_EARLY_REGRESSION_TOLERANCE)
+            verdict["early_threshold"] = early_floor
+            if len(usable) < rules.EFFICACY_MIN_RUNS and observed_pa >= early_floor:
+                verdict["reason"] = (
+                    "per-animal %.4f is below the final %.4f floor but above the decisive early %.4f floor; "
+                    "waiting for %d/%d burst-spanning runs"
+                    % (observed_pa, floor, early_floor, len(usable), rules.EFFICACY_MIN_RUNS)
+                )
+                return verdict
             verdict["status"] = REGRESSED
             verdict["reason"] = (
                 "per-animal produce %.4f vs baseline %.4f (floor %.4f) over %d run(s)"
@@ -890,6 +899,15 @@ def evaluate(
     threshold = baseline * (1.0 - rules.CANARY_REGRESSION_TOLERANCE)
     verdict["threshold"] = threshold
     if observed < threshold:
+        early_threshold = baseline * (1.0 - rules.CANARY_EARLY_REGRESSION_TOLERANCE)
+        verdict["early_threshold"] = early_threshold
+        if len(usable) < rules.EFFICACY_MIN_RUNS and observed >= early_threshold:
+            verdict["reason"] = (
+                "produce %.1f/min is below the final %.1f floor but above the decisive early %.1f floor; "
+                "waiting for %d/%d burst-spanning runs"
+                % (observed, threshold, early_threshold, len(usable), rules.EFFICACY_MIN_RUNS)
+            )
+            return verdict
         verdict["status"] = REGRESSED
         verdict["reason"] = "produce %.1f/min vs baseline %.1f/min (floor %.1f) over %d runs" % (
             observed, baseline, threshold, len(after),

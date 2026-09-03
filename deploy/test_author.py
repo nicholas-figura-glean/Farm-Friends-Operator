@@ -732,6 +732,22 @@ verdict = canary.evaluate(store, runs)
 check("a halved produce rate is a regression", verdict["status"] == canary.REGRESSED, str(verdict))
 check("the regression is quantified", "baseline" in verdict["reason"], str(verdict))
 
+# A burst-phase sample just below the 25% final floor is not decisive before the
+# full efficacy window. The threshold is unchanged at ten runs.
+write_runs(base + [{"run": n, "animals": 100, "interval_min": 5.0,
+                    "produce_per_min": 70.0, "collected": 10} for n in range(7, 14)])
+borderline_early = canary.evaluate(store, runs)
+check("borderline nonzero rate waits for the full burst window",
+      borderline_early["status"] == canary.WATCHING
+      and "decisive early" in borderline_early.get("reason", ""),
+      str(borderline_early))
+write_runs(base + [{"run": n, "animals": 100, "interval_min": 5.0,
+                    "produce_per_min": 70.0, "collected": 10} for n in range(7, 17)])
+borderline_final = canary.evaluate(store, runs)
+check("the unchanged 25% floor still rejects at the full window",
+      borderline_final["status"] == canary.REGRESSED,
+      str(borderline_final))
+
 # Ordinary variance inside the tolerance band must NOT revert.
 write_runs(base + [{"run": n, "produce_per_min": 85.0, "collected": 10} for n in range(7, 10)])
 verdict = canary.evaluate(store, runs)
